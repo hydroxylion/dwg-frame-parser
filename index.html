@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>图纸图框标准检测工具 v3 · 批量上传</title>
+    <!-- 引用外部样式 -->
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="container">
+    <h1>📐 图框标准检测 <small>v3 · 批量上传 + 筛选</small></h1>
+    <div class="subtitle">输入图纸幅面尺寸（宽 × 高）及图纸名称，或批量上传 DWG/DXF 文件（可多选）</div>
+
+    <div class="grid-2">
+        <!-- 左侧：手动输入 -->
+        <div class="card">
+            <div class="card-title">✏️ 手动输入 <span class="badge">宽 × 高</span></div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>宽 (mm)</label>
+                    <input type="number" id="manualWidth" placeholder="1189" min="1" step="1" />
+                </div>
+                <div class="form-group">
+                    <label>高 (mm)</label>
+                    <input type="number" id="manualHeight" placeholder="841" min="1" step="1" />
+                </div>
+            </div>
+            <div class="form-row" style="margin-top:8px;">
+                <div class="form-group form-group-name">
+                    <label>📄 图纸名称</label>
+                    <input type="text" id="manualName" placeholder="如：建筑-A0-01" style="min-width:150px;" />
+                </div>
+            </div>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:8px;">
+                <button class="btn btn-primary" id="btnCheckManual">🔍 判断</button>
+                <button class="btn btn-outline" id="btnClearManual">清空</button>
+            </div>
+            <div class="result-box" id="manualResult">
+                <div class="empty">请输入宽高后点击「判断」</div>
+            </div>
+            <div style="margin-top:14px;">
+                <div class="text-muted" style="margin-bottom:6px; font-weight:500;">快速示例：</div>
+                <div style="display:flex; flex-wrap:wrap; gap:6px;">
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="1189" data-h="841" data-name="A0标准">A0</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="841" data-h="594" data-name="A1标准">A1</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="594" data-h="420" data-name="A2标准">A2</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="420" data-h="297" data-name="A3标准">A3</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="297" data-h="210" data-name="A4标准">A4</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="1338" data-h="841" data-name="A0+1/8">A0+1/8</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="1051" data-h="594" data-name="A1+1/4">A1+1/4</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="891" data-h="420" data-name="A2+1/2">A2+1/2</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="630" data-h="297" data-name="A3+1/2">A3+1/2</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="841" data-h="891" data-name="特例841x891">特例</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="32753" data-h="23158" data-name="非标大图">非标加长</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="1189" data-h="42050" data-name="scale50测试">scale=50</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="5000" data-h="3000" data-name="完全非标测试">完全非标</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右侧：DWG 导入（批量） -->
+        <div class="card">
+            <div class="card-title">📁 批量导入 DWG/DXF <span class="badge" id="dwgStatus">需本地服务</span></div>
+            <div class="upload-zone" id="uploadZone">
+                <div class="icon">📄</div>
+                <div class="text">点击或拖拽上传多个 DWG/DXF 文件 或 文件夹</div>
+                <div class="hint" id="uploadHint">拖拽文件夹将自动递归遍历所有子目录</div>
+                <input type="file" id="fileInput" accept=".dwg,.DWG,.dxf,.DXF" multiple />
+            </div>
+            <!-- 批量状态 -->
+            <div class="batch-status" id="batchStatus">
+                <span>
+                    <span class="progress-text" id="batchProgress">准备处理...</span>
+                    <span class="file-name" id="batchCurrentFile"></span>
+                </span>
+                <button class="btn-stop" id="btnStopBatch">⏹ 停止</button>
+            </div>
+            <div class="upload-options">
+                <div class="option-group">
+                    <label>优先检测：</label>
+                    <select id="prioritySelect">
+                        <option value="polyline">闭合多段线</option>
+                        <option value="line_rect">直线矩形</option>
+                    </select>
+                </div>
+                <div class="option-group">
+                    <label>单位：</label>
+                    <select id="unitSelect">
+                        <option value="mm">毫米 (mm)</option>
+                        <option value="inch">英寸 (inch)</option>
+                    </select>
+                </div>
+                <div class="option-group">
+                    <label>检测模式：</label>
+                    <select id="modeSelect">
+                        <option value="smart">智能检测（推荐）</option>
+                        <option value="force_max">强制最大矩形</option>
+                    </select>
+                </div>
+            </div>
+            <div id="fileInfoContainer" style="display:none;">
+                <div class="file-info">
+                    <span class="name" id="fileName">已选 <span id="fileCount">0</span> 个文件</span>
+                    <span class="size" id="fileSize"></span>
+                    <button class="btn btn-outline" style="padding:4px 16px; font-size:13px;" id="btnRemoveFile">✕ 清空</button>
+                </div>
+            </div>
+            <div class="result-box" id="dwgResult">
+                <div class="empty">上传文件后自动批量解析</div>
+            </div>
+            <div id="dwgParseStatus" style="margin-top:10px; font-size:14px; color:#5e6f8d; min-height:22px;"></div>
+            <div style="margin-top:14px; font-size:13px; color:#7e92b0; background:#f4f8fe; padding:12px 16px; border-radius:12px; line-height:1.6;">
+                💡 <strong>提示：</strong> 可一次选择多个文件或拖拽整个文件夹，系统将自动递归遍历并解析所有 .dwg/.dxf 文件。点击「停止」按钮可在当前文件完成后停止。
+            </div>
+        </div>
+    </div>
+
+    <div class="legend">
+        <span style="font-weight:600; color:#0b1c33;">判断结果：</span>
+        <span class="legend-item"><span class="dot std"></span> 标准图纸</span>
+        <span class="legend-item"><span class="dot ext"></span> 非标加长</span>
+        <span class="legend-item"><span class="dot fallback"></span> 近似匹配</span>
+        <span class="legend-item"><span class="dot non"></span> 非标准</span>
+        <span class="legend-item"><span class="dot failed"></span> 解析失败</span>
+        <span style="color:#8fa2be; margin-left:auto; font-size:12px;">数据自动保存在浏览器本地</span>
+    </div>
+
+    <!-- 测试记录区域 -->
+    <div class="record-section" id="recordSection">
+        <div class="record-header">
+            <h2>📋 测试记录 <span class="badge-count" id="recordCount">0 条</span></h2>
+            <div class="record-toolbar">
+                <button class="btn btn-success" id="exportCsvBtn">⬇ 导出筛选结果</button>
+                <button class="btn btn-secondary" id="exportAllCsvBtn">📄 导出全部</button>
+                <button class="btn btn-secondary" id="importCsvBtn">📂 导入 CSV</button>
+                <button class="btn btn-dangerous" id="genScriptBtn">🧹 生成删除脚本</button>
+                <button class="btn btn-danger" id="clearRecordsBtn">🗑 清空记录</button>
+            </div>
+        </div>
+        <!-- 筛选栏（多选复选框） -->
+        <div class="filter-bar">
+            <label>📊 筛选类型：</label>
+            <div class="filter-checkboxes" id="filterCheckboxes">
+                <label class="filter-option">
+                    <input type="checkbox" value="standard" checked /> ✅ 标准
+                </label>
+                <label class="filter-option">
+                    <input type="checkbox" value="extended" checked /> 📏 非标加长
+                </label>
+                <label class="filter-option">
+                    <input type="checkbox" value="fallback" checked /> 🔍 近似匹配
+                </label>
+                <label class="filter-option">
+                    <input type="checkbox" value="nonstandard" checked /> ❌ 非标准
+                </label>
+                <label class="filter-option">
+                    <input type="checkbox" value="failed" checked /> ⚠️ 解析失败
+                </label>
+            </div>
+            <span class="filter-count" id="filterCount">共 0 条</span>
+        </div>
+        <input type="file" id="importFileInput" accept=".csv" style="display:none;" />
+        <div class="record-table-wrap">
+            <table class="record-table" id="recordTable">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th style="min-width:140px;">图纸名称</th>
+                        <th>宽 (mm)</th>
+                        <th>高 (mm)</th>
+                        <th style="min-width:70px;">图框数</th>
+                        <th style="min-width:100px;">类型</th>
+                        <th style="min-width:180px;">实际判断结果</th>
+                        <th>图框置信度</th>
+                        <th>比例置信度</th>
+                        <th style="min-width:90px;">预期幅面</th>
+                        <th style="min-width:100px;">匹配预期</th>
+                        <th style="min-width:100px;">备注</th>
+                        <th style="width:40px;">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="recordBody">
+                    <tr><td colspan="13" class="record-empty">暂无记录</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- 引用外部 JavaScript -->
+<script src="app.js"></script>
+</body>
+</html>
