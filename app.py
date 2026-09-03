@@ -355,12 +355,38 @@ def calculate_layout_total_bbox(layout, doc):
 # ---------- 统一扫描函数 ----------
 def collect_candidates_from_layout(layout, doc, layout_name):
     candidates = []
+    # 跳过"CAD 里不可见但 ezdxf 仍读取"的实体，两层过滤：
+    #   ① 图层级：隐藏(off)/冻结(frozen)图层的实体。常见噪声如"防火分区""面积""厨房荷载"等
+    #     辅助图层常被冻结，其闭合多段线会被误识别为图框候选（雅安图 102→12 后多出的 3 个
+    #     非标候选即源于此）。注意：锁定(locked)图层不影响可见性，不过滤。
+    #   ② 实体级：invisible 标志（DXF 组码 60=1）。单个实体被标记为不可见，图层正常显示但
+    #     该实体在 CAD 里不画出，ezdxf 仍会读取。设计师可能把图框边线设成 invisible 做参考线，
+    #     会被直线矩形检测拼出"看不见的图框"。getattr 默认 0（可见），兼容无此属性的实体类型。
+    invisible_layers = set()
+    for layer in doc.layers:
+        if not layer.is_on() or layer.is_frozen():
+            invisible_layers.add(layer.dxf.name)
+    all_entities = list(layout)
+    layer_filtered = [e for e in all_entities if e.dxf.layer not in invisible_layers]
+    visible_entities = [e for e in layer_filtered if getattr(e.dxf, 'invisible', 0) != 1]
+    skipped_layer = len(all_entities) - len(layer_filtered)
+    skipped_invisible = len(layer_filtered) - len(visible_entities)
+    if skipped_layer or skipped_invisible:
+        parts = []
+        if skipped_layer:
+            parts.append(f"隐藏/冻结图层实体 {skipped_layer} 个")
+        if skipped_invisible:
+            parts.append(f"实体级 invisible {skipped_invisible} 个")
+        log_parts = [f"跳过 {'，'.join(parts)}", f"可见实体 {len(visible_entities)} 个"]
+        if invisible_layers:
+            log_parts.append(f"冻结图层: {sorted(invisible_layers)}")
+        safe_log(f"  [{layout_name}] " + " | ".join(log_parts))
     # 1. 闭合多段线（加矩形度过滤：bbox面积/多边形面积 > 阈值才算候选）
     #    L 形标题栏、T 形会签栏等非矩形闭合线的矩形度远低于 1.0，
     #    真正的图框边线（矩形或近矩形）矩形度 > 0.95。
     RECTANGULARITY_THRESHOLD = 0.92
     seen_bbox = set()  # 同一 layout 内 bbox 去重：同一位置画两遍的闭合多段线只保留 1 个候选
-    for entity in layout:
+    for entity in visible_entities:
         dxftype = entity.dxftype()
         if dxftype in ('LWPOLYLINE', 'POLYLINE'):
             if is_polyline_closed(entity):
@@ -393,7 +419,7 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                                 'rectangularity': rectangularity,
                             })
     # 2. 直线矩形（多矩形检测：每个由 4 条直线围出的区域都是一个候选）
-    lines = [ent for ent in layout if ent.dxftype() == 'LINE']
+    lines = [ent for ent in visible_entities if ent.dxftype() == 'LINE']
     if lines:
         for rect_bbox in detect_rectangles_from_lines(lines):
             x1, y1, x2, y2 = rect_bbox
@@ -413,7 +439,7 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         min_x = min_y = float('inf')
         max_x = max_y = float('-inf')
         found = False
-        for entity in layout:
+        for entity in visible_entities:
             bbox = get_entity_bbox(entity, doc)
             if bbox:
                 x1, y1, x2, y2 = bbox
@@ -489,7 +515,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         # frame_count 统计"像图框"的候选数量（模型空间 + 布局空间合计），
         # 供前端展示"这张图纸有几个图框"；为启发式统计，允许少量误差。
         # 判定标准（满足任一即可）：
-        #   条件A：归一化长宽比在区间内 + 面积占比 ≥ 15%（常规场景）
+        #   条件A：归一化长宽比在区间内 + 面积占比 ≥ 15%（常规单图框 layout 场景）
         #   条件B：归一化长宽比在区间内 + 短边在合理图框尺寸范围内 + 显式检测（闭合多段线/直线矩形）
         #         + 尺寸规整（宽高接近整数）+ 短边下限 400mm
         #         ——密集轴线网格场景下，图框面积占比可能极低（<0.1%），但短边在 400~2000mm
@@ -499,20 +525,50 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         #         短边下限 400mm 过滤门窗等构件小矩形（800×300、200×150 等）。注意：短边
         #         <400 的小图框（如 A4 横向 210mm）若面积占比达标仍可通过条件 A 保留，
         #         此下限只作用于条件 B 的"绕过面积占比"放宽通道。
+        #   条件C：归一化长宽比在区间内 + 候选面积 ≥ 该 layout 最大候选面积 × 10%（相对面积法）
+        #         ——多张图框画在同一模型空间时（如整本图纸都在 Model），layout 总包围盒巨大，
+        #           单图框面积占比极低（<0.1%），条件 A 全挂；真图框短边可能因单位非标
+        #           （0.01mm 等）数值放大到几万，超出条件 B 的 2000 上限。用相对面积代替绝对占比：
+        #           真图框彼此同量级（≥10%），小矩形（标题栏/设备表/标注框）面积远小于最大图框被过滤。
+        #           跟单位无关：无论 mm / 0.01mm / cm，比例关系不变。
         MAX_FRAME_SHORT_SIDE = 2000  # 合理图框短边上限（mm）；A0 竖版短边 841mm，留足余量
         MIN_FRAME_SHORT_SIDE = 400   # 条件 B 短边下限（mm）；过滤门窗等构件小矩形，真图框经条件 A 保底
         SIZE_ROUNDNESS_EPS = 0.1     # 尺寸规整容差（mm）：宽高与最近整数的差 ≤ 0.1 视为整数
         EXPLICIT_TYPES = {'闭合多段线', '直线矩形'}
+        # 条件 C：大尺寸真图框识别（相对面积法，跟单位无关）
+        #   场景：多张图框画在同一模型空间（如整本图纸的 9 张图都在 Model 里），
+        #   layout 总包围盒巨大 → 单图框面积占比极低（<0.1%），条件 A 全挂；
+        #   而真图框短边可能因单位非标（0.01mm 等）数值放大到几万，超出条件 B 的 2000 上限。
+        #   用"候选面积 / 该 layout 最大候选面积"代替绝对占比：真图框彼此同量级（≥10%），
+        #   小矩形（标题栏/设备表/标注框）面积远小于最大图框，被自然过滤。
+        #   跟单位无关：无论 mm / 0.01mm / cm，比例关系不变。
+        #   风险：A0+A4 混排时 A4 仅占 A0 的 6.25%，可能被 10% 阈值排除；暂先上 10% 复测。
+        REL_AREA_THRESHOLD = 0.10     # 条件 C 相对面积阈值：候选面积 ≥ 该 layout 最大候选面积 × 10%
 
         for c in all_candidates:
             c['ratio'] = normalized_ratio(c['width'], c['height'])
             c['short_side'] = min(c['width'], c['height'])
+
+        # 预计算每个 layout 的最大候选面积，供条件 C 使用（相对面积法分母）
+        layout_max_area = {}
+        for c in all_candidates:
+            ln = c['layout']
+            if ln not in layout_max_area or c['area'] > layout_max_area[ln]:
+                layout_max_area[ln] = c['area']
+        for c in all_candidates:
+            ma = layout_max_area.get(c['layout'], 0)
+            c['rel_area_ratio'] = (c['area'] / ma) if ma > 0 else 0.0
 
         def is_frame_like(c):
             if not (FRAME_RATIO_MIN <= c['ratio'] <= FRAME_RATIO_MAX):
                 return False
             # 条件A：面积占比达标
             if c['area_ratio'] >= 0.15:
+                return True
+            # 条件C：相对面积达标（跟单位无关，处理多图框同 layout 场景）
+            #   必须在条件B 之前：雅安类图纸短边超 2000 过不了B，但相对面积能过C。
+            #   附加约束：长宽比 ≥ √2（允许加长版图框，过滤接近正方形的误判候选）
+            if c['rel_area_ratio'] >= REL_AREA_THRESHOLD:
                 return True
             # 条件B：显式检测 + 短边在合理范围（绕过面积占比，适用于密集几何场景）
             #   + 尺寸规整：宽高都接近整数，过滤墙线交错产生的非整数闭合多段线轮廓
@@ -524,6 +580,77 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
 
         frame_like = [c for c in all_candidates if is_frame_like(c)]
         pass_feature_count = len(frame_like)
+
+        # ---------- 外层包裹框识别（优化点1） ----------
+        # 场景：几张图框外面又画了一个大框，把多个图框包在里面。这种大框会被当成图框，
+        # 且去重时会把内部真图框当嵌套物剔掉（去重方向"留大剔小"正好反了）。
+        # 判据：某候选 X 内部完全包含 ≥ MIN_WRAPPED_FRAMES 个其他图框候选 → X 是外包络，剔除。
+        # 必须在去重之前执行：此时内部小框还没被当嵌套物剔除，能统计到包含数量。
+        # 真图框内部最多 1 个标题栏小框，故 N=2 能干净区分"外包络"与"正常嵌套"。
+        MIN_WRAPPED_FRAMES = 2  # 大框内含 ≥2 个图框候选即判定为外包络
+        WRAPPED_EPS = 1.0       # 坐标容差（mm），与嵌套去重一致
+        # 统计"内部包含的独立图框"时，内部候选面积需 < big×此比例才计数。
+        # 排除同图框的重复画法（如 84100×59400 外框 + 80600×57400 内框，面积 91% 互相嵌套），
+        # 这类重复画法面积接近 big，不算独立图框。真正被外包络包住的图框面积必 <big×50%
+        # （2 个图框+间隔塞进外包络，每个 <50%，否则放不下）。
+        WRAP_INNER_AREA_RATIO = 0.5
+        WRAP_SIZE_EPS = 0.05  # 尺寸聚类容差：宽高相对差 <5% 视为同组（同图框重复画法）
+
+        def _is_contained(inner, outer, eps=WRAPPED_EPS):
+            """inner 的 bbox 是否完全落在 outer 的 bbox 内"""
+            ix1, iy1, ix2, iy2 = inner['bbox']
+            ox1, oy1, ox2, oy2 = outer['bbox']
+            return (ix1 >= ox1 - eps and iy1 >= oy1 - eps and
+                    ix2 <= ox2 + eps and iy2 <= oy2 + eps)
+
+        def strip_wrapping_frames(cands):
+            """剔除"外层包裹框"：内部包含 ≥ MIN_WRAPPED_FRAMES 个其他图框候选的大框"""
+            if len(cands) <= 2:
+                return cands, 0
+            # 按 layout 分组，组内判断包含（不同 layout 不在同一坐标系）
+            layout_groups = {}
+            for idx, c in enumerate(cands):
+                layout_groups.setdefault(c['layout'], []).append(idx)
+            remove_set = set()
+            for layout_name, indices in layout_groups.items():
+                if len(indices) <= 2:
+                    continue
+                for i in indices:
+                    big = cands[i]
+                    # 收集 big 内部、面积显著小于 big 的候选（排除同图框重复画法本身的互相嵌套）
+                    inners = [cands[j] for j in indices
+                              if j != i and _is_contained(cands[j], big)
+                              and cands[j]['area'] < big['area'] * WRAP_INNER_AREA_RATIO]
+                    if not inners:
+                        continue
+                    # 按尺寸聚类：宽高相对差 <5% 视为同组（同图框的重复画法尺寸几乎相同），
+                    # 只统计"独立尺寸组数"，避免重复画法虚增 contained。
+                    #   例：84100×59400 图框内含 43031×49000 和 42724×48700（差<1%），
+                    #   归同组 → contained=1，不误剔 A1 真图框。
+                    #   真·外包络包 2 个不同尺寸图框 → 2 组 → contained=2 → 剔除外包络。
+                    groups = []  # 每组存一个代表尺寸
+                    for ic in inners:
+                        placed = False
+                        for g in groups:
+                            if (abs(ic['width'] - g['width']) / max(ic['width'], g['width'], 1) < WRAP_SIZE_EPS and
+                                    abs(ic['height'] - g['height']) / max(ic['height'], g['height'], 1) < WRAP_SIZE_EPS):
+                                placed = True
+                                break
+                        if not placed:
+                            groups.append(ic)
+                    if len(groups) >= MIN_WRAPPED_FRAMES:
+                        remove_set.add(i)
+                        inner_desc = "; ".join(f"{g['width']:.0f}x{g['height']:.0f}" for g in groups)
+                        safe_log(f"  [包裹框剔除] {big['layout']} | {big['width']:.1f}x{big['height']:.1f} | 独立尺寸组{len(groups)} | bbox={big['bbox']} | 组: {inner_desc}")
+            if not remove_set:
+                return cands, 0
+            kept = [c for k, c in enumerate(cands) if k not in remove_set]
+            return kept, len(remove_set)
+
+        frame_like, wrap_removed = strip_wrapping_frames(frame_like)
+        wrap_stripped_count = len(frame_like)
+        if wrap_removed:
+            safe_log(f"🧹 [包裹框识别] 剔除外层包裹框 {wrap_removed} 个（各含 ≥{MIN_WRAPPED_FRAMES} 个图框候选）")
 
         # ---------- 去重（嵌套 + IoU 重叠） ----------
         # 同一个 layout 内，逐步剔除"与更大候选高度重叠"的候选：
@@ -652,7 +779,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         valid_candidates.sort(key=lambda c: c['weighted_area'], reverse=True)
 
         safe_log("========== 检测结果 ==========")
-        safe_log(f"全部候选: {len(all_candidates)} | 通过特征: {pass_feature_count} | 去重后: {dedup_count} | 上限后: {len(frame_like)}")
+        safe_log(f"全部候选: {len(all_candidates)} | 通过特征: {pass_feature_count} | 去包裹框: {wrap_stripped_count} | 去重后: {dedup_count} | 上限后: {len(frame_like)}")
         for i, c in enumerate(valid_candidates, 1):
             safe_log(f"  {i}. {c['type']} | 布局: {c['layout']} | 尺寸: {c['width']:.2f} x {c['height']:.2f} | "
                      f"归一化长宽比: {c['ratio']:.4f} | 面积占比: {c['area_ratio']:.2%}")

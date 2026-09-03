@@ -17,3 +17,6 @@ node_modules/
 # 上传文件与临时目录
 uploads/
 temp/
+
+# 临时诊断脚本
+tmp_*.py
