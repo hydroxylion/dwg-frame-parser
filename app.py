@@ -418,6 +418,154 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                                 'layout': layout_name,
                                 'rectangularity': rectangularity,
                             })
+    # 1.5. 块参照 INSERT：插入点 + 块定义 bbox × xscale/yscale(+ rotation) = 真实图框 bbox。
+    #    建筑图纸图框常用 INSERT 块参照插入（澜山"12fas" 块 ×15 个，每块缩放 1.0714 后真实
+    #    31500×22275mm），原代码只处理 LWPOLYLINE+LINE 会全部漏识别。
+    #    策略分两步——先尺寸预筛"图框级"块入库，再位置启发判别对齐装饰块：
+    #    (1) 预筛：短边 ≥ INSERT_MIN_SHORT_SIDE、长宽比 ∈ [FRAME_RATIO_MIN, FRAME_RATIO_MAX]，
+    #        家具/符号类小块（短边通常 < 500mm）直接不入库，减少后续位置启发式数据量；
+    #    (2) 位置启发：见下方"对齐排列剔除"，在预筛通过的候选上做。
+    INSERT_MIN_SHORT_SIDE = 500  # mm：真建筑图框短边几乎都 ≥ 420mm（A2），家具/符号块通常 < 500
+    import math as _math
+    _block_bbox_cache = {}
+    def _get_block_world_bbox(_name, _visited=None):
+        """递归求块的 bbox（块定义内坐标，未应用 INSERT xscale/yscale）。"""
+        if _name in _block_bbox_cache:
+            return _block_bbox_cache[_name]
+        if _visited is None:
+            _visited = set()
+        if _name in _visited:
+            return None
+        if _name not in doc.blocks:
+            return None
+        _visited.add(_name)
+        _pts = []
+        for _ent in doc.blocks[_name]:
+            try:
+                _t = _ent.dxftype()
+                if _t == 'LWPOLYLINE':
+                    for _p in _ent.get_points('xy'):
+                        _pts.append(_p)
+                elif _t == 'LINE':
+                    _pts.append((_ent.dxf.start.x, _ent.dxf.start.y))
+                    _pts.append((_ent.dxf.end.x, _ent.dxf.end.y))
+                elif _t == 'CIRCLE':
+                    _c = (_ent.dxf.center.x, _ent.dxf.center.y)
+                    _r = _ent.dxf.radius
+                    _pts.append((_c[0]-_r, _c[1]-_r))
+                    _pts.append((_c[0]+_r, _c[1]+_r))
+                elif _t == 'INSERT':
+                    _bb = _get_block_world_bbox(_ent.dxf.name, _visited)
+                    if _bb is not None:
+                        _ipt = (_ent.dxf.insert.x, _ent.dxf.insert.y)
+                        _xs = _ent.dxf.xscale; _ys = _ent.dxf.yscale
+                        _pts.append((_ipt[0] + _bb[0]*_xs, _ipt[1] + _bb[1]*_ys))
+                        _pts.append((_ipt[0] + _bb[2]*_xs, _ipt[1] + _bb[3]*_ys))
+            except Exception:
+                continue
+        if not _pts:
+            _block_bbox_cache[_name] = None
+            return None
+        _bb_ret = (min(p[0] for p in _pts), min(p[1] for p in _pts),
+                   max(p[0] for p in _pts), max(p[1] for p in _pts))
+        _block_bbox_cache[_name] = _bb_ret
+        return _bb_ret
+
+    _insert_total = 0
+    _insert_kept = 0
+    _insert_filtered = 0  # 预筛剔除数（非图框级尺寸）
+    for _entity in visible_entities:
+        if _entity.dxftype() != 'INSERT':
+            continue
+        _insert_total += 1
+        try:
+            _bn = _entity.dxf.name
+            _bb_def = _get_block_world_bbox(_bn)
+            if _bb_def is None:
+                continue
+            _xs = _entity.dxf.xscale; _ys = _entity.dxf.yscale
+            if abs(_xs) < 1e-9 or abs(_ys) < 1e-9:
+                continue
+            _rot = getattr(_entity.dxf, 'rotation', 0)
+            _bx1, _by1, _bx2, _by2 = _bb_def
+            _local_pts = [(_bx1*_xs, _by1*_ys), (_bx2*_xs, _by1*_ys),
+                          (_bx1*_xs, _by2*_ys), (_bx2*_xs, _by2*_ys)]
+            if _rot:
+                _cr = _math.cos(_rot); _sr = _math.sin(_rot)
+                _local_pts = [(p[0]*_cr - p[1]*_sr, p[0]*_sr + p[1]*_cr)
+                              for p in _local_pts]
+            _ip = (_entity.dxf.insert.x, _entity.dxf.insert.y)
+            _wpts = [(p[0] + _ip[0], p[1] + _ip[1]) for p in _local_pts]
+            _xm = min(p[0] for p in _wpts); _ym = min(p[1] for p in _wpts)
+            _xM = max(p[0] for p in _wpts); _yM = max(p[1] for p in _wpts)
+            _w = _xM - _xm; _h = _yM - _ym
+            if _w <= 0 or _h <= 0:
+                continue
+            # 预筛：尺寸必须"图框级"才入库，避免家具/符号类小块污染候选库
+            _w_short = min(_w, _h)
+            _w_ratio = (max(_w, _h) / _w_short) if _w_short > 0 else 0
+            if _w_short < INSERT_MIN_SHORT_SIDE or not (FRAME_RATIO_MIN <= _w_ratio <= FRAME_RATIO_MAX):
+                _insert_filtered += 1
+                continue
+            _bbox = (_xm, _ym, _xM, _yM)
+            _key = (round(_xm, 3), round(_ym, 3), round(_xM, 3), round(_yM, 3))
+            if _key in seen_bbox:
+                continue
+            seen_bbox.add(_key)
+            candidates.append({
+                'type': '块参照插入',
+                'area': _w * _h,
+                'bbox': _bbox,
+                'width': _w,
+                'height': _h,
+                'layout': layout_name,
+                'rectangularity': 1.0,
+                'block_name': _bn,
+                'insert_layer': _entity.dxf.layer,
+            })
+            _insert_kept += 1
+        except Exception:
+            continue
+
+    if _insert_total:
+        safe_log(f"  [{layout_name}] INSERT 块参照: 共 {_insert_total} 个 | 预筛剔除 {_insert_filtered} 个（非图框级尺寸）| 入库 {_insert_kept} 个")
+
+        # 1.6. 对齐排列剔除：同块名 ≥3 个 INSERT 实例，若它们在 x 或 y 方向紧贴成线
+        #    （短方向标准差 < 平均尺寸 0.5，另一方向散布 >5 倍），视为对齐排列的装饰块——
+        #    常见如柱块（1 楼柱、楼层柱网）、墙线、门窗阵列、家具等。这类块每个尺寸
+        #    都是"图框级"（按用户策略会被收），但实际不是图框，必须按位置辨别。
+        #    真图框位置散布、不规则，不会被排除（参照 12fas 在澜山的 15 个 散布位置）。
+        #    <3 个实例不判断（无法判断是否对齐，保留进框架判别）。
+        import statistics as _stats
+        _bn_groups = {}
+        for _idx, _c in enumerate(candidates):
+            if _c.get('type') == '块参照插入':
+                _bn_groups.setdefault(_c.get('block_name', '<unknown>'), []).append(_idx)
+        _aligned_log = []
+        _rm_idx = set()
+        for _bn, _grp in _bn_groups.items():
+            if len(_grp) < 3:
+                continue
+            _ctr = [((candidates[_i]['bbox'][0]+candidates[_i]['bbox'][2])/2,
+                     (candidates[_i]['bbox'][1]+candidates[_i]['bbox'][3])/2) for _i in _grp]
+            _xs = [c[0] for c in _ctr]; _ys = [c[1] for c in _ctr]
+            _x_std = _stats.pstdev(_xs) if len(_xs) > 1 else 0
+            _y_std = _stats.pstdev(_ys) if len(_ys) > 1 else 0
+            _avg = (candidates[_grp[0]]['width'] + candidates[_grp[0]]['height']) / 2
+            # 垂直对齐判据：x 紧贴一列，y 散布多
+            if _x_std < _avg * 0.5 and _y_std > _x_std * 5 + 1:
+                _aligned_log.append(f"{_bn}({len(_grp)}个,垂直)")
+                _rm_idx.update(_grp)
+                continue
+            # 水平对齐判据：y 紧贴一行，x 散布多
+            if _y_std < _avg * 0.5 and _x_std > _y_std * 5 + 1:
+                _aligned_log.append(f"{_bn}({len(_grp)}个,水平)")
+                _rm_idx.update(_grp)
+
+        if _rm_idx:
+            candidates = [c for _i, c in enumerate(candidates) if _i not in _rm_idx]
+            safe_log(f"  [{layout_name}] 对齐排列剔除装饰块: {', '.join(_aligned_log)} → 共移除 {len(_rm_idx)} 个候选")
+
     # 2. 直线矩形（多矩形检测：每个由 4 条直线围出的区域都是一个候选）
     lines = [ent for ent in visible_entities if ent.dxftype() == 'LINE']
     if lines:
@@ -617,6 +765,10 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     continue
                 for i in indices:
                     big = cands[i]
+                    # INSERT 块参照是图框的常见画法（一张图就一个图框），不应被当包裹框——
+                    # 其内部的标题栏/家具/房间小矩形尺寸组数多，会被错判为"内含多个图框"。
+                    if big.get('type') == '块参照插入':
+                        continue
                     # 收集 big 内部、面积显著小于 big 的候选（排除同图框重复画法本身的互相嵌套）
                     inners = [cands[j] for j in indices
                               if j != i and _is_contained(cands[j], big)
@@ -781,8 +933,13 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         safe_log("========== 检测结果 ==========")
         safe_log(f"全部候选: {len(all_candidates)} | 通过特征: {pass_feature_count} | 去包裹框: {wrap_stripped_count} | 去重后: {dedup_count} | 上限后: {len(frame_like)}")
         for i, c in enumerate(valid_candidates, 1):
+            bx1, by1, bx2, by2 = c['bbox']
+            extra = ''
+            if c['type'] == '块参照插入':
+                extra = f" | 块名: {c.get('block_name', '?')} | 图层: {c.get('insert_layer', '?')}"
             safe_log(f"  {i}. {c['type']} | 布局: {c['layout']} | 尺寸: {c['width']:.2f} x {c['height']:.2f} | "
-                     f"归一化长宽比: {c['ratio']:.4f} | 面积占比: {c['area_ratio']:.2%}")
+                     f"归一化长宽比: {c['ratio']:.4f} | 面积占比: {c['area_ratio']:.2%} | "
+                     f"bbox=({bx1:.0f},{by1:.0f},{bx2:.0f},{by2:.0f}){extra}")
         safe_log("============================")
 
         best = valid_candidates[0]
