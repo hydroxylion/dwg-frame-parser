@@ -606,15 +606,35 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         #    都是"图框级"（按用户策略会被收），但实际不是图框，必须按位置辨别。
         #    真图框位置散布、不规则，不会被排除（参照 12fas 在澜山的 15 个 散布位置）。
         #    <3 个实例不判断（无法判断是否对齐，保留进框架判别）。
+        #    白名单保护（方案2）：尺寸为标准 A 系列整数尺寸的块（短边 ∈ {841,594,420,297,
+        #    210,148,105}、长边 ≈ 短边×√2）不参与对齐剔除——真图框块常以标准 A 系列尺寸画
+        #    （841×594=A1、594×420=A2 等），多张图框并排排成一行也命中对齐启发式（一层平面图
+        #    3.25: 块名"图框2" 11 个水平排列，841×594 命中 A1 → 白名单保护，不剔除）。
+        #    装饰块尺寸通常非 A 系列（柱 700×1215、家具 1200×4800 等），不受白名单影响。
         import statistics as _stats
+        _STANDARD_A_SHORT_SIDES = (841, 594, 420, 297, 210, 148, 105)
+        def _is_standard_a_series(w, h, eps=1.0):
+            """尺寸是否为标准 A 系列整数尺寸（短边在标准集合内、长边≈短边×√2）
+            eps=1.0 容差：尺寸规整容差 + 些许画图误差"""
+            _short = min(w, h); _long = max(w, h)
+            for _std in _STANDARD_A_SHORT_SIDES:
+                if abs(_short - _std) <= eps and abs(_long - _std * _math.sqrt(2)) <= eps:
+                    return True
+            return False
         _bn_groups = {}
         for _idx, _c in enumerate(candidates):
             if _c.get('type') == '块参照插入':
                 _bn_groups.setdefault(_c.get('block_name', '<unknown>'), []).append(_idx)
         _aligned_log = []
+        _a_series_protected = []  # 白名单保护（标准 A 系列图框，不参与对齐剔除）
         _rm_idx = set()
         for _bn, _grp in _bn_groups.items():
             if len(_grp) < 3:
+                continue
+            # 白名单：尺寸是标准 A 系列 → 不剔除
+            _sample = candidates[_grp[0]]
+            if _is_standard_a_series(_sample['width'], _sample['height']):
+                _a_series_protected.append(f"{_bn}({len(_grp)}个,{_sample['width']:.0f}x{_sample['height']:.0f})")
                 continue
             _ctr = [((candidates[_i]['bbox'][0]+candidates[_i]['bbox'][2])/2,
                      (candidates[_i]['bbox'][1]+candidates[_i]['bbox'][3])/2) for _i in _grp]
@@ -632,6 +652,8 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 _aligned_log.append(f"{_bn}({len(_grp)}个,水平)")
                 _rm_idx.update(_grp)
 
+        if _a_series_protected:
+            safe_log(f"  [{layout_name}] 标准A系列图框保护: {', '.join(_a_series_protected)} → 不参与对齐剔除")
         if _rm_idx:
             candidates = [c for _i, c in enumerate(candidates) if _i not in _rm_idx]
             safe_log(f"  [{layout_name}] 对齐排列剔除装饰块: {', '.join(_aligned_log)} → 共移除 {len(_rm_idx)} 个候选")
@@ -792,6 +814,16 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
 
         def is_frame_like(c):
             if not (FRAME_RATIO_MIN <= c['ratio'] <= FRAME_RATIO_MAX):
+                return False
+            # 异常候选过滤：area_ratio > 1.0 → 候选面积超过 layout 总面积，
+            # 不可能是真图框（必是计算异常或外包络伪候选）。
+            # 场景：一层平面图3.25 的 374988×144477 巨块（INSERT 块 A$C6BED430F）
+            #   area_ratio=8296%——calculate_layout_total_bbox 在 fast 模式下不算
+            #   INSERT 块参照内部内容，layout_total 被算小，area_ratio 爆表。该巨块
+            #   作为伪候选嵌套剔除了 11 个 841×594 真图框（去重阶段）。area_ratio>1.0
+            #   是计算异常的可靠信号——真图框 area_ratio 必 ≤ 100%（不可能超过它
+            #   所在 layout 的总面积）。雅安/澜山 area_ratio 都 < 100%，不受影响。
+            if c['area_ratio'] > 1.0:
                 return False
             # 条件A：面积占比达标
             if c['area_ratio'] >= 0.15:
