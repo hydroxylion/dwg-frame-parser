@@ -352,6 +352,76 @@ def calculate_layout_total_bbox(layout, doc):
         return (max_x - min_x) * (max_y - min_y)
     return 0
 
+# ---------- XREF 外部参照检测（方案B：只打警告，不加载） ----------
+def _detect_xref_warnings(doc):
+    """检测图纸是否使用了 XREF 外部参照（方案B：只打警告，不加载外部文件）。
+
+    背景：XREF 块定义指向外部 DWG 文件，ezdxf 默认不加载外部文件，
+    块定义内实体列表为空——引用这些块的 INSERT 实体在
+    _get_block_world_bbox 返回 None 时被跳过，会漏识别图框。
+
+    本函数只做检测 + 警告，不阻塞主流程：
+    - 没用 XREF：返回空列表，无任何副作用（绝大多数图纸）
+    - 用了 XREF：返回警告列表，主函数写日志 + 返回字段，前端可选展示
+
+    返回：[{'block_name', 'xref_path', 'insert_count', 'layouts'}]
+          layouts: {layout_name: count} 各 layout 引用次数
+    """
+    # 1. 收集所有"实体列表为空"的 XREF 块定义
+    #    只警告空实体的：已加载的 XREF（entity_count > 0）说明外部文件
+    #    已被 ezdxf 解析，_get_block_world_bbox 能算出 bbox，无需警告。
+    xref_blocks = {}  # block_name -> xref_path
+    for blk in doc.blocks:
+        try:
+            name = blk.name
+            is_xref = getattr(blk, 'is_xref', False)
+            xref_path = getattr(blk.dxf, 'xref', None) if hasattr(blk, 'dxf') else None
+            # XREF 块的常见特征：is_xref=True，或 name 含路径分隔符，或 xref_path 不为空
+            looks_xref = bool(is_xref) or bool(xref_path) or ('\\' in name) or ('/' in name)
+            if not looks_xref:
+                continue
+            ent_count = sum(1 for _ in blk)
+            if ent_count == 0:
+                xref_blocks[name] = xref_path or name
+        except Exception:
+            continue
+
+    if not xref_blocks:
+        return []
+
+    # 2. 扫描模型空间 + 布局空间，统计引用 XREF 块的 INSERT 实例数
+    refs_by_layout = {}  # block_name -> {layout_name: count}
+
+    def scan_layout(layout, layout_name):
+        for ent in layout:
+            try:
+                if ent.dxftype() != 'INSERT':
+                    continue
+                bn = ent.dxf.name
+                if bn in xref_blocks:
+                    refs_by_layout.setdefault(bn, {}).setdefault(layout_name, 0)
+                    refs_by_layout[bn][layout_name] += 1
+            except Exception:
+                continue
+
+    scan_layout(doc.modelspace(), '模型空间')
+    for layout in doc.layouts:
+        if layout.name == 'Model':
+            continue
+        scan_layout(layout, f'布局 "{layout.name}"')
+
+    # 3. 只保留实际被引用的 XREF（块定义存在但未引用的不会漏识别图框）
+    warnings = []
+    for bn, layouts in refs_by_layout.items():
+        total = sum(layouts.values())
+        warnings.append({
+            'block_name': bn,
+            'xref_path': xref_blocks.get(bn, ''),
+            'insert_count': total,
+            'layouts': layouts,
+        })
+    return warnings
+
 # ---------- 统一扫描函数 ----------
 def collect_candidates_from_layout(layout, doc, layout_name):
     candidates = []
@@ -623,6 +693,19 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             tmp_path = tmp.name
 
         doc = load_document(tmp_path)
+
+        # ---------- XREF 外部参照检测（方案B：只打警告，不加载外部文件） ----------
+        # ezdxf 默认不加载 XREF 外部文件，引用这些块的 INSERT 实体会漏识别图框。
+        # 现阶段只做检测 + 日志 + 返回字段，主流程不阻塞；
+        # 等真遇到 XREF 图纸再决定是否升级到方案A（主动加载外部文件）。
+        xref_warnings = _detect_xref_warnings(doc)
+        if xref_warnings:
+            safe_log("⚠️ [XREF 警告] 检测到外部参照，可能漏识别图框：")
+            for w in xref_warnings:
+                layouts_desc = ", ".join(f"{ln} {cnt} 处" for ln, cnt in w['layouts'].items())
+                safe_log(f"   - 块 {w['block_name']!r} (xref: {w['xref_path']!r}) | "
+                         f"{w['insert_count']} 处 INSERT | {layouts_desc}")
+            safe_log("   建议拆开源 DWG 单独解析，或后续启用 XREF 加载方案")
 
         # ---------- 逐 layout 收集候选，并计算同源的分母（该 layout 总包围盒面积） ----------
         all_candidates = []
@@ -905,6 +988,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 'height': round(height),
                 'frame_count': frame_count,
                 'candidates': build_payload(frame_like if frame_like else all_candidates),
+                'xref_warnings': xref_warnings,
             }
 
         # ---------- 智能检测模式（特征筛选） ----------
@@ -964,6 +1048,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             'height': height,
             'frame_count': frame_count,
             'candidates': build_payload(valid_candidates),
+            'xref_warnings': xref_warnings,
         }
 
     except Exception as e:
@@ -1017,6 +1102,7 @@ def upload_file():
             'unit': unit,
             'frame_count': result['frame_count'],
             'candidates': result['candidates'],
+            'xref_warnings': result.get('xref_warnings', []),
         })
     except Exception as e:
         # 写日志文件（不能用 print_exc，控制台写入本身可能失败）
