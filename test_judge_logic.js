@@ -1,6 +1,7 @@
 // judgeSize 新分类逻辑单元测试：提取 app.js 第 1、2 节（纯函数，无 DOM 依赖）执行
 const fs = require('fs');
-const src = fs.readFileSync('C:/Users/hui_ou/PycharmProjects/dwg-frame-parser/app.js', 'utf-8');
+const path = require('path');
+const src = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf-8');
 const cut = src.indexOf('function renderResult');
 if (cut < 0) { console.error('未找到 renderResult 分割点'); process.exit(1); }
 eval(src.slice(0, cut));

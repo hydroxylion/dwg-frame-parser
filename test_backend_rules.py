@@ -10,8 +10,9 @@
 import io
 import sys
 import ezdxf
+from pathlib import Path
 
-sys.path.insert(0, r'C:/Users/hui_ou/PycharmProjects/dwg-frame-parser')
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app import get_bounding_box_from_bytes
 
 
