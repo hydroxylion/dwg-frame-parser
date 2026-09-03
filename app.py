@@ -675,11 +675,19 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                     'layout': layout_name
                 })
     # 3. 如果没有候选，取全实体包围盒（降级）
+    #    排除 VIEWPORT：视口是布局空间的显示窗口（透视模型空间的"取景框"），
+    #    不是图纸内容。布局里只有 VIEWPORT 说明图纸内容全在模型空间，
+    #    布局本身没有画图框——这种空布局的视口边框没有图框意义，
+    #    不应产生候选（泛悦通风 11-MW-FP001：布局1 只有 2 个 VIEWPORT，
+    #    降级路径把视口框 29.17×12.37 当图框，frame_count 虚增 2→实际应 1）。
+    #    排除后若无其他实体（空布局），不产生候选。
     if not candidates:
         min_x = min_y = float('inf')
         max_x = max_y = float('-inf')
         found = False
         for entity in visible_entities:
+            if entity.dxftype() == 'VIEWPORT':
+                continue  # 视口框不是图纸内容，跳过
             bbox = get_entity_bbox(entity, doc)
             if bbox:
                 x1, y1, x2, y2 = bbox
@@ -700,6 +708,8 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 'height': height,
                 'layout': layout_name
             })
+        elif any(e.dxftype() == 'VIEWPORT' for e in visible_entities):
+            safe_log(f"  [{layout_name}] 空布局（仅含视口，无绘图实体），跳过全实体包围盒降级")
     return candidates
 
 # ---------- 主解析函数 ----------
