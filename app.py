@@ -825,19 +825,33 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #   所在 layout 的总面积）。雅安/澜山 area_ratio 都 < 100%，不受影响。
             if c['area_ratio'] > 1.0:
                 return False
+            # 长宽比约束（条件B/C 共用基础）：
+            #   _near_sqrt2：长宽比接近 √2（±10%，即 [1.27, 1.55]）——条件B 用，
+            #     过滤家具/设备外框等小矩形（一层平面图3.25 模型空间 2000×5050 长宽比2.525、
+            #     1200×1500 长宽比1.25 等均不在 [1.27,1.55] 区间被过滤）
+            #   _at_least_sqrt2：长宽比 ≥ √2×0.99（≈1.400）——条件C 用，
+            #     允许加长版图框（长宽比 > √2，如 A4 加长版 297×525.5 长宽比1.769），
+            #     过滤接近正方形的误判候选（38200×40550 长宽比1.06、39400×31850 长宽比1.24）。
+            #     真图框（标准+加长版）长宽比都 ≥ √2：雅安1.4158/1.4143、澜山12fas1.4141、
+            #     841×594=1.4143、297×525.5=1.769。0.99 容差让澜山12fas（1.4141 略<√2）通过。
+            _SQRT2 = 2 ** 0.5
+            _near_sqrt2 = abs(c['ratio'] - _SQRT2) / _SQRT2 <= 0.10
+            _at_least_sqrt2 = c['ratio'] >= _SQRT2 * 0.99
             # 条件A：面积占比达标
             if c['area_ratio'] >= 0.15:
                 return True
             # 条件C：相对面积达标（跟单位无关，处理多图框同 layout 场景）
             #   必须在条件B 之前：雅安类图纸短边超 2000 过不了B，但相对面积能过C。
             #   附加约束：长宽比 ≥ √2（允许加长版图框，过滤接近正方形的误判候选）
-            if c['rel_area_ratio'] >= REL_AREA_THRESHOLD:
+            if c['rel_area_ratio'] >= REL_AREA_THRESHOLD and _at_least_sqrt2:
                 return True
             # 条件B：显式检测 + 短边在合理范围（绕过面积占比，适用于密集几何场景）
             #   + 尺寸规整：宽高都接近整数，过滤墙线交错产生的非整数闭合多段线轮廓
+            #   + 长宽比接近 √2（±10%）：过滤家具/设备外框等小矩形
             if c['type'] in EXPLICIT_TYPES and MIN_FRAME_SHORT_SIDE <= c['short_side'] <= MAX_FRAME_SHORT_SIDE:
                 if (abs(c['width'] - round(c['width'])) <= SIZE_ROUNDNESS_EPS and
-                        abs(c['height'] - round(c['height'])) <= SIZE_ROUNDNESS_EPS):
+                        abs(c['height'] - round(c['height'])) <= SIZE_ROUNDNESS_EPS and
+                        _near_sqrt2):
                     return True
             return False
 
