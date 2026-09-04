@@ -877,13 +877,25 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     #    不应产生候选（泛悦通风 11-MW-FP001：布局1 只有 2 个 VIEWPORT，
     #    降级路径把视口框 29.17×12.37 当图框，frame_count 虚增 2→实际应 1）。
     #    排除后若无其他实体（空布局），不产生候选。
+    #    同时排除文字/标注类实体（TEXT/MTEXT/DIMENSION/ATTRIB/ATTDEF 等）：图框边界
+    #    由绘图几何线决定，文字与尺寸标注允许外溢（标题栏文字、技术要求、尺寸文字常
+    #    伸出图框线外几毫米），若计入会把图框尺寸撑大——
+    #    齿轮箱装配图-846x584：LINE 图框未识别走降级，一处 MTEXT 标注文字外溢到
+    #    x=1160.6（图框右界 1150.1），包围盒被撑成 856.5 宽 → 输出 857×584 而非 846×584；
+    #    支座.dwg 同类（"技术要求"文字外溢撑到 225）。降级语义是"内容区域边界"，
+    #    文字不应改变该边界。
     if not candidates:
+        # 降级包围盒只统计绘图几何实体（可能成为图框边的类型）
+        NON_GEOMETRY_TYPES = {
+            'TEXT', 'MTEXT', 'DIMENSION', 'ATTRIB', 'ATTDEF',
+            'VIEWPORT', 'LEADER', 'MLEADER', 'IMAGE', 'OLE2FRAME',
+        }
         min_x = min_y = float('inf')
         max_x = max_y = float('-inf')
         found = False
         for entity in visible_entities:
-            if entity.dxftype() == 'VIEWPORT':
-                continue  # 视口框不是图纸内容，跳过
+            if entity.dxftype() in NON_GEOMETRY_TYPES:
+                continue  # 文字/标注/视口不是绘图几何，跳过
             bbox = get_entity_bbox(entity, doc)
             if bbox:
                 x1, y1, x2, y2 = bbox
@@ -1239,6 +1251,22 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
 
         frame_like = deduplicate_candidates(frame_like)
         dedup_count = len(frame_like)
+
+        # ---------- 模型空间降级包围盒清洗 ----------
+        # 降级路径"全实体包围盒"在无闭合矩形时把"该空间所有实体 bbox"当候选兜底，
+        # area_ratio 恒 = 100%（分母即自身 layout 总面积）→ 无条件命中条件A。
+        # 机械图纸/出图常见结构：图框放在布局空间（如 Gb A1 标题栏），模型空间只画
+        # 零件内容（后桥半轴总成A1-840x593：模型空间 346 LINE 等无图框边线 → 降级
+        # 包围盒 773×416 被误收为第 2 个"图框"）。
+        # 规则：文档布局空间已识别出"非降级类型"的真图框 → 模型空间的降级包围盒
+        # 必是内容外框，剔除。若整图只有模型空间候选，规则不触发（降级兜底仍有效）。
+        if any(c['layout'] != '模型空间' and c['type'] != '全实体包围盒' for c in frame_like):
+            _before = len(frame_like)
+            frame_like = [c for c in frame_like
+                          if not (c['type'] == '全实体包围盒' and c['layout'] == '模型空间')]
+            if len(frame_like) < _before:
+                safe_log(f"  [模型空间降级清洗] 布局空间已识别真图框，剔除模型空间降级包围盒 "
+                         f"{_before - len(frame_like)} 个（模型空间仅是内容区，其包围盒不是图框）")
 
         # ---------- 每 layout 帧数上限 ----------
         # 图框数量筛选主要靠算法（is_frame_like 特征 + 嵌套/IoU 去重），
