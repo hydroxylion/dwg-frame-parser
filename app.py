@@ -1026,7 +1026,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         def is_frame_like(c):
             if not (FRAME_RATIO_MIN <= c['ratio'] <= FRAME_RATIO_MAX):
                 return False
-            # 异常候选过滤：area_ratio > 1.0 → 候选面积超过 layout 总面积，
+            # 异常候选过滤：area_ratio 显著 > 1.0 → 候选面积超过 layout 总面积，
             # 不可能是真图框（必是计算异常或外包络伪候选）。
             # 场景：一层平面图3.25 的 374988×144477 巨块（INSERT 块 A$C6BED430F）
             #   area_ratio=8296%——calculate_layout_total_bbox 在 fast 模式下不算
@@ -1034,12 +1034,20 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #   作为伪候选嵌套剔除了 11 个 841×594 真图框（去重阶段）。area_ratio>1.0
             #   是计算异常的可靠信号——真图框 area_ratio 必 ≤ 100%（不可能超过它
             #   所在 layout 的总面积）。雅安/澜山 area_ratio 都 < 100%，不受影响。
-            if c['area_ratio'] > 1.0:
+            #   容差 0.1%：图框面积恰等于 layout 总面积时（图框即 layout 最大外框），
+            #   候选面积(polygon_area)与 layout_total(ezdxf bbox)两条路径的浮点末位差
+            #   可能让 area_ratio 微超 1.0（支架.dwg 外框 594×420=layout 外框，
+            #   249479.99999999994 / 249479.9999999999 > 1.0 被误杀 → 输出内框
+            #   574×400）。真实异常（巨块 8296%）远超 0.1%，不受影响。
+            if c['area_ratio'] > 1.0 + 0.001:
                 return False
             # 长宽比约束（条件B/C 共用基础）：
-            #   _near_sqrt2：长宽比接近 √2（±10%，即 [1.27, 1.55]）——条件B 用，
-            #     过滤家具/设备外框等小矩形（一层平面图3.25 模型空间 2000×5050 长宽比2.525、
-            #     1200×1500 长宽比1.25 等均不在 [1.27,1.55] 区间被过滤）
+            #   _near_sqrt2：长宽比接近 √2（±10%）——条件B 用，
+            #     过滤家具/设备外框等小矩形（2000×5050 长宽比2.525 等）。
+            #     注：曾尝试收紧到 ±3% 挡一层平面图模型空间 450×600（长宽比1.3333 偏差
+            #     5.7%），但会连带把澜山 730×540 之类装饰框挡出 frame_like，导致外包络
+            #     76736×28029 的包裹识别失去"第二尺寸组"证据而误保留 → 已回滚 ±10%，
+            #     450×600 类误判改走 rel_area 约束（见条件B）。
             #   _at_least_sqrt2：长宽比 ≥ √2×0.99（≈1.400）——条件C 用，
             #     允许加长版图框（长宽比 > √2，如 A4 加长版 297×525.5 长宽比1.769），
             #     过滤接近正方形的误判候选（38200×40550 长宽比1.06、39400×31850 长宽比1.24）。
@@ -1058,11 +1066,18 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 return True
             # 条件B：显式检测 + 短边在合理范围（绕过面积占比，适用于密集几何场景）
             #   + 尺寸规整：宽高都接近整数，过滤墙线交错产生的非整数闭合多段线轮廓
-            #   + 长宽比接近 √2（±10%）：过滤家具/设备外框等小矩形
+            #   + 长宽比接近 √2（±10%）
+            #   + 直线矩形额外要求相对面积达标：LINE 线框若连"同 layout 最大候选的
+            #     10%"都不到，只是空间里众多小矩形之一，不是图框（一层平面图模型空间
+            #     450×600——模型空间没有图框，该矩形是 CAD 远处残留几何）。真 LINE 图框
+            #     （夹具 3×841×594）是所在空间最大候选，rel ≈100% 不受影响。
+            #     闭合多段线不设此限：730×540 等装饰框需留在 frame_like 供外层包裹框
+            #     识别作"内含尺寸组"证据（澜山 76736×28029 外包络）。
             if c['type'] in EXPLICIT_TYPES and MIN_FRAME_SHORT_SIDE <= c['short_side'] <= MAX_FRAME_SHORT_SIDE:
                 if (abs(c['width'] - round(c['width'])) <= SIZE_ROUNDNESS_EPS and
                         abs(c['height'] - round(c['height'])) <= SIZE_ROUNDNESS_EPS and
-                        _near_sqrt2):
+                        _near_sqrt2 and
+                        (c['type'] != '直线矩形' or c['rel_area_ratio'] >= REL_AREA_THRESHOLD)):
                     return True
             return False
 
@@ -1076,6 +1091,12 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         # 必须在去重之前执行：此时内部小框还没被当嵌套物剔除，能统计到包含数量。
         # 真图框内部最多 1 个标题栏小框，故 N=2 能干净区分"外包络"与"正常嵌套"。
         MIN_WRAPPED_FRAMES = 2  # 大框内含 ≥2 个图框候选即判定为外包络
+        # 单尺寸组实例数 ≥ 该值也判为外包络：外包络包住 N 个同尺寸图框整齐排列时，
+        # 独立尺寸组可能只有 1 个（澜山 76736×28029 ≈3×31500×22275，包住 3 张
+        # 12fas 图框的整版大框），而真图框"内含同尺寸重复画法"至多 2~3 份
+        # （雅安 43031×49000/42724×48700 两种画法 = 2 份，≥3 必是拼版外框）。
+        # 注意：该判定在去重前执行，此时被包住的子框尚未被嵌套剔除。
+        MIN_WRAPPED_SAME_SIZE = 3
         WRAPPED_EPS = 1.0       # 坐标容差（mm），与嵌套去重一致
         # 统计"内部包含的独立图框"时，内部候选面积需 < big×此比例才计数。
         # 排除同图框的重复画法（如 84100×59400 外框 + 80600×57400 内框，面积 91% 互相嵌套），
@@ -1120,19 +1141,25 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     #   例：84100×59400 图框内含 43031×49000 和 42724×48700（差<1%），
                     #   归同组 → contained=1，不误剔 A1 真图框。
                     #   真·外包络包 2 个不同尺寸图框 → 2 组 → contained=2 → 剔除外包络。
-                    groups = []  # 每组存一个代表尺寸
+                    #   补充规则：单个尺寸组实例数 ≥ MIN_WRAPPED_SAME_SIZE（如澜山 76736×28029
+                    #   外包络内含 15 个同尺寸 12fas 图框整齐排列）也应判为包裹框——
+                    #   真图框"内含同尺寸重复画法"至多 2~3 份（雅安），≥6 份必然是
+                    #   "包住一排子图框的外包络"，不该当成图框。
+                    groups = []  # 每组存 [代表候选, 实例数]
                     for ic in inners:
                         placed = False
                         for g in groups:
-                            if (abs(ic['width'] - g['width']) / max(ic['width'], g['width'], 1) < WRAP_SIZE_EPS and
-                                    abs(ic['height'] - g['height']) / max(ic['height'], g['height'], 1) < WRAP_SIZE_EPS):
+                            if (abs(ic['width'] - g[0]['width']) / max(ic['width'], g[0]['width'], 1) < WRAP_SIZE_EPS and
+                                    abs(ic['height'] - g[0]['height']) / max(ic['height'], g[0]['height'], 1) < WRAP_SIZE_EPS):
+                                g[1] += 1
                                 placed = True
                                 break
                         if not placed:
-                            groups.append(ic)
-                    if len(groups) >= MIN_WRAPPED_FRAMES:
+                            groups.append([ic, 1])
+                    if (len(groups) >= MIN_WRAPPED_FRAMES or
+                            any(g[1] >= MIN_WRAPPED_SAME_SIZE for g in groups)):
                         remove_set.add(i)
-                        inner_desc = "; ".join(f"{g['width']:.0f}x{g['height']:.0f}" for g in groups)
+                        inner_desc = "; ".join(f"{g[0]['width']:.0f}x{g[0]['height']:.0f}×{g[1]}" for g in groups)
                         safe_log(f"  [包裹框剔除] {big['layout']} | {big['width']:.1f}x{big['height']:.1f} | 独立尺寸组{len(groups)} | bbox={big['bbox']} | 组: {inner_desc}")
             if not remove_set:
                 return cands, 0
