@@ -697,6 +697,11 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     #        家具/符号类小块（短边通常 < 500mm）直接不入库，减少后续位置启发式数据量；
     #    (2) 位置启发：见下方"对齐排列剔除"，在预筛通过的候选上做。
     INSERT_MIN_SHORT_SIDE = 500  # mm：真建筑图框短边几乎都 ≥ 420mm（A2），家具/符号块通常 < 500
+    # 标准 A 系列短边集合：A0~A5 的短边。短边命中该集合（且长宽比合规）的 INSERT 视作
+    # "A 系图框块"放行入库——小图幅用块画图框很常见（支座.dwg 的 TILED_BLOCK 210×297=A4
+    # 竖版，短边 210<500 曾被误当家具块剔除 → 图框漏识别、全实体包围盒把外溢的"技术要求"
+    # MTEXT 撑到 225 → 输出 225×297 而非 210×297）。家具/门窗符号块短边一般不在 A 系序列。
+    _A_SERIES_SHORT_SIDES = (841, 594, 420, 297, 210, 148, 105)
     import math as _math
     _block_bbox_cache = {}
     def _get_block_world_bbox(_name, _visited=None):
@@ -775,10 +780,14 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             _w = _xM - _xm; _h = _yM - _ym
             if _w <= 0 or _h <= 0:
                 continue
-            # 预筛：尺寸必须"图框级"才入库，避免家具/符号类小块污染候选库
+            # 预筛：尺寸必须"图框级"才入库，避免家具/符号类小块污染候选库。
+            # 短边 <500 但命中标准 A 系列短边（A4 210/A3 297/A2 420…）的块也放行——
+            # 小图幅图框块（A4 竖 210×297 等）不能因阈值被误杀。
             _w_short = min(_w, _h)
             _w_ratio = (max(_w, _h) / _w_short) if _w_short > 0 else 0
-            if _w_short < INSERT_MIN_SHORT_SIDE or not (FRAME_RATIO_MIN <= _w_ratio <= FRAME_RATIO_MAX):
+            _is_a_series_short = any(abs(_w_short - _s) <= 1.0 for _s in _A_SERIES_SHORT_SIDES)
+            if ((_w_short < INSERT_MIN_SHORT_SIDE and not _is_a_series_short) or
+                    not (FRAME_RATIO_MIN <= _w_ratio <= FRAME_RATIO_MAX)):
                 _insert_filtered += 1
                 continue
             _bbox = (_xm, _ym, _xM, _yM)
@@ -816,12 +825,11 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         #    3.25: 块名"图框2" 11 个水平排列，841×594 命中 A1 → 白名单保护，不剔除）。
         #    装饰块尺寸通常非 A 系列（柱 700×1215、家具 1200×4800 等），不受白名单影响。
         import statistics as _stats
-        _STANDARD_A_SHORT_SIDES = (841, 594, 420, 297, 210, 148, 105)
         def _is_standard_a_series(w, h, eps=1.0):
             """尺寸是否为标准 A 系列整数尺寸（短边在标准集合内、长边≈短边×√2）
             eps=1.0 容差：尺寸规整容差 + 些许画图误差"""
             _short = min(w, h); _long = max(w, h)
-            for _std in _STANDARD_A_SHORT_SIDES:
+            for _std in _A_SERIES_SHORT_SIDES:
                 if abs(_short - _std) <= eps and abs(_long - _std * _math.sqrt(2)) <= eps:
                     return True
             return False
