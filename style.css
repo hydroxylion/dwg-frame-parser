@@ -663,8 +663,87 @@
             background: #f3ecfd;
             color: #5a3d9e;
             margin-left: 4px;
-            cursor: help;
+            cursor: pointer;
             white-space: nowrap;
+        }
+        /* 多图框气泡（悬停弹出 / 可钉住 / 一键复制全部 / 超长可滚动） */
+        .tip-pop {
+            position: fixed;
+            z-index: 10000;
+            background: #0e1c34;
+            color: #eaf1fb;
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            padding: 10px 14px 10px;
+            border-radius: 10px;
+            font-size: 13px;
+            line-height: 1.8;
+            box-shadow: 0 10px 30px rgba(10, 25, 50, 0.35);
+            pointer-events: none;
+            max-width: 420px;
+            min-width: 220px;
+        }
+        .tip-pop .tip-head {
+            font-size: 12px;
+            font-weight: 600;
+            color: #bcd0ea;
+            margin-bottom: 2px;
+        }
+        .tip-pop .tip-more {
+            color: #7f9ac0;
+            font-weight: 400;
+        }
+        .tip-pop .tip-summary {
+            color: #8fa6c8;
+            font-size: 12px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            border-bottom: 1px dashed rgba(255, 255, 255, 0.16);
+            padding: 0 0 3px;
+            margin-bottom: 2px;
+        }
+        .tip-pop .tip-list {
+            max-height: 420px;          /* 约 18 行：超过即出现滚动条 */
+            overflow-y: auto;
+            margin: 2px 0 6px;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(255, 255, 255, 0.35) transparent;
+        }
+        .tip-pop .tip-list .tip-line {
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
+        .tip-pop .tip-list .tip-times {
+            color: #ffd28a;
+            font-weight: 600;
+            font-size: 12px;
+            margin-left: 2px;
+        }
+        .tip-pop .tip-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border-top: 1px dashed rgba(255, 255, 255, 0.22);
+            padding-top: 6px;
+            pointer-events: auto;       /* 仅操作区可交互 */
+        }
+        .tip-pop .tip-btn {
+            background: rgba(255, 255, 255, 0.12);
+            color: #e8f0fc;
+            border: 1px solid rgba(255, 255, 255, 0.22);
+            padding: 2px 12px;
+            border-radius: 7px;
+            font-size: 12px;
+            font-family: inherit;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .tip-pop .tip-btn:hover {
+            background: rgba(255, 255, 255, 0.24);
+        }
+        .tip-pop .tip-btn.copied {
+            color: #8ef0b0;
+            border-color: #3d9e6a;
         }
         /* ===== 响应式 ===== */
         @media (max-width: 740px) {

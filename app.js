@@ -760,6 +760,11 @@ function formatFramesText(candidates) {
         + (candidates.length > 10 ? ` 等 ${candidates.length} 个` : '');
 }
 
+// 全量候选文本（供气泡完整展示 / 一键复制），不截断
+function formatFramesAll(candidates) {
+    return candidates.map(c => `${c.width}×${c.height}(${c.layout})`).join('、');
+}
+
 function addRecord(w, h, result, name, path, framesInfo) {
     const framePct = result.confidenceFrame !== undefined ? (result.confidenceFrame * 100).toFixed(1) : '';
     const scalePct = result.confidenceScale !== undefined ? (result.confidenceScale * 100).toFixed(1) : '';
@@ -783,6 +788,7 @@ function addRecord(w, h, result, name, path, framesInfo) {
         isFailed: false,
         frameCount: frameCount,
         framesText: frameCount > 1 ? formatFramesText(candidates) : '',
+        framesAll: frameCount > 1 ? formatFramesAll(candidates) : '',
     };
     records.push(record);
     saveRecords();
@@ -907,7 +913,7 @@ function renderRecords() {
         let frameCountHtml = '—';
         if (hasFrameCount) {
             frameCountHtml = (rec.frameCount > 1)
-                ? `<span class="type-tag multi-frame" title="${escHtml(rec.framesText || '悬停查看候选清单')}">🖼 ×${rec.frameCount}</span>`
+                ? `<span class="type-tag multi-frame tip-anchor" data-frames="${escHtml(rec.framesText || '')}" data-all="${escHtml(rec.framesAll || rec.framesText || '')}">🖼 ×${rec.frameCount}</span>`
                 : String(rec.frameCount);
         }
         const typeHtml = `<span class="type-tag ${typeInfo.cls}">${typeInfo.label}</span>`;
@@ -920,7 +926,7 @@ function renderRecords() {
             <td>${hDisplay}</td>
             <td>${frameCountHtml}</td>
             <td>${typeHtml}</td>
-            <td style="max-width:200px; word-break:break-word;">${escHtml(rec.actualResult)}</td>
+            <td style="max-width:280px; white-space:normal; word-break:break-word;">${escHtml(rec.actualResult)}</td>
             <td>${frameDisplay}</td>
             <td>${scaleDisplay}</td>
             <td><input class="editable" type="text" data-id="${rec.id}" data-field="expected" value="${escHtml(rec.expected)}" placeholder="如 A0" style="min-width:70px;" /></td>
@@ -961,12 +967,187 @@ function renderRecords() {
             if (confirm('确定删除该记录吗？')) {
                 deleteRecord(id);
             }
+            if (tipPop && tipPop.__pinned) hideTip();
         });
     });
+
+    // 多图框徽章：可截图气泡（悬停弹出 / 移开保留片刻 / 点击钉住常显）
+    bindTipAnchors(tbody);
 
     updateBatchUI();
 }
 
+// ---------- 图框数徽章气泡（可截图） ----------
+// 浏览器原生 title 气泡随鼠标移动消失，无法截图。改用自绘 fixed 定位气泡：
+//   - mouseenter 弹出完整列表（>10 个时顶部带"…等 N 个"摘要，列表可滚动看全部）
+//   - mouseleave 后保留 TIP_KEEP_MS 再消失（留出截图时间窗）；悬停操作区不消失
+//   - 气泡底部按钮：📌 固定（常显，配合截图）/ 再次点击关闭；📋 复制全部（全量数据）
+const TIP_KEEP_MS = 2500;          // 鼠标移出后气泡保留时长（供截图 / 移向操作区）
+let tipPop = null;                 // 气泡单例元素
+let tipAnchorEl = null;            // 当前锚点
+let tipHideTimer = null;
+let tipPinned = false;
+
+function ensureTipPop() {
+    if (!tipPop) {
+        tipPop = document.createElement('div');
+        tipPop.className = 'tip-pop';
+        tipPop.style.display = 'none';
+        document.body.appendChild(tipPop);
+    }
+    return tipPop;
+}
+
+function showTip(anchor) {
+    const framesText = anchor.dataset.frames || '';   // 摘要（前10 + 等 N 个，展示用）
+    const allText = anchor.dataset.all || framesText; // 全量明细（复制用）
+    const rawLines = String(allText).split('、').filter(Boolean);
+    const nRaw = rawLines.length;
+    if (nRaw === 0) return;
+    ensureTipPop();
+    // 按尺寸聚合：相同 宽×高 只显示一个，计数 ×n（保持原出现顺序）
+    const dimOrder = [];
+    const dimCount = new Map();
+    rawLines.forEach(line => {
+        const dim = line.split('(')[0].trim();   // 尺寸部分：841×594
+        if (!dimCount.has(dim)) {
+            dimCount.set(dim, 0);
+            dimOrder.push(dim);
+        }
+        dimCount.set(dim, dimCount.get(dim) + 1);
+    });
+    const dimRows = dimOrder.map(dim => {
+        const n = dimCount.get(dim);
+        return `<div class="tip-line">${escHtml(dim)}${n > 1 ? ` <span class="tip-times">×${n}</span>` : ''}</div>`;
+    }).join('');
+    const nDim = dimOrder.length;
+    const truncated = nRaw > 20;                      // 原始图框超 20 个才显示"…等 N 个"摘要行
+    tipPop.innerHTML =
+        `<div class="tip-head">共 ${nRaw} 个图框${nDim > 1 ? `（${nDim} 种尺寸）` : ''}${truncated ? ' <span class="tip-more">· 下方滚动查看</span>' : ''}</div>`
+        + (truncated ? `<div class="tip-summary" title="${escHtml(framesText)}">${escHtml(framesText)}</div>` : '')
+        + `<div class="tip-list">${dimRows}</div>`
+        + `<div class="tip-actions">
+             <button type="button" class="tip-btn tip-pin">${tipPinned ? '📌 已固定' : '📌 固定'}</button>
+             <button type="button" class="tip-btn tip-copy">📋 复制全部</button>
+           </div>`;
+    positionTip(anchor);
+    tipPop.style.display = 'block';
+    clearTimeout(tipHideTimer);
+    bindTipActions();
+    // 鼠标移开时若非钉住，延迟保留后隐藏（留截图窗口）
+    if (!tipPinned) {
+        tipHideTimer = setTimeout(() => { hideTip(); }, TIP_KEEP_MS);
+    }
+}
+
+function bindTipActions() {
+    // 操作区可交互（气泡其余区域 pointer-events:none）；悬停其上暂停自动隐藏
+    const actions = tipPop.querySelector('.tip-actions');
+    if (!actions) return;
+    actions.addEventListener('mouseenter', () => clearTimeout(tipHideTimer));
+    actions.addEventListener('mouseleave', () => {
+        if (!tipPinned && tipPop.style.display === 'block') {
+            clearTimeout(tipHideTimer);
+            tipHideTimer = setTimeout(() => { hideTip(); }, TIP_KEEP_MS);
+        }
+    });
+    actions.querySelector('.tip-pin').addEventListener('click', ev => {
+        ev.stopPropagation();
+        if (tipPinned) { hideTip(); return; }   // 再次点击已固定的气泡 → 关闭
+        tipPinned = true;
+        clearTimeout(tipHideTimer);
+        tipPop.querySelector('.tip-pin').textContent = '📌 已固定';
+    });
+    const copyBtn = actions.querySelector('.tip-copy');
+    copyBtn.addEventListener('click', async ev => {
+        ev.stopPropagation();
+        const allText = tipAnchorEl ? (tipAnchorEl.dataset.all || tipAnchorEl.dataset.frames || '') : '';
+        const payload = String(allText).split('、').filter(Boolean).join('\r\n');
+        const done = () => {
+            copyBtn.classList.add('copied');
+            copyBtn.textContent = '✓ 已复制';
+            setTimeout(() => { copyBtn.classList.remove('copied'); copyBtn.textContent = '📋 复制全部'; }, 1600);
+        };
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(payload);
+            } else {
+                const ta = document.createElement('textarea');
+                ta.value = payload;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                ta.remove();
+            }
+            done();
+        } catch (e) {
+            copyBtn.textContent = '⚠ 复制失败';
+            setTimeout(() => { copyBtn.textContent = '📋 复制全部'; }, 1600);
+        }
+    });
+}
+
+function positionTip(anchor) {
+    const r = anchor.getBoundingClientRect();
+    const pop = tipPop;
+    pop.style.visibility = 'hidden';
+    pop.style.display = 'block';
+    const pw = pop.offsetWidth, ph = pop.offsetHeight;
+    let x = r.left + r.width / 2 - pw / 2;
+    let y = r.bottom + 8;
+    // 视口越界回弹
+    if (x + pw > window.innerWidth - 8) x = Math.max(8, window.innerWidth - pw - 8);
+    if (x < 8) x = 8;
+    if (y + ph > window.innerHeight - 8) {
+        y = r.top - ph - 8;   // 放上方
+        if (y < 8) y = 8;
+    }
+    pop.style.left = x + 'px';
+    pop.style.top = y + 'px';
+    pop.style.visibility = 'visible';
+}
+
+function hideTip() {
+    if (tipPop) {
+        tipPop.style.display = 'none';
+        tipPinned = false;
+        tipAnchorEl = null;
+    }
+    clearTimeout(tipHideTimer);
+}
+
+function bindTipAnchors(root) {
+    root.querySelectorAll('.tip-anchor').forEach(el => {
+        el.addEventListener('mouseenter', function() {
+            tipPinned = false;
+            tipAnchorEl = this;
+            showTip(this);
+        });
+        el.addEventListener('click', function(ev) {
+            ev.stopPropagation();
+            if (tipPop && tipPop.style.display === 'block' && this === tipAnchorEl) {
+                if (tipPinned) { hideTip(); return; }      // 再次点击钉住的徽章 → 关闭
+                tipPinned = true;                          // 未钉住点击 → 钉住常显
+            } else {
+                tipPinned = true;
+                tipAnchorEl = this;
+            }
+            showTip(this);
+        });
+    });
+}
+
+// 点击页面其它区域关闭钉住的气泡；滚动/窗口缩放时隐藏（位置可能失效）
+document.addEventListener('click', function() {
+    if (tipPinned) hideTip();
+});
+['scroll', 'resize'].forEach(evt => {
+    window.addEventListener(evt, function() {
+        if (tipPop && tipPop.style.display === 'block') hideTip();
+    });
+}, { capture: true });
 
 function escHtml(str) {
     if (!str) return '';
