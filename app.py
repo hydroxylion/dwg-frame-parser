@@ -203,9 +203,14 @@ LINE_CLUSTER_EPS = 0.5            # 近似共线容差（图形单位，mm 图�
 LINE_CLUSTER_MAX_FOR_ALL_PAIRS = 16  # 每个方向聚类数不超过该值时才做全配对
 MIN_LINE_RECT_SIDE = 100          # 直线矩形最小短边（图形单位）
 MAX_LINE_RECT_CANDIDATES = 200    # 直线矩形候选数上限，防止异常图纸拖垮解析
-LINE_PAIR_FULL_SPAN = 300         # 聚类合并跨度 ≥ 该值视为"图框级长边"，密集聚类时也做全配对
+LINE_PAIR_FULL_SPAN = 180         # 聚类合并跨度 ≥ 该值视为"图框级长边"，密集聚类时也做全配对
                                   # （机械图纸细节线可致聚类数百组，真实图框边界相隔几十组，
                                   #   仅相邻配对永远配对不到；长边全配对找回远距离图框边界）
+                                  # 300→180：原 300 对"短边<300 的 LINE 图框"漏检——锁芯总装图
+                                  # 280×195 图框竖边覆盖仅 194.8 < 300，进不了长配通道，只相邻
+                                  # 配对隔 98 个聚类永远够不到 → 真图框漏识别、8 个 2.5×4 微孔
+                                  # 反成候选。180 覆盖 A4 竖边 210/A3 297 等常用下限（A5 148 仍
+                                  # 不入，A5 LINE 图框极罕见）。防组合爆炸由预过滤+比例剪枝+预算兜底。
 
 
 def _merge_segments(segs, eps=LINE_CLUSTER_EPS):
@@ -351,6 +356,13 @@ def detect_rectangles_from_lines(entity_list, rot=None):
              覆盖相隔很多聚类才出现的真实图框左右边界
               （夹具装配图：水平 402 组/垂直 627 组远超 MAX，841×594 图框边界
                相隔几十个内部细节线聚类，仅相邻配对永远够不到 → 3 张 A1 图框全漏）
+
+        预过滤：公共覆盖总长 < MIN_LINE_RECT_SIDE 的线对直接丢弃——公共覆盖短
+        说明两线无法共同"横跨/纵跨"任何 ≥ 短边下限的区间，无论与哪个方向配对都
+        不可能形成合法图框，保留只会浪费组合预算
+        （长中苑202室：全图 6206 LINE → 横/纵聚类 810/1390 → h_pairs 2.2万×v_pairs
+         15.9万，海量"超远装饰线对"公共覆盖仅数百，占满 20 万组合预算，封面
+         28261×19985 的真实线对排在 #3752×#111168 永远轮不到 → 封面漏识别）
         """
         pairs = []
         n = len(clusters)
@@ -361,8 +373,11 @@ def detect_rectangles_from_lines(entity_list, rot=None):
             c1, s1 = clusters[i]
             c2, s2 = clusters[j]
             common = _intersect_segments(s1, s2)
-            if common:
-                pairs.append((min(c1, c2), max(c1, c2), common))
+            if not common:
+                return
+            if sum(hi - lo for lo, hi in common) < MIN_LINE_RECT_SIDE:
+                return  # 公共覆盖过短，不可能形成合法矩形，预过滤丢弃
+            pairs.append((min(c1, c2), max(c1, c2), common))
 
         if n <= LINE_CLUSTER_MAX_FOR_ALL_PAIRS:
             # 小图纸：全配对
@@ -405,14 +420,35 @@ def detect_rectangles_from_lines(entity_list, rot=None):
     rects = []
     seen = set()
     examined = 0
-    MAX_EXAMINED = 200000  # 组合数上限，防止异常图纸（超密集网格）拖垮解析
-    # 按平行线间距降序排列线对：先试"大跨度"（图框级边界）组合。
-    # 若按坐标升序，密集图纸里 h_pairs/v_pairs 可达数千，图框远边界对排在
-    # 组合遍历的末尾，会被 MAX_EXAMINED 截断而永远轮不到（夹具装配图漏检根源）。
-    h_pairs.sort(key=lambda p: p[1] - p[0], reverse=True)
-    v_pairs.sort(key=lambda p: p[1] - p[0], reverse=True)
+    MAX_EXAMINED = 2000000  # 组合数上限，防止异常图纸（超密集网格）拖垮解析
+    # 排序键：先按「公共覆盖总长」降序，再按「平行线间距」降序。
+    # 公共覆盖长度代表这对线能撑起的矩形另一方向的最大跨度——真实图框的边线
+    # 覆盖长（长中苑封面横线对公共覆盖 28261、竖线对 19985），而密集图纸里海量
+    # "超远装饰线对"间距虽大但公共覆盖只有几百，按覆盖排序会沉底，不再抢占预算。
+    # 次级键间距降序保留夹具装配图的修复（图框远边界对优先于坐标相邻对）。
+    def _pair_order_key(p):
+        return (sum(hi - lo for lo, hi in p[2]), p[1] - p[0])
+    h_pairs.sort(key=_pair_order_key, reverse=True)
+    # v_pairs 按间距升序建立索引，组合循环内用「宽高比例剪枝」只遍历与当前 h_pair
+    # 间距成合理比例的 v_pair 子区间，避免外层每对横线都全扫十几万竖线对。
+    # 比例边界：图框归一化长宽比上限约 5.5（FRAME_RATIO_MAX），剪枝放宽到 8，
+    # 超出该比例的横竖线对组合不可能是图框（要么极端细长被 is_frame_like 拒，
+    # 要么本就是假组合），跳过不损失召回。夹具装配图式的远边界配对仍在区间内。
+    import bisect as _bisect
+    PAIR_RATIO_BOUND = 8.0
+    v_by_gap = sorted(v_pairs, key=lambda p: p[1] - p[0])
+    v_gaps = [p[1] - p[0] for p in v_by_gap]
     for (ya, yb, h_common) in h_pairs:
-        for (xa, xb, v_common) in v_pairs:
+        _H = yb - ya
+        if _H < MIN_LINE_RECT_SIDE:
+            continue  # 矩形高 < 短边下限：任何组合短边必 < 下限，整层跳过
+        _i0 = _bisect.bisect_left(v_gaps, max(MIN_LINE_RECT_SIDE, _H / PAIR_RATIO_BOUND))
+        # 右界同时受比例上限与公共覆盖总长限制：gap 超过本线对的公共覆盖总长时
+        # coverage 校验必失败（横线覆盖不了那么宽的矩形），无需扫描白白耗预算
+        _i1 = _bisect.bisect_right(v_gaps, min(_H * PAIR_RATIO_BOUND,
+                                              sum(hi - lo for lo, hi in h_common)))
+        for _vi in range(_i0, _i1):
+            xa, xb, v_common = v_by_gap[_vi]
             examined += 1
             if examined > MAX_EXAMINED:
                 rects.sort(key=lambda r: (r[2] - r[0]) * (r[3] - r[1]), reverse=True)
