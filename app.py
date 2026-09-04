@@ -52,6 +52,14 @@ def load_document(path):
     try:
         return odafc.readfile(path)
     except Exception as e:
+        # 某些 DWG 普通转换产物会被截断（块记录表中途停止，缺 ENDSEC/EOF），
+        # ezdxf 读入抛 DXFStructureError: missing ENDSEC tag（非圆减速器装配.dwg）。
+        # ODA 带 audit=True 会先审计/修复源文件流再转换，产物完整可正常解析。
+        # 兜底重试：audit 也失败时保留原错误往下走。
+        try:
+            return odafc.readfile(path, audit=True)
+        except Exception:
+            pass
         msg = str(e)
         if 'ODAFileConverter' in msg or 'Could not find' in msg:
             raise RuntimeError('未找到 ODA File Converter，无法解析 DWG 文件，请先安装 ODA File Converter')
