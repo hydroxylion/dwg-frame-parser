@@ -1073,9 +1073,26 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             ma = layout_max_area.get(c['layout'], 0)
             c['rel_area_ratio'] = (c['area'] / ma) if ma > 0 else 0.0
 
+        # 同 layout 同尺寸「直线矩形」计数（条件D：套图小页框重复排版判定）
+        _rect_size_count = {}
+        for _c in all_candidates:
+            if _c.get('type') == '直线矩形':
+                _rk = (_c['layout'], round(_c['width']), round(_c['height']))
+                _rect_size_count[_rk] = _rect_size_count.get(_rk, 0) + 1
+
         def is_frame_like(c):
             if not (FRAME_RATIO_MIN <= c['ratio'] <= FRAME_RATIO_MAX):
                 return False
+            # 同 layout 同尺寸「直线矩形」出现次数预统计（条件D 用）：
+            # 多尺度"套图"里小页框面积可能远小于最大图框（rel 只有 2~3% 过不了
+            # 条件C），但同尺寸 ≥2 份说明是刻意重复排版的一页（电子称皮带输送系统：
+            # 14894×10531 页框 ×2，rel=2.9% 被 C 拒）；真页框以外极少有"同尺寸
+            # √2 比例 + 四边完整 LINE"的矩形刻意重复 ≥2 次。
+            if c['type'] == '直线矩形':
+                _rk = (c['layout'], round(c['width']), round(c['height']))
+                _rect_same_size = _rect_size_count.get(_rk, 0)
+            else:
+                _rect_same_size = 0
             # 异常候选过滤：area_ratio 显著 > 1.0 → 候选面积超过 layout 总面积，
             # 不可能是真图框（必是计算异常或外包络伪候选）。
             # 场景：一层平面图3.25 的 374988×144477 巨块（INSERT 块 A$C6BED430F）
@@ -1112,7 +1129,12 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             # 条件C：相对面积达标（跟单位无关，处理多图框同 layout 场景）
             #   必须在条件B 之前：雅安类图纸短边超 2000 过不了B，但相对面积能过C。
             #   附加约束：长宽比 ≥ √2（允许加长版图框，过滤接近正方形的误判候选）
-            if c['rel_area_ratio'] >= REL_AREA_THRESHOLD and _at_least_sqrt2:
+            #   且 ≤ 2.5（上限防"内容块 bbox"冒充图框——机械/总装图里大块内容的外形
+            #   包围盒常是 3~4 倍细长比，如电子称皮带输送系统 A$C67EE090B
+            #   127686×34157 长宽比 3.74 靠 rel=80% 过 C 被误收；真图纸页框长宽比
+            #   通常 ≤ ~2.1（A 系 + 常用加长），2.5 留足余量）。
+            if (c['rel_area_ratio'] >= REL_AREA_THRESHOLD and _at_least_sqrt2
+                    and c['ratio'] <= 2.5):
                 return True
             # 条件B：显式检测 + 短边在合理范围（绕过面积占比，适用于密集几何场景）
             #   + 尺寸规整：宽高都接近整数，过滤墙线交错产生的非整数闭合多段线轮廓
@@ -1129,6 +1151,16 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         _near_sqrt2 and
                         (c['type'] != '直线矩形' or c['rel_area_ratio'] >= REL_AREA_THRESHOLD)):
                     return True
+            # 条件D：同尺寸重复的 √2 直线矩形（套图小页框，绕过条件C 的 10% rel 门槛）
+            #   直线矩形 + 长宽比接近 √2 + 同 layout 同尺寸 ≥2 份 + 相对面积 ≥1%
+            #   + 短边 ≥500 → 判为刻意重复排版的图纸页（电子称皮带输送系统：
+            #   14894×10531 页框 ×2，rel=2.9% 过不了 C 但确为真页框）。
+            #   rel≥1% 排除重复表格/阵列矩形（如 1300×2000×12 rel=0.05%、1575×1100），
+            #   它们不是图框却同尺寸成批出现。
+            if (c['type'] == '直线矩形' and c['short_side'] >= 500
+                    and _near_sqrt2 and _rect_same_size >= 2
+                    and c['rel_area_ratio'] >= 0.01):
+                return True
             return False
 
         frame_like = [c for c in all_candidates if is_frame_like(c)]
