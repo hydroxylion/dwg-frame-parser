@@ -115,6 +115,81 @@ def get_entity_bbox(entity, doc):
         pass
     return None
 
+# ---------- 全局旋转矫正 ----------
+# 场景：部分图纸在自定义 UCS 下绘制（整体绕 Z 旋转一个小角度），实体坐标存 WCS 时是斜的。
+# 图框/墙线等本应水平/垂直的线会整体倾斜（总图-排水.dwg：UCS 旋转 3.3°，图框 297×420
+# 存成 320.75×436.92 的轴对齐 bbox，矩形度 0.891 < 0.92 被收集逻辑误杀）。
+# 处理：统计可见实体线段的主方向 θ（按线段长度加权，长边=结构线优先），若明显偏离
+# 水平/垂直（> ROT_TRIGGER_DEG）且"主方向族+正交族"合计长度占比 ≥ ROT_DOMINANT_RATIO
+# （整图主体确实共用一个旋转 UCS），后续收集坐标时先施加旋转矩阵把图纸"转正"，
+# 使图框变为轴对齐，原有矩形度/直线矩形检测恢复有效。
+# 注意：混合方向图纸不触发——如美立方总平图（图框轴对齐，但 ~56% 长度的块内容转 3.5°），
+# 若按全图主峰旋转会把轴对齐图框转歪导致回归，需主体共旋门限保护。
+ROT_BIN_COUNT = 180            # 角度直方图分桶（1°/桶），量化误差 ≤0.5°
+ROT_TRIGGER_DEG = 1.5          # 主方向偏离最近 90° 倍数超过该角度才触发旋转矫正
+ROT_MIN_SAMPLES = 6            # 参与角度统计的最少线段数（太少不可信，不旋转）
+ROT_DOMINANT_RATIO = 0.65      # 主方向族(+正交 90°)合计长度占比 ≥ 此值才视为整图共旋
+
+
+def _estimate_global_rotation(entities):
+    """估计图纸整体主方向并返回旋转矩阵参数 (cosθ, sinθ)（把主方向转回水平/垂直）。
+    参与线段：LINE 方向 + LWPOLYLINE 相邻边方向（无向角，归约到 [0, π)），按长度加权。
+    判定（全部满足才旋转）：
+      1. 主峰方向 θ 偏离最近水平/垂直（0/90° 倍数）> ROT_TRIGGER_DEG
+      2. 主方向族（θ±1.5°）与其正交族（θ+90°±1.5°）的加权长度占比 ≥ ROT_DOMINANT_RATIO
+         —— 避免"图框轴对齐 + 部分内容旋转"的混合图纸被误旋转
+    否则返回 None（无需矫正）。
+    """
+    import math as _m
+    _hist = [0.0] * ROT_BIN_COUNT
+    _total_len = 0.0
+    _seg_cnt = 0
+    for _ent in entities:
+        try:
+            _t = _ent.dxftype()
+            if _t == 'LINE':
+                _p1, _p2 = _ent.dxf.start, _ent.dxf.end
+                _segs = [((_p1.x, _p1.y), (_p2.x, _p2.y))]
+            elif _t == 'LWPOLYLINE':
+                _pts = list(_ent.get_points('xy'))
+                _segs = [((a[0], a[1]), (b[0], b[1]))
+                         for a, b in zip(_pts, _pts[1:] + _pts[:1])]
+            else:
+                continue
+            for (_x1, _y1), (_x2, _y2) in _segs:
+                _dx, _dy = _x2 - _x1, _y2 - _y1
+                _len = _m.hypot(_dx, _dy)
+                if _len < 1e-9:
+                    continue
+                _seg_cnt += 1
+                _total_len += _len
+                _a = _m.atan2(_dy, _dx) % _m.pi
+                _hist[int(_a / _m.pi * ROT_BIN_COUNT) % ROT_BIN_COUNT] += _len
+        except Exception:
+            continue
+    if _seg_cnt < ROT_MIN_SAMPLES or _total_len <= 0:
+        return None
+    _peak = max(range(ROT_BIN_COUNT), key=lambda i: _hist[i])
+    _theta = (_peak + 0.5) / ROT_BIN_COUNT * _m.pi  # 峰值桶中心（度）
+    # 主方向族：θ±ROT_TRIGGER_DEG 与其正交族 (θ+90°)±ROT_TRIGGER_DEG 的加权占比
+    _win = int(ROT_TRIGGER_DEG)
+    def _bin_w(_deg):
+        # 把 [0,180) 内的度区间（可能跨 180 回绕）计入直方图
+        _s = 0.0
+        for _i in range(-_win, _win + 1):
+            _b = int((_deg + _i) % 180)
+            _s += _hist[_b]
+        return _s
+    _theta_deg = _peak + 0.5
+    _fam = _bin_w(_theta_deg) + _bin_w((_theta_deg + 90.0) % 180.0)
+    if _fam < _total_len * ROT_DOMINANT_RATIO:
+        return None  # 主体未共旋（混合方向图纸），不旋转避免误伤轴对齐图框
+    # 主方向偏离最近 90° 倍数（水平/垂直）的角度
+    _nearest = round(_theta / (_m.pi / 2)) * (_m.pi / 2)
+    if abs(_theta - _nearest) <= _m.radians(ROT_TRIGGER_DEG):
+        return None
+    return (_m.cos(_theta), _m.sin(_theta))  # 旋转矩阵参数，使主方向转回 0°
+
 # ---------- 直线矩形检测（多矩形版） ----------
 # 旧实现把一个空间里所有 LINE 的全局最外框当成唯一矩形：一个布局里画了 2 个图框时，
 # 得到的是包住两者的外包络——一个不属于任何真实图框的错误尺寸。
@@ -208,7 +283,7 @@ def _has_full_side_line(lines, coord, lo, hi, eps=LINE_CLUSTER_EPS):
     return False
 
 
-def detect_rectangles_from_lines(entity_list):
+def detect_rectangles_from_lines(entity_list, rot=None):
     """从 LINE 实体中检测多个矩形候选，返回 bbox 列表（面积降序）。
 
     判定规则：
@@ -219,6 +294,9 @@ def detect_rectangles_from_lines(entity_list):
     - 矩形内部若存在整条穿越的分隔线（如两个并排图框的公共边），判定为
       拼合外包络，予以剔除，避免把"包住多个图框的大矩形"当成图框
     - 短边 ≥ MIN_LINE_RECT_SIDE，过滤家具/表格/标题栏等小矩形
+
+    rot: 全局旋转矫正参数 (cosθ, sinθ)。图纸在自定义 UCS 下整体倾斜绘制时，
+    线段端点先经该矩阵旋转回水平/垂直，使水平/垂直聚类恢复有效。
     """
     h_lines = []
     v_lines = []
@@ -236,6 +314,12 @@ def detect_rectangles_from_lines(entity_list):
             end = ocs.to_wcs(end)
         except Exception:
             pass  # 无 extrusion / 转换失败时按原坐标处理
+        if rot is not None:
+            # 全局旋转矫正：把整体倾斜的图纸"转正"为水平/垂直
+            from ezdxf.math import Vec2
+            c, s = rot
+            start = Vec2(start.x * c + start.y * s, -start.x * s + start.y * c)
+            end = Vec2(end.x * c + end.y * s, -end.x * s + end.y * c)
         if abs(start.y - end.y) <= LINE_CLUSTER_EPS:
             # 近似水平线：按 y 聚类，记录 x 线段
             h_lines.append(((start.y + end.y) / 2.0,
@@ -471,6 +555,18 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         if invisible_layers:
             log_parts.append(f"冻结图层: {sorted(invisible_layers)}")
         safe_log(f"  [{layout_name}] " + " | ".join(log_parts))
+    # 全局旋转矫正：图纸在自定义 UCS 下整体倾斜绘制（实体坐标斜存 WCS）时，
+    # 先估计主方向并"转正"，使图框变为轴对齐，矩形度/水平垂直检测恢复有效。
+    _rot = _estimate_global_rotation(visible_entities)
+    if _rot:
+        safe_log(f"  [{layout_name}] 检测到整体倾斜图纸，施加旋转矫正 (cos={_rot[0]:.4f}, sin={_rot[1]:.4f})")
+
+    def _rot_pt(x, y):
+        """施加全局旋转（rot 为 None 时原样返回）"""
+        if _rot is None:
+            return (x, y)
+        return (x * _rot[0] + y * _rot[1], -x * _rot[1] + y * _rot[0])
+
     # 1. 闭合多段线（加矩形度过滤：bbox面积/多边形面积 > 阈值才算候选）
     #    L 形标题栏、T 形会签栏等非矩形闭合线的矩形度远低于 1.0，
     #    真正的图框边线（矩形或近矩形）矩形度 > 0.95。
@@ -482,6 +578,9 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             if is_polyline_closed(entity):
                 vertices = get_polyline_vertices(entity)
                 if len(vertices) >= 3:
+                    if _rot is not None:
+                        # 全局旋转矫正：倾斜图纸先"转正"，矩形度/宽高才反映真实图框
+                        vertices = [_rot_pt(p[0], p[1]) for p in vertices]
                     area = polygon_area(vertices)
                     if area > 0:
                         xs = [p[0] for p in vertices]
@@ -576,16 +675,19 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             _xs = _entity.dxf.xscale; _ys = _entity.dxf.yscale
             if abs(_xs) < 1e-9 or abs(_ys) < 1e-9:
                 continue
-            _rot = getattr(_entity.dxf, 'rotation', 0)
+            _ins_rot = getattr(_entity.dxf, 'rotation', 0)
             _bx1, _by1, _bx2, _by2 = _bb_def
             _local_pts = [(_bx1*_xs, _by1*_ys), (_bx2*_xs, _by1*_ys),
                           (_bx1*_xs, _by2*_ys), (_bx2*_xs, _by2*_ys)]
-            if _rot:
-                _cr = _math.cos(_rot); _sr = _math.sin(_rot)
+            if _ins_rot:
+                _cr = _math.cos(_ins_rot); _sr = _math.sin(_ins_rot)
                 _local_pts = [(p[0]*_cr - p[1]*_sr, p[0]*_sr + p[1]*_cr)
                               for p in _local_pts]
             _ip = (_entity.dxf.insert.x, _entity.dxf.insert.y)
             _wpts = [(p[0] + _ip[0], p[1] + _ip[1]) for p in _local_pts]
+            if _rot is not None:
+                # 全局旋转矫正：倾斜图纸的块框转正后尺寸/方向才真实
+                _wpts = [_rot_pt(p[0], p[1]) for p in _wpts]
             _xm = min(p[0] for p in _wpts); _ym = min(p[1] for p in _wpts)
             _xM = max(p[0] for p in _wpts); _yM = max(p[1] for p in _wpts)
             _w = _xM - _xm; _h = _yM - _ym
@@ -681,7 +783,7 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     # 2. 直线矩形（多矩形检测：每个由 4 条直线围出的区域都是一个候选）
     lines = [ent for ent in visible_entities if ent.dxftype() == 'LINE']
     if lines:
-        for rect_bbox in detect_rectangles_from_lines(lines):
+        for rect_bbox in detect_rectangles_from_lines(lines, rot=_rot):
             x1, y1, x2, y2 = rect_bbox
             width = x2 - x1
             height = y2 - y1
@@ -832,9 +934,14 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             c['ratio'] = normalized_ratio(c['width'], c['height'])
             c['short_side'] = min(c['width'], c['height'])
 
-        # 预计算每个 layout 的最大候选面积，供条件 C 使用（相对面积法分母）
+        # 预计算每个 layout 的最大候选面积，供条件 C 使用（相对面积法分母）。
+        # 排除 area_ratio>1.0 的异常候选（面积超过 layout 总面积必为计算异常/离群大块，
+        # 如底图块 X-总图排水底图 88 万级别 INSERT），否则真图框 rel_area 被稀释到 <10%
+        # 条件C 全挂（UCS图纸/含远距离底图块的图纸）。
         layout_max_area = {}
         for c in all_candidates:
+            if c['area_ratio'] > 1.0:
+                continue  # 异常候选不作为相对面积参考
             ln = c['layout']
             if ln not in layout_max_area or c['area'] > layout_max_area[ln]:
                 layout_max_area[ln] = c['area']
