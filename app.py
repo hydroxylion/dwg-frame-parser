@@ -1212,6 +1212,19 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     # 其内部的标题栏/家具/房间小矩形尺寸组数多，会被错判为"内含多个图框"。
                     if big.get('type') == '块参照插入':
                         continue
+                    # 自身为 √2±10% 的显式矩形（闭合多段线/直线矩形）→ 是"纸张边框"而非拼版外框，
+                    # 不做包裹剔除，其内部内容（表格/标题栏/内圈线）交给嵌套去重收掉。
+                    #   场景：泛悦国际 图纸目录.dwg——真图框是 PUB_TITLE 图层双层框
+                    #   42000×29700（ratio 1.414）+ 39000×28700（ratio 1.359），内含"图纸目录
+                    #   表格外框 24308×21700 + 西南院标题栏块 7000×28700"两个尺寸组，被旧规则
+                    #   当外包络剔除 → 真框没了、两个内容残留成 2 个"图框"。
+                    #   拼版/外包络真目标（澜山 76736×28029 ratio 2.74、一层 374988×144477
+                    #   ratio 2.59）比例远离 √2，不受影响；真图框（纸张）必接近 √2。
+                    _bw = max(big['width'], big['height'])
+                    _bs = min(big['width'], big['height'])
+                    if (_bs > 0 and big.get('type') in EXPLICIT_TYPES
+                            and abs(_bw / _bs - 2 ** 0.5) / (2 ** 0.5) <= 0.10):
+                        continue
                     # 收集 big 内部、面积显著小于 big 的候选（排除同图框重复画法本身的互相嵌套）
                     inners = [cands[j] for j in indices
                               if j != i and _is_contained(cands[j], big)
