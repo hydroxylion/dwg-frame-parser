@@ -1139,17 +1139,19 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             # 条件B：显式检测 + 短边在合理范围（绕过面积占比，适用于密集几何场景）
             #   + 尺寸规整：宽高都接近整数，过滤墙线交错产生的非整数闭合多段线轮廓
             #   + 长宽比接近 √2（±10%）
-            #   + 直线矩形额外要求相对面积达标：LINE 线框若连"同 layout 最大候选的
-            #     10%"都不到，只是空间里众多小矩形之一，不是图框（一层平面图模型空间
-            #     450×600——模型空间没有图框，该矩形是 CAD 远处残留几何）。真 LINE 图框
-            #     （夹具 3×841×594）是所在空间最大候选，rel ≈100% 不受影响。
-            #     闭合多段线不设此限：730×540 等装饰框需留在 frame_like 供外层包裹框
-            #     识别作"内含尺寸组"证据（澜山 76736×28029 外包络）。
+            #   + 显式类型（直线矩形/闭合多段线）都要求相对面积 ≥10%：若连"同 layout
+            #     最大候选的 10%"都不到，只是空间里众多小矩形之一，不是图框（一层平面图
+            #     模型空间 450×600 直线矩形、新古典式 1185×830×2 闭合多段线——主图框
+            #     下方的孤立小矩形，rel 0.3%，都因此被过滤）。真图框通常是所在空间
+            #     最大候选或占比可观，不受影响。
+            #     历史注：曾豁免闭合多段线（730×540 等装饰框需留在 frame_like 给澜山
+            #     76736 外包络当"第二尺寸组"证据）——现外包络剔除已有"单尺寸组实例
+            #     ≥3 判拼版"规则兜底，不再依赖小装饰框的陪跑角色。
             if c['type'] in EXPLICIT_TYPES and MIN_FRAME_SHORT_SIDE <= c['short_side'] <= MAX_FRAME_SHORT_SIDE:
                 if (abs(c['width'] - round(c['width'])) <= SIZE_ROUNDNESS_EPS and
                         abs(c['height'] - round(c['height'])) <= SIZE_ROUNDNESS_EPS and
                         _near_sqrt2 and
-                        (c['type'] != '直线矩形' or c['rel_area_ratio'] >= REL_AREA_THRESHOLD)):
+                        c['rel_area_ratio'] >= REL_AREA_THRESHOLD):
                     return True
             # 条件D：同尺寸重复的 √2 直线矩形（套图小页框，绕过条件C 的 10% rel 门槛）
             #   直线矩形 + 长宽比接近 √2 + 同 layout 同尺寸 ≥2 份 + 相对面积 ≥1%
