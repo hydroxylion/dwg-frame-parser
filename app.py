@@ -203,6 +203,9 @@ LINE_CLUSTER_EPS = 0.5            # 近似共线容差（图形单位，mm 图�
 LINE_CLUSTER_MAX_FOR_ALL_PAIRS = 16  # 每个方向聚类数不超过该值时才做全配对
 MIN_LINE_RECT_SIDE = 100          # 直线矩形最小短边（图形单位）
 MAX_LINE_RECT_CANDIDATES = 200    # 直线矩形候选数上限，防止异常图纸拖垮解析
+LINE_PAIR_FULL_SPAN = 300         # 聚类合并跨度 ≥ 该值视为"图框级长边"，密集聚类时也做全配对
+                                  # （机械图纸细节线可致聚类数百组，真实图框边界相隔几十组，
+                                  #   仅相邻配对永远配对不到；长边全配对找回远距离图框边界）
 
 
 def _merge_segments(segs, eps=LINE_CLUSTER_EPS):
@@ -338,19 +341,49 @@ def detect_rectangles_from_lines(entity_list, rot=None):
 
     def make_pairs(clusters):
         """生成线对 (coord1, coord2, 公共覆盖线段)。
-        公共覆盖 = 两条线各自线段覆盖的交集，为空则这对线围不出区域。"""
+        公共覆盖 = 两条线各自线段覆盖的交集，为空则这对线围不出区域。
+
+        双通道配对（防组合爆炸 + 找回远距离图框边界）：
+        - 聚类数 ≤ MAX 时直接两两全配对（小图纸）
+        - 聚类数多（密集网格/机械图细节线多）时：
+          ① 相邻通道：仅配相邻聚类（原有逻辑，可捕获相邻小框）
+          ② 长线全配通道：跨度 ≥ LINE_PAIR_FULL_SPAN 的"图框级长边"聚类两两全配对，
+             覆盖相隔很多聚类才出现的真实图框左右边界
+              （夹具装配图：水平 402 组/垂直 627 组远超 MAX，841×594 图框边界
+               相隔几十个内部细节线聚类，仅相邻配对永远够不到 → 3 张 A1 图框全漏）
+        """
         pairs = []
         n = len(clusters)
-        all_pairs = n <= LINE_CLUSTER_MAX_FOR_ALL_PAIRS
-        for i in range(n):
-            j_list = range(i + 1, n) if all_pairs else ([i + 1] if i + 1 < n else [])
-            for j in j_list:
-                c1, s1 = clusters[i]
-                c2, s2 = clusters[j]
-                common = _intersect_segments(s1, s2)
-                if common:
-                    pairs.append((min(c1, c2), max(c1, c2), common))
-        return pairs
+        if n < 2:
+            return pairs
+
+        def add_pair(i, j):
+            c1, s1 = clusters[i]
+            c2, s2 = clusters[j]
+            common = _intersect_segments(s1, s2)
+            if common:
+                pairs.append((min(c1, c2), max(c1, c2), common))
+
+        if n <= LINE_CLUSTER_MAX_FOR_ALL_PAIRS:
+            # 小图纸：全配对
+            for i in range(n):
+                for j in range(i + 1, n):
+                    add_pair(i, j)
+        else:
+            # 通道①：相邻配对（原有逻辑）
+            for i in range(n - 1):
+                add_pair(i, i + 1)
+            # 通道②：图框级长边聚类全配对
+            long_idx = [i for i in range(n)
+                        if clusters[i][1][-1][1] - clusters[i][1][0][0] >= LINE_PAIR_FULL_SPAN]
+            for a in range(len(long_idx)):
+                for b in range(a + 1, len(long_idx)):
+                    add_pair(long_idx[a], long_idx[b])
+        # 按坐标去重（相邻通道与长线全配通道可能产生同一线对）
+        uniq = {}
+        for p in pairs:
+            uniq.setdefault((p[0], p[1]), p)
+        return list(uniq.values())
 
     h_pairs = make_pairs(h_clusters)  # (ya, yb, 两条横线的公共 x 覆盖)
     v_pairs = make_pairs(v_clusters)  # (xa, xb, 两条纵线的公共 y 覆盖)
@@ -373,6 +406,11 @@ def detect_rectangles_from_lines(entity_list, rot=None):
     seen = set()
     examined = 0
     MAX_EXAMINED = 200000  # 组合数上限，防止异常图纸（超密集网格）拖垮解析
+    # 按平行线间距降序排列线对：先试"大跨度"（图框级边界）组合。
+    # 若按坐标升序，密集图纸里 h_pairs/v_pairs 可达数千，图框远边界对排在
+    # 组合遍历的末尾，会被 MAX_EXAMINED 截断而永远轮不到（夹具装配图漏检根源）。
+    h_pairs.sort(key=lambda p: p[1] - p[0], reverse=True)
+    v_pairs.sort(key=lambda p: p[1] - p[0], reverse=True)
     for (ya, yb, h_common) in h_pairs:
         for (xa, xb, v_common) in v_pairs:
             examined += 1
