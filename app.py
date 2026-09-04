@@ -1324,6 +1324,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 for c in sorted_group:
                     cx1, cy1, cx2, cy2 = c['bbox']
                     should_remove = False
+                    hit_outer = None
                     for outer in result:
                         if outer['layout'] != layout_name:
                             continue
@@ -1333,6 +1334,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                             cx2 <= ox2 + NESTED_EPS and cy2 <= oy2 + NESTED_EPS and
                             c['area'] < outer['area'] * NESTED_AREA_RATIO):
                             should_remove = True
+                            hit_outer = outer
                             break
                         # 规则2：IoU 重叠——c 与 outer 重叠度 > 阈值，且面积不大于 outer
                         #   <= 而非 <：面积完全相等的重叠矩形（同一图框被画两遍/检测两次）
@@ -1342,7 +1344,10 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                             iou = bbox_iou(c['bbox'], outer['bbox'])
                             if iou > IOU_THRESHOLD:
                                 should_remove = True
+                                hit_outer = outer
                                 break
+                    if should_remove:
+                        safe_log(f"    [去重剔除] {c['width']:.0f}x{c['height']:.0f}@{c['layout']} 被 {hit_outer['width']:.0f}x{hit_outer['height']:.0f}@{hit_outer['layout']} (bbox {tuple(round(v) for v in c['bbox'])} ⊂/≈ {tuple(round(v) for v in hit_outer['bbox'])})")
                     if not should_remove:
                         result.append(c)
             return result
