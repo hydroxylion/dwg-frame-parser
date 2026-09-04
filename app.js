@@ -732,6 +732,57 @@ function getRecordType(rec) {
     return rec.type || 'nonstandard';
 }
 
+// ---------- 混合图纸（标准 + 非标并存） ----------
+// 一个 dwg 里可能同时检出"标准图框"与"非标图框"（如 16 张标准图 + 1 张非标封面）。
+// 文件级类型由主框决定（不破坏现有 4 类），此处额外识别"混合"并逐框统计构成。
+// 不改变 getRecordType() 返回值，仅作为附加徽标与筛选维度。
+
+// 逐框分类统计：framesMeta（结构化候选）→ { type -> count }，旧记录无 framesMeta 返回 null
+function classifyFrames(rec) {
+    const meta = rec && Array.isArray(rec.framesMeta) ? rec.framesMeta : null;
+    if (!meta || meta.length === 0) return null;
+    const groups = {};
+    let valid = 0;
+    meta.forEach(m => {
+        if (!m.w || !m.h || m.w <= 0 || m.h <= 0) return;
+        const t = judgeSize(m.w, m.h).type;
+        groups[t] = (groups[t] || 0) + 1;
+        valid += 1;
+    });
+    if (valid === 0) return null;
+    return groups;
+}
+
+// 是否"混合"：同一文件内"标准族（standard）"与"非标族（extended/fallback/nonstandard）"
+// 图框并存（如 16 张标准图 + 1 张非标封面）。前端收到的候选已过特征筛选，都是有效
+// 图框，因此只要两族各 ≥1 即视为混合——不存在"伪框噪声"把文件误标混合的问题。
+// 全非标（如 3 张非标加长）或全标准 → 不标混合，维持单族语义。
+function isMixedRecord(rec) {
+    const groups = classifyFrames(rec);
+    if (!groups) return false;
+    const std = groups.standard || 0;
+    const total = Object.values(groups).reduce((s, n) => s + n, 0);
+    return std > 0 && std < total;
+}
+
+// 混合构成的展示摘要：如 "标准×16 · 非标准×1"
+function mixedSummary(rec) {
+    const groups = classifyFrames(rec);
+    if (!groups) return '';
+    const short = {
+        standard: '标准',
+        extended: '非标加长',
+        fallback: '近似',
+        nonstandard: '非标准',
+        failed: '失败',
+    };
+    // 按数量降序
+    return Object.entries(groups)
+        .sort((a, b) => b[1] - a[1])
+        .map(([t, n]) => `${short[t] || t}×${n}`)
+        .join(' · ');
+}
+
 function addFailedRecord(name, errorMsg, path) {
     const timestamp = new Date().toLocaleString('zh-CN', { hour12: false });
     const record = {
@@ -772,6 +823,12 @@ function addRecord(w, h, result, name, path, framesInfo) {
     const candidates = (framesInfo && framesInfo.candidates) || [];
     // 多图框信息由记录表「图框数」列展示，这里不再拼进实际判断结果
     const actualResult = result.label + ' · ' + result.detail;
+    // 结构化候选（每框 w/h/layout），供逐框分类判断"标准+非标混合"
+    const framesMeta = candidates.map(c => ({
+        w: c.width,
+        h: c.height,
+        layout: c.layout,
+    }));
     const record = {
         id: ++recordIdCounter,
         name: name || '',
@@ -789,6 +846,7 @@ function addRecord(w, h, result, name, path, framesInfo) {
         frameCount: frameCount,
         framesText: frameCount > 1 ? formatFramesText(candidates) : '',
         framesAll: frameCount > 1 ? formatFramesAll(candidates) : '',
+        framesMeta: framesMeta,
     };
     records.push(record);
     saveRecords();
@@ -849,6 +907,9 @@ function getActiveFilters() {
 function recordMatchesFilter(rec) {
     const activeFilters = getActiveFilters();
     if (activeFilters.length === 0) return true; // 无选中则显示全部
+    // "混合"是附加维度：勾选时混合记录直接命中（其主导类型可能仍是 standard 等）。
+    // 未勾选"混合"时，混合记录仍按主导类型参与原 4 类过滤，不破坏现有分类视图。
+    if (activeFilters.includes('mixed') && isMixedRecord(rec)) return true;
     const recType = getRecordType(rec);
     return activeFilters.includes(recType);
 }
@@ -907,6 +968,12 @@ function renderRecords() {
         const scaleDisplay = rec.scaleConf || '—';
         const rowClass = rec.isFailed ? 'record-failed' : '';
         const typeInfo = typeLabels[getRecordType(rec)] || { label: '未知', cls: 'nonstandard' };
+        // 混合徽章：文件内同时检出"标准 + 非标"等多类图框（如 16 标准 + 1 封面非标）。
+        // 仅附加展示，不改变主导类型（不破坏现有 4 类筛选/统计）。
+        const mixedHtml = isMixedRecord(rec)
+            ? `<span class="type-tag mixed" title="构成：${escHtml(mixedSummary(rec))}">🌀 混合</span>`
+            : '';
+        const typeHtml = `<span class="type-tag ${typeInfo.cls}">${typeInfo.label}</span>${mixedHtml}`;
         // 图框数列：展示该图纸检测到的图框数量（模型空间 + 布局空间合计）。
         // 多图框时用紫色徽章，悬停可查看全部候选的尺寸与所在空间；手动输入/失败记录显示 —。
         const hasFrameCount = rec.frameCount && rec.frameCount > 0;
@@ -916,7 +983,6 @@ function renderRecords() {
                 ? `<span class="type-tag multi-frame tip-anchor" data-frames="${escHtml(rec.framesText || '')}" data-all="${escHtml(rec.framesAll || rec.framesText || '')}">🖼 ×${rec.frameCount}</span>`
                 : String(rec.frameCount);
         }
-        const typeHtml = `<span class="type-tag ${typeInfo.cls}">${typeInfo.label}</span>`;
 
         html += `<tr class="${rowClass}">
             <td class="col-check"><input type="checkbox" class="row-check" data-id="${rec.id}" ${selectedIds.has(rec.id) ? 'checked' : ''} /></td>
@@ -1195,8 +1261,9 @@ function exportCsv(filtered) {
         fallback: '近似匹配',
         nonstandard: '非标准',
         failed: '解析失败',
+        mixed: '混合',
     };
-    const allTypes = ['standard', 'extended', 'fallback', 'nonstandard', 'failed'];
+    const allTypes = ['standard', 'extended', 'fallback', 'nonstandard', 'failed', 'mixed'];
     const active = getActiveFilters();
     const suffix = (active.length === allTypes.length || active.length === 0)
         ? '全部'

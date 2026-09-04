@@ -659,6 +659,13 @@
         .type-tag.fallback { background: #dde7f6; color: #1a4b8c; }
         .type-tag.nonstandard { background: #fde8e8; color: #8f2f2f; }
         .type-tag.failed { background: #eef2f7; color: #5e6f8d; }
+        .type-tag.mixed {
+            background: linear-gradient(135deg, #e7f6ef, #fef3d8);
+            color: #16603d;
+            margin-left: 4px;
+            border: 1px solid #b7d8c8;
+            cursor: help;
+        }
         .type-tag.multi-frame {
             background: #f3ecfd;
             color: #5a3d9e;
