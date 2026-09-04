@@ -210,7 +210,12 @@ def _estimate_global_rotation(entities):
 LINE_CLUSTER_EPS = 0.5            # 近似共线容差（图形单位，mm 图纸即 0.5mm）
 LINE_CLUSTER_MAX_FOR_ALL_PAIRS = 16  # 每个方向聚类数不超过该值时才做全配对
 MIN_LINE_RECT_SIDE = 100          # 直线矩形最小短边（图形单位）
-MAX_LINE_RECT_CANDIDATES = 200    # 直线矩形候选数上限，防止异常图纸拖垮解析
+MAX_LINE_RECT_CANDIDATES = 5000   # 直线矩形候选数上限，防止异常图纸拖垮解析。
+                                  # 坐标包含遍历在预算内处理的窗口远多于旧 gap 扫描，
+                                  # 200 上限会在真图框组合到达前被表格/格栅小矩形占满
+                                  # （电子称皮带输送系统：200 个时图框还没轮到，5000 仍
+                                  #  远小于该类图纸可能检出的真实候选量；后续 is_frame_like
+                                  #  的 √2/相对面积约束会过滤绝大多数小矩形）
 LINE_PAIR_FULL_SPAN = 180         # 聚类合并跨度 ≥ 该值视为"图框级长边"，密集聚类时也做全配对
                                   # （机械图纸细节线可致聚类数百组，真实图框边界相隔几十组，
                                   #   仅相邻配对永远配对不到；长边全配对找回远距离图框边界）
@@ -437,61 +442,78 @@ def detect_rectangles_from_lines(entity_list, rot=None):
     def _pair_order_key(p):
         return (sum(hi - lo for lo, hi in p[2]), p[1] - p[0])
     h_pairs.sort(key=_pair_order_key, reverse=True)
-    # v_pairs 按间距升序建立索引，组合循环内用「宽高比例剪枝」只遍历与当前 h_pair
-    # 间距成合理比例的 v_pair 子区间，避免外层每对横线都全扫十几万竖线对。
-    # 比例边界：图框归一化长宽比上限约 5.5（FRAME_RATIO_MAX），剪枝放宽到 8，
-    # 超出该比例的横竖线对组合不可能是图框（要么极端细长被 is_frame_like 拒，
-    # 要么本就是假组合），跳过不损失召回。夹具装配图式的远边界配对仍在区间内。
+    # v_pairs 按「x 起点」升序建立索引，每个 h_pair 只遍历 x 起点落在其公共覆盖
+    # 段内的竖线对（xa∈[xLo,xHi] 且 xb≤xHi）。这样：
+    #   - 真矩形两侧竖对的 xa 必然等于某条横线的公共覆盖段起点（图框左边界），
+    #     按 xa 升序遍历时边界对排最前，命中即确认，不需要扫完整个 gap 区间；
+    #   - 大量"x 范围根本不在本横线公共覆盖下"的竖线对（机械图内部细节线、
+    #     其它区域的长线）被坐标直接排除，不再逐个白试。
+    # 背景：电子称皮带输送系统（套图）横/纵聚类 901/1441 → h_pairs 29905 ×
+    # v_pairs 50497。旧方案按竖对 gap 升序全窗口扫描，前 116 个 h_pair 就把
+    # 200 万组合预算耗尽（实际只在扫"x 对不上的竖对"），真图框横线对排在
+    # #414 永远轮不到 → 6 张 LINE 页框（21475×30372/29788×21062/14894×10531）
+    # 全漏。坐标包含遍历后全部图框在 examined≈80 万内即被找到。
     import bisect as _bisect
     PAIR_RATIO_BOUND = 8.0
-    v_by_gap = sorted(v_pairs, key=lambda p: p[1] - p[0])
-    v_gaps = [p[1] - p[0] for p in v_by_gap]
+    v_by_xa = sorted(v_pairs, key=lambda p: p[0])
+    v_xas = [p[0] for p in v_by_xa]
     for (ya, yb, h_common) in h_pairs:
         _H = yb - ya
         if _H < MIN_LINE_RECT_SIDE:
             continue  # 矩形高 < 短边下限：任何组合短边必 < 下限，整层跳过
-        _i0 = _bisect.bisect_left(v_gaps, max(MIN_LINE_RECT_SIDE, _H / PAIR_RATIO_BOUND))
-        # 右界同时受比例上限与公共覆盖总长限制：gap 超过本线对的公共覆盖总长时
-        # coverage 校验必失败（横线覆盖不了那么宽的矩形），无需扫描白白耗预算
-        _i1 = _bisect.bisect_right(v_gaps, min(_H * PAIR_RATIO_BOUND,
-                                              sum(hi - lo for lo, hi in h_common)))
-        for _vi in range(_i0, _i1):
-            xa, xb, v_common = v_by_gap[_vi]
-            examined += 1
-            if examined > MAX_EXAMINED:
-                rects.sort(key=lambda r: (r[2] - r[0]) * (r[3] - r[1]), reverse=True)
-                return rects
-            # 覆盖校验：横线必须横跨 [xa, xb]，纵线必须纵跨 [ya, yb]
-            if not _coverage_contains(h_common, xa, xb):
+        _g_lo = max(MIN_LINE_RECT_SIDE, _H / PAIR_RATIO_BOUND)
+        _g_hi = _H * PAIR_RATIO_BOUND
+        for (xLo, xHi) in h_common:
+            _seg_w = xHi - xLo
+            if _seg_w < MIN_LINE_RECT_SIDE:
                 continue
-            if not _coverage_contains(v_common, ya, yb):
-                continue
-            # P1 严格矩形判定：4 条边的每一侧都必须至少有一条完整 LINE 覆盖
-            # 防止"边线残段+内部标注线拼凑出假矩形"
-            if not _has_full_side_line(h_lines, ya, xa, xb):
-                continue
-            if not _has_full_side_line(h_lines, yb, xa, xb):
-                continue
-            if not _has_full_side_line(v_lines, xa, ya, yb):
-                continue
-            if not _has_full_side_line(v_lines, xb, ya, yb):
-                continue
-            w = xb - xa
-            h = yb - ya
-            if min(w, h) < MIN_LINE_RECT_SIDE:
-                continue
-            if has_internal_divider(xa, ya, xb, yb):
-                continue
-            key = (round(xa, 3), round(ya, 3), round(xb, 3), round(yb, 3))
-            if key in seen:
-                continue
-            seen.add(key)
-            rects.append((xa, ya, xb, yb))
+            _lo_i = _bisect.bisect_left(v_xas, xLo - LINE_CLUSTER_EPS)
+            _hi_i = _bisect.bisect_right(v_xas, xHi + LINE_CLUSTER_EPS)
+            for _vi in range(_lo_i, _hi_i):
+                xa, xb, v_common = v_by_xa[_vi]
+                _gap = xb - xa
+                # 宽高比例剪枝：图框归一化长宽比上限约 5.5（FRAME_RATIO_MAX），
+                # 剪枝放宽到 8，超出比例的横竖线对不可能是图框，跳过不损失召回
+                if _gap < _g_lo or _gap > _g_hi:
+                    continue
+                if xb > xHi + LINE_CLUSTER_EPS:
+                    continue  # 竖对右界超出本覆盖段：横线盖不住，必非矩形
+                examined += 1
+                if examined > MAX_EXAMINED:
+                    rects.sort(key=lambda r: (r[2] - r[0]) * (r[3] - r[1]), reverse=True)
+                    return rects
+                # 覆盖校验：横线必须横跨 [xa, xb]，纵线必须纵跨 [ya, yb]
+                if not _coverage_contains(h_common, xa, xb):
+                    continue
+                if not _coverage_contains(v_common, ya, yb):
+                    continue
+                # P1 严格矩形判定：4 条边的每一侧都必须至少有一条完整 LINE 覆盖
+                # 防止"边线残段+内部标注线拼凑出假矩形"
+                if not _has_full_side_line(h_lines, ya, xa, xb):
+                    continue
+                if not _has_full_side_line(h_lines, yb, xa, xb):
+                    continue
+                if not _has_full_side_line(v_lines, xa, ya, yb):
+                    continue
+                if not _has_full_side_line(v_lines, xb, ya, yb):
+                    continue
+                w = xb - xa
+                h = yb - ya
+                if min(w, h) < MIN_LINE_RECT_SIDE:
+                    continue
+                if has_internal_divider(xa, ya, xb, yb):
+                    continue
+                key = (round(xa, 3), round(ya, 3), round(xb, 3), round(yb, 3))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rects.append((xa, ya, xb, yb))
+                if len(rects) >= MAX_LINE_RECT_CANDIDATES:
+                    break
             if len(rects) >= MAX_LINE_RECT_CANDIDATES:
                 break
-        else:
-            continue
-        break
+        if len(rects) >= MAX_LINE_RECT_CANDIDATES:
+            break
     rects.sort(key=lambda r: (r[2] - r[0]) * (r[3] - r[1]), reverse=True)
     return rects
 
