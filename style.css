@@ -10,7 +10,7 @@
             padding: 24px;
         }
         .container {
-            max-width: 1200px;
+            max-width: 1920px;
             width: 100%;
             background: #ffffff;
             border-radius: 28px;
@@ -46,6 +46,8 @@
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 32px;
+            max-width: 1500px;
+            margin: 0 auto;
         }
         .card {
             background: #f8faff;
@@ -543,7 +545,7 @@
             border-collapse: collapse;
             font-size: 14px;
             background: #ffffff;
-            min-width: 800px;
+            min-width: 1400px;
         }
         .record-table th {
             background: #f4f8fe;
@@ -558,6 +560,7 @@
             padding: 8px 12px;
             border-bottom: 1px solid #eef2f7;
             vertical-align: middle;
+            white-space: nowrap;
         }
         .record-table tr:hover td {
             background: #f8faff;
@@ -617,6 +620,21 @@
         }
         .record-table td:last-child {
             text-align: center;
+        }
+        /* 批量勾选列 */
+        .record-table th.col-check,
+        .record-table td.col-check {
+            width: 34px;
+            text-align: center;
+            padding-left: 8px;
+            padding-right: 4px;
+        }
+        .record-table .col-check input[type="checkbox"] {
+            width: 15px;
+            height: 15px;
+            cursor: pointer;
+            accent-color: #2b6ed7;
+            vertical-align: middle;
         }
         .record-table .record-failed {
             opacity: 0.75;

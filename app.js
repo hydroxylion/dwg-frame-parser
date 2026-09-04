@@ -791,8 +791,30 @@ function addRecord(w, h, result, name, path, framesInfo) {
 
 function deleteRecord(id) {
     records = records.filter(r => r.id !== id);
+    selectedIds.delete(id);
     saveRecords();
     renderRecords();
+}
+
+// 批量勾选：被勾选记录的 id 集合（行勾选 / 表头全选共用）
+let selectedIds = new Set();
+
+// 更新表头全选框与批量删除按钮状态
+function updateBatchUI() {
+    const checkAll = document.getElementById('checkAll');
+    const countSpan = document.getElementById('batchDeleteCount');
+    const batchBtn = document.getElementById('batchDeleteBtn');
+    const filtered = getFilteredRecords();
+    const visibleIds = filtered.map(r => r.id);
+    const allChecked = visibleIds.length > 0 && visibleIds.every(id => selectedIds.has(id));
+    const anyChecked = visibleIds.some(id => selectedIds.has(id));
+    if (checkAll) {
+        checkAll.checked = allChecked;
+        checkAll.indeterminate = anyChecked && !allChecked;
+    }
+    const n = records.filter(r => selectedIds.has(r.id)).length;
+    if (countSpan) countSpan.textContent = n;
+    if (batchBtn) batchBtn.disabled = n === 0;
 }
 
 function updateRecordField(id, field, value) {
@@ -844,12 +866,14 @@ function renderRecords() {
     filterCountSpan.textContent = `当前筛选：${filtered.length} 条`;
 
     if (records.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="13" class="record-empty">暂无记录</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="14" class="record-empty">暂无记录</td></tr>`;
+        updateBatchUI();
         return;
     }
 
     if (filtered.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="13" class="record-empty">无匹配记录</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="14" class="record-empty">无匹配记录</td></tr>`;
+        updateBatchUI();
         return;
     }
 
@@ -889,6 +913,7 @@ function renderRecords() {
         const typeHtml = `<span class="type-tag ${typeInfo.cls}">${typeInfo.label}</span>`;
 
         html += `<tr class="${rowClass}">
+            <td class="col-check"><input type="checkbox" class="row-check" data-id="${rec.id}" ${selectedIds.has(rec.id) ? 'checked' : ''} /></td>
             <td>${index + 1}</td>
             <td><input class="editable" type="text" data-id="${rec.id}" data-field="name" value="${escHtml(rec.name)}" placeholder="图纸名称" style="min-width:100px;" /></td>
             <td>${wDisplay}</td>
@@ -906,6 +931,17 @@ function renderRecords() {
     });
     tbody.innerHTML = html;
 
+    tbody.querySelectorAll('.row-check').forEach(cb => {
+        cb.addEventListener('change', function() {
+            const id = parseInt(this.dataset.id);
+            if (this.checked) {
+                selectedIds.add(id);
+            } else {
+                selectedIds.delete(id);
+            }
+            updateBatchUI();
+        });
+    });
     tbody.querySelectorAll('.editable').forEach(inp => {
         inp.addEventListener('change', function() {
             const id = parseInt(this.dataset.id);
@@ -927,7 +963,10 @@ function renderRecords() {
             }
         });
     });
+
+    updateBatchUI();
 }
+
 
 function escHtml(str) {
     if (!str) return '';
@@ -1073,6 +1112,31 @@ document.getElementById('clearRecordsBtn').addEventListener('click', function() 
     if (confirm('确定清空所有测试记录吗？（本地存储中的数据也将被删除）')) {
         records = [];
         recordIdCounter = 0;
+        selectedIds.clear();
+        saveRecords();
+        renderRecords();
+    }
+});
+
+// 表头全选：作用于当前筛选可见的所有记录（再次点击若全部选中则取消全选）
+document.getElementById('checkAll').addEventListener('change', function() {
+    const filtered = getFilteredRecords();
+    if (this.checked) {
+        filtered.forEach(r => selectedIds.add(r.id));
+    } else {
+        filtered.forEach(r => selectedIds.delete(r.id));
+    }
+    renderRecords();
+});
+
+// 批量删除已勾选记录
+document.getElementById('batchDeleteBtn').addEventListener('click', function() {
+    const ids = records.filter(r => selectedIds.has(r.id)).map(r => r.id);
+    if (ids.length === 0) return;
+    if (confirm(`确定删除已勾选的 ${ids.length} 条记录吗？`)) {
+        const del = new Set(ids);
+        records = records.filter(r => !del.has(r.id));
+        selectedIds.clear();
         saveRecords();
         renderRecords();
     }

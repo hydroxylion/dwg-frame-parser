@@ -135,6 +135,7 @@
                 <button class="btn btn-secondary" id="exportAllCsvBtn">📄 导出全部</button>
                 <button class="btn btn-secondary" id="importCsvBtn">📂 导入 CSV</button>
                 <button class="btn btn-dangerous" id="genScriptBtn">🧹 生成删除脚本</button>
+                <button class="btn btn-danger" id="batchDeleteBtn" disabled title="删除已勾选的记录">🗑 批量删除 <span id="batchDeleteCount">0</span></button>
                 <button class="btn btn-danger" id="clearRecordsBtn">🗑 清空记录</button>
             </div>
         </div>
@@ -165,6 +166,7 @@
             <table class="record-table" id="recordTable">
                 <thead>
                     <tr>
+                        <th class="col-check"><input type="checkbox" id="checkAll" title="全选 / 取消全选当前筛选" /></th>
                         <th>#</th>
                         <th style="min-width:140px;">图纸名称</th>
                         <th>宽 (mm)</th>
@@ -181,7 +183,7 @@
                     </tr>
                 </thead>
                 <tbody id="recordBody">
-                    <tr><td colspan="13" class="record-empty">暂无记录</td></tr>
+                    <tr><td colspan="14" class="record-empty">暂无记录</td></tr>
                 </tbody>
             </table>
         </div>
