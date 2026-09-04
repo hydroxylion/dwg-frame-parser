@@ -7,6 +7,7 @@ from ezdxf import bbox as ezdxf_bbox
 from ezdxf.addons import odafc
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
+from ezdxf.math import Vec2
 
 app = Flask(__name__)
 CORS(app)
@@ -61,14 +62,24 @@ def load_document(path):
 
 # ---------- 辅助函数 ----------
 def get_polyline_vertices(entity):
-    """提取 LWPOLYLINE 或 POLYLINE 的所有顶点 (x,y)"""
+    """提取多段线顶点，并强制转换为 WCS 坐标（如果该实体定义了 OCS）"""
     vertices = []
-    if entity.dxftype() == 'LWPOLYLINE':
+    dxftype = entity.dxftype()
+    # 获取 OCS 转换器（LWPOLYLINE 和 POLYLINE 都有 ocs() 方法）
+    ocs = entity.ocs() if hasattr(entity, 'ocs') else None
+
+    if dxftype == 'LWPOLYLINE':
         for point in entity.get_points():
-            vertices.append((point[0], point[1]))
-    elif entity.dxftype() == 'POLYLINE':
+            # point 是 OCS 坐标 (x, y, [z])
+            p = Vec2(point[0], point[1]) if len(point) >= 2 else Vec2(point[0], 0)
+            if ocs:
+                p = ocs.to_wcs(p)
+            vertices.append((p.x, p.y))
+    elif dxftype == 'POLYLINE':
         for vertex in entity.vertices:
             loc = vertex.dxf.location
+            if ocs:
+                loc = ocs.to_wcs(loc)
             vertices.append((loc.x, loc.y))
     return vertices
 
@@ -214,8 +225,17 @@ def detect_rectangles_from_lines(entity_list):
     for ent in entity_list:
         if ent.dxftype() != 'LINE':
             continue
+        # LINE 的 start/end 存储在 OCS 中（受 dxf.extrusion 影响，非 (0,0,1) 时与
+        # WCS 不同），统一经 ocs().to_wcs() 转换到 WCS 后再参与聚类/覆盖判断，
+        # 避免与 LWPOLYLINE 等 WCS 坐标实体比较错位（倾斜 extrusion 的图纸）。
         start = ent.dxf.start
         end = ent.dxf.end
+        try:
+            ocs = ent.ocs()
+            start = ocs.to_wcs(start)
+            end = ocs.to_wcs(end)
+        except Exception:
+            pass  # 无 extrusion / 转换失败时按原坐标处理
         if abs(start.y - end.y) <= LINE_CLUSTER_EPS:
             # 近似水平线：按 y 聚类，记录 x 线段
             h_lines.append(((start.y + end.y) / 2.0,
