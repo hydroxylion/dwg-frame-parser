@@ -860,15 +860,24 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             if _c.get('type') == '块参照插入':
                 _bn_groups.setdefault(_c.get('block_name', '<unknown>'), []).append(_idx)
         _aligned_log = []
-        _a_series_protected = []  # 白名单保护（标准 A 系列图框，不参与对齐剔除）
+        _a_series_protected = []  # 白名单保护（图框类块，不参与对齐剔除）
         _rm_idx = set()
         for _bn, _grp in _bn_groups.items():
             if len(_grp) < 3:
                 continue
-            # 白名单：尺寸是标准 A 系列 → 不剔除
+            # 白名单：标准 A 系列整数尺寸 或 长宽比接近 √2±10% → 不剔除。
+            #   √2 保护覆盖自定义尺寸的图框块模板：效果图.dwg A$C5242259E 图框块 ×3
+            #   同排并排（17098×12319 / 14534×10471，ratio 1.388 接近 √2），命中水平
+            #   对齐启发式被当装饰阵列全删 → 漏 3 张。纸张框比例必接近 √2，而装饰块
+            #   （柱/门窗/家具）比例远离 √2，√2 保护不会误放装饰阵列。
             _sample = candidates[_grp[0]]
             if _is_standard_a_series(_sample['width'], _sample['height']):
                 _a_series_protected.append(f"{_bn}({len(_grp)}个,{_sample['width']:.0f}x{_sample['height']:.0f})")
+                continue
+            _s_min = min(_sample['width'], _sample['height'])
+            _s_max = max(_sample['width'], _sample['height'])
+            if _s_min > 0 and abs(_s_max / _s_min - _math.sqrt(2)) / _math.sqrt(2) <= 0.10:
+                _a_series_protected.append(f"{_bn}({len(_grp)}个,{_sample['width']:.0f}x{_sample['height']:.0f},ratio{_s_max/_s_min:.3f})")
                 continue
             _ctr = [((candidates[_i]['bbox'][0]+candidates[_i]['bbox'][2])/2,
                      (candidates[_i]['bbox'][1]+candidates[_i]['bbox'][3])/2) for _i in _grp]
