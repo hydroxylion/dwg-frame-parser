@@ -1084,6 +1084,14 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         for c in all_candidates:
             if c['area_ratio'] > 1.0:
                 continue  # 异常候选不作为相对面积参考
+            # 内容级底图/排版大外框不作 rel 分母：面积占比 ≥50% 且比例偏离 √2 超 10%
+            # （一楼大厅及展厅：261665×214254 闭合多段线 ratio 1.22、area_ratio 92% 包住
+            #  全部页面——若留作分母，10 张真页面块（333×4=57776×40851 + ytnuyi×6，ratio
+            #  精确 1.4143）rel 被稀释到 1.3~4.2% <10%，条件 C 全拒 → fc=1）。
+            #  真整页图框即使 area_ratio≈100%（图纸目录 42000×29700）也近 √2，仍作分母无害
+            #  （单图框 layout 中即 rel=1）；这类大底框最终由包裹剔除收掉。
+            if c['area_ratio'] >= 0.5 and abs(c['ratio'] / (2 ** 0.5) - 1) > 0.10:
+                continue
             ln = c['layout']
             if ln not in layout_max_area or c['area'] > layout_max_area[ln]:
                 layout_max_area[ln] = c['area']
