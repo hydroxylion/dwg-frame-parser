@@ -215,10 +215,14 @@ function matchNonStandardFallback(w, h) {
     const orientation = isLandscape ? '横版' : '竖版';
     const displayW = Math.round(Math.max(w, h));
     const displayH = Math.round(Math.min(w, h));
+    // 偏差百分比：常规 2 位小数；极小偏差（<0.01%）给 3 位，避免空洞的 "0.0%"/"0.00%"
+    // （如封面 28261×19985 与 A3 的偏差仅 ~0.006%）
+    const pct = bestDelta * 100;
+    const pctText = pct >= 0.01 ? pct.toFixed(2) : (pct > 0 ? pct.toFixed(3) : '0');
     return {
         type: 'fallback',
         label: `近似匹配：${displayName}（非标准）`,
-        detail: `${displayW} × ${displayH} mm · ${orientation} · 宽高比接近 ${displayName}（偏差 ${(bestDelta * 100).toFixed(1)}%）`,
+        detail: `${displayW} × ${displayH} mm · ${orientation} · 宽高比接近 ${displayName}（偏差 ${pctText}%）`,
         scale: 1,
         actualW: displayW,
         actualH: displayH,
