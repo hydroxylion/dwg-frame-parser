@@ -55,6 +55,13 @@ const BASE_PAPERS = [
     { name: 'A4', w: 297, h: 210 }, { name: 'A4_', w: 210, h: 297 },
 ];
 
+// 常见制图比例（图框 = 标准幅面 × 该缩放倍数，k 白名单）：
+// 出图比例常用 1:1/1:2/1:2.5/1:4/1:5/1:10/1:20/1:25/1:50/1:75/1:100/1:150/1:200，
+// 另含 40/80/250/300/400/500 等建筑与详图中常见倍率。"等比缩放判标准"只接受
+// 落在该集合内的 k——既不放过 39.05/95.16 之类自定义倍数，也保留 2.5/75 等
+// 合法但非整数的制图比例。
+const COMMON_PLOT_SCALES = [1, 2, 2.5, 4, 5, 10, 20, 25, 40, 50, 75, 80, 100, 150, 200, 250, 300, 400, 500];
+
 // ================================================================
 // 2. 核心判断逻辑
 // ================================================================
@@ -79,70 +86,64 @@ function matchStandardExact(w, h) {
     return null;
 }
 
-// 等比缩放匹配：宽高比与标准幅面（含加长）相同（容差 ≤ 1%），整体缩放视为标准
+// 等比缩放匹配：整体放大/缩小的标准幅面视为标准。
+// 判定不使用"宽高比偏差"（比例容差挡不住 √2 相似模板的巧合：长中苑 23287×16333
+// 比例只差 0.8%、缩放 39.05 曾命中 1%/0.1 的宽门槛；846×2100 也会有 0.15% 比例
+// 巧合 + 2.02 半整数擦边）。改为直接验证两条边是 **同一 k × 标准幅面宽/高**：
+//   w ≈ k·paper.w 且 h ≈ k·paper.h
+// 其中 **k 必须落在常见制图比例白名单 COMMON_PLOT_SCALES**（1/2/2.5/4/5/10/20/25/
+// 40/50/75/80/100/150/200/250/300/400/500）——保留 2.5/75 等合法非整数比例，同时
+// 挡住 39.05/95.16 之类自定义倍数。k 相同 → 比例自动一致，无需显式比较比例。
+// 容差用**毫米级绝对偏差**（≤5mm）：真实缩放图的噪声是坐标取整/单位换算的毫米级
+// 误差（1683≈2×841 差 1mm、421≈420 差 1mm、A1×100=84100 差 0；842×2084≈A0+3/4
+// 竖版 841×2080 差 1/4mm）；而"比例接近但非白名单倍数"的框（封面 28261×19985≈A4×
+// 95.16 差 46/35mm、长中苑模板 23287×16333≈A2×39 差 121mm、电子称页 29788×21062≈
+// A0×25.05 差 63/37mm）每条边都差数十 mm，必然被拒——除非它真是白名单倍率出图。
+// 同形双解时（如 842×2084 既 ≈A0+3/4(k=1) 又 ≈A2+3/4×2）优先更小的 k = 更大的基础幅面。
 function matchScaledStandard(w, h) {
-    const ratio = w / h;
-    const TOLERANCE = 0.01; // 1% 容差
+    const TOL_ABS = 5; // 每边允许的绝对偏差（mm），吸收取整/单位噪声
 
     // 同时遍历 STANDARD_PAPERS（含加长幅面）和 BASE_PAPERS（基础幅面），
     // 确保 A1+1/4×100 等加长幅面的缩放尺寸也能被识别
     const allPapers = [...STANDARD_PAPERS, ...BASE_PAPERS];
 
-    // 收集所有比例容差内的候选，选最优：
-    // 1. 优先「缩放倍数最接近整数」（如 84100×59400 应选 A1×100 而非 A0×70.68）
-    // 2. 整数倍相同时，优先「缩放倍数更小且 ≥ 1」（基础幅面尽可能大，
-    //    如 A1+1×100 优于 A3+1×200；A2×50 优于 A4×100）
-    // 3. 以上都相同，优先「宽高比偏差最小」
-    // 门槛：缩放倍数必须接近整数（scaleDist ≤ 0.1），否则可能是比例巧合而非真实缩放
-    const SCALE_DIST_MAX = 0.1;
     let best = null;
     for (const paper of allPapers) {
-        const pRatio = paper.w / paper.h;
-        const delta = Math.abs(ratio - pRatio) / pRatio;
-        if (delta >= TOLERANCE) continue;
-
-        const scaleW = w / paper.w;
-        const scaleH = h / paper.h;
-        const scale = (scaleW + scaleH) / 2;
-        const scaleDist = Math.abs(scale - Math.round(scale));
-        if (scaleDist > SCALE_DIST_MAX) continue;  // 缩放倍数不接近任何整数，跳过
-        const scaleRounded = Math.round(scale);
-        const isInteger = Math.abs(scale - scaleRounded) < 0.01;
-        const effectiveScale = isInteger ? scaleRounded : scale;
-
-        if (best === null || scaleDist < best.scaleDist - 1e-9 ||
-            (Math.abs(scaleDist - best.scaleDist) < 1e-9 && effectiveScale >= 1 && (best.effectiveScale < 1 || effectiveScale < best.effectiveScale - 1e-9)) ||
-            (Math.abs(scaleDist - best.scaleDist) < 1e-9 && Math.abs(effectiveScale - best.effectiveScale) < 1e-9 && delta < best.delta - 1e-9)) {
-            best = { paper, delta, scale, scaleDist, effectiveScale };
+        for (const k of COMMON_PLOT_SCALES) {
+            const dw = Math.abs(w - k * paper.w);
+            const dh = Math.abs(h - k * paper.h);
+            if (dw > TOL_ABS || dh > TOL_ABS) continue; // 任一边超容差即非白名单倍率缩放
+            const residual = Math.max(dw, dh);
+            // 优先更小的 k（更大的基础幅面，语义更 canonical：842×2084 ≈ A0+3/4×1 应
+            // 判 A0+3/4 而非 A2+3/4×2——后者只是它的"半幅同形"）；k 相同再取残差小者
+            if (best === null || k < best.k ||
+                (k === best.k && residual < best.residual - 1e-9)) {
+                best = { paper, k, residual };
+            }
         }
     }
     if (!best) return null;
 
     const paper = best.paper;
-    const scale = best.scale;
-    const scaleRounded = Math.round(scale);
-    const isInteger = Math.abs(scale - scaleRounded) < 0.01;
+    const k = best.k;
 
     let displayName = paper.name;
     if (displayName.endsWith('_')) displayName = displayName.slice(0, -1);
 
     let label;
-    if (isInteger && scaleRounded === 1) {
-        // 与标准幅面几乎一致（尺寸误差在 1% 容差内，但非精确值）
-        label = `${displayName} · 标准（尺寸误差 ≤1%）`;
+    if (k === 1) {
+        // 与标准幅面几乎一致（尺寸误差 ≤5mm，但非精确值）
+        label = `${displayName} · 标准（尺寸误差 ≤5mm）`;
     } else {
-        const displayScale = isInteger ? scaleRounded : scale.toFixed(2);
-        label = isInteger
-            ? `${displayName} × ${displayScale} (缩放)`
-            : `${displayName} (缩放 ~${displayScale}x)`;
+        label = `${displayName} × ${k} (缩放)`;
     }
     return {
         type: 'standard',
         label: label,
         detail: `${w} × ${h} mm · 等比缩放`,
-        scale: scale > 1 ? scale : 1,
+        scale: k,
         confidenceFrame: 1.0,
-        confidenceScale: isInteger ? 1.0 : 0.9,
+        confidenceScale: 1.0,
         isFallback: false,
     };
 }
