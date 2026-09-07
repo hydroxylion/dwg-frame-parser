@@ -737,10 +737,10 @@ function getRecordType(rec) {
     return rec.type || 'nonstandard';
 }
 
-// ---------- 混合图纸（标准 + 非标并存） ----------
-// 一个 dwg 里可能同时检出"标准图框"与"非标图框"（如 16 张标准图 + 1 张非标封面）。
-// 文件级类型由主框决定（不破坏现有 4 类），此处额外识别"混合"并逐框统计构成。
-// 不改变 getRecordType() 返回值，仅作为附加徽标与筛选维度。
+// ---------- 混合图纸（多图框类型不一致） ----------
+// 一个 dwg 检出多个图框且类型不一致时打"混合"徽标（两档）：全部标准 = weak 弱化，
+// 标准+非标 / 多种非标并存 = strong 强化。文件级主导类型仍由主框决定（不破坏现有
+// 4 类），混合仅作附加徽标与筛选维度，不改变 getRecordType() 返回值。
 
 // 逐框分类统计：framesMeta（结构化候选）→ { type -> count }，旧记录无 framesMeta 返回 null
 function classifyFrames(rec) {
@@ -758,16 +758,24 @@ function classifyFrames(rec) {
     return groups;
 }
 
-// 是否"混合"：同一文件内"标准族（standard）"与"非标族（extended/fallback/nonstandard）"
-// 图框并存（如 16 张标准图 + 1 张非标封面）。前端收到的候选已过特征筛选，都是有效
-// 图框，因此只要两族各 ≥1 即视为混合——不存在"伪框噪声"把文件误标混合的问题。
-// 全非标（如 3 张非标加长）或全标准 → 不标混合，维持单族语义。
-function isMixedRecord(rec) {
+// 混合标识分级（返回 'weak' | 'strong' | ''）。规则（2026-09-07 用户细化）：
+//   单图框 → 不标
+//   多图框且全部同一非标类型（如 17 张全 fallback）→ 不标，维持单类型语义
+//   多图框且全部为标准 → weak（弱化档："多张标准页"仅提示）
+//   标准 + 任意非标类型并存 / 无标准但多种非标类型并存 → strong（强化档）
+function mixedLevel(rec) {
     const groups = classifyFrames(rec);
-    if (!groups) return false;
-    const std = groups.standard || 0;
+    if (!groups) return '';
+    const types = Object.keys(groups);
     const total = Object.values(groups).reduce((s, n) => s + n, 0);
-    return std > 0 && std < total;
+    if (total < 2) return '';
+    if (types.length === 1) return types[0] === 'standard' ? 'weak' : '';
+    return 'strong';
+}
+
+// 是否"混合"：有弱化或强化任一档混合标识即为混合记录（供筛选/徽章用）
+function isMixedRecord(rec) {
+    return mixedLevel(rec) !== '';
 }
 
 // 混合构成的展示摘要：如 "标准×16 · 非标准×1"
@@ -973,10 +981,11 @@ function renderRecords() {
         const scaleDisplay = rec.scaleConf || '—';
         const rowClass = rec.isFailed ? 'record-failed' : '';
         const typeInfo = typeLabels[getRecordType(rec)] || { label: '未知', cls: 'nonstandard' };
-        // 混合徽章：文件内同时检出"标准 + 非标"等多类图框（如 16 标准 + 1 封面非标）。
+        // 混合徽章（两档）：weak=多张标准页(弱化) / strong=标准+非标 或 多种非标并存(强化)。
         // 仅附加展示，不改变主导类型（不破坏现有 4 类筛选/统计）。
-        const mixedHtml = isMixedRecord(rec)
-            ? `<span class="type-tag mixed" title="构成：${escHtml(mixedSummary(rec))}">🌀 混合</span>`
+        const mixedLvl = mixedLevel(rec);
+        const mixedHtml = mixedLvl
+            ? `<span class="type-tag mixed ${mixedLvl === 'strong' ? 'mixed-strong' : 'mixed-weak'}" title="构成：${escHtml(mixedSummary(rec))}">${mixedLvl === 'strong' ? '⚠️' : '🌀'} 混合</span>`
             : '';
         const typeHtml = `<span class="type-tag ${typeInfo.cls}">${typeInfo.label}</span>${mixedHtml}`;
         // 图框数列：展示该图纸检测到的图框数量（模型空间 + 布局空间合计）。

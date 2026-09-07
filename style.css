@@ -660,11 +660,22 @@
         .type-tag.nonstandard { background: #fde8e8; color: #8f2f2f; }
         .type-tag.failed { background: #eef2f7; color: #5e6f8d; }
         .type-tag.mixed {
-            background: linear-gradient(135deg, #e7f6ef, #fef3d8);
-            color: #16603d;
             margin-left: 4px;
-            border: 1px solid #b7d8c8;
             cursor: help;
+        }
+        /* 混合-弱化档：多张标准页（柔和灰蓝，弱提示） */
+        .type-tag.mixed.mixed-weak {
+            background: #edf1f6;
+            color: #5a6b85;
+            border: 1px dashed #c3cddb;
+            font-weight: 500;
+        }
+        /* 混合-强化档：标准+非标 或 多种非标并存（橙红醒目，重点提示） */
+        .type-tag.mixed.mixed-strong {
+            background: linear-gradient(135deg, #fde8e8, #fdf0d5);
+            color: #b3402c;
+            border: 1px solid #e2a18f;
+            font-weight: 600;
         }
         .type-tag.multi-frame {
             background: #f3ecfd;
