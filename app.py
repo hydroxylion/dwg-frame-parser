@@ -1084,13 +1084,22 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         for c in all_candidates:
             if c['area_ratio'] > 1.0:
                 continue  # 异常候选不作为相对面积参考
-            # 内容级底图/排版大外框不作 rel 分母：面积占比 ≥50% 且比例偏离 √2 超 10%
-            # （一楼大厅及展厅：261665×214254 闭合多段线 ratio 1.22、area_ratio 92% 包住
-            #  全部页面——若留作分母，10 张真页面块（333×4=57776×40851 + ytnuyi×6，ratio
-            #  精确 1.4143）rel 被稀释到 1.3~4.2% <10%，条件 C 全拒 → fc=1）。
-            #  真整页图框即使 area_ratio≈100%（图纸目录 42000×29700）也近 √2，仍作分母无害
-            #  （单图框 layout 中即 rel=1）；这类大底框最终由包裹剔除收掉。
-            if c['area_ratio'] >= 0.5 and abs(c['ratio'] / (2 ** 0.5) - 1) > 0.10:
+            # 内容级底图/排版大外框不作 rel 分母（两条判据互补，覆盖两类底图）：
+            #   ① 面积占比 ≥50% 且比例偏离 √2 超 10%（一楼大厅及展厅：261665×214254
+            #      闭合多段线 ratio 1.22、area_ratio 92% 包住全部页面——若留作分母，10 张
+            #      真页面块（333×4=57776×40851 + ytnuyi×6，ratio 精确 1.4143）rel 被稀释
+            #      到 1.3~4.2% <10%，条件 C 全拒 → fc=1）。
+            #   ② 面积占比 ≥15% 且 长宽比 > 2.5（滨江 江南铭庭 PM：532588×132430 超宽内容
+            #      排版外框 ratio 4.02、area_ratio 23.7%——底框外还有大量内容拉大 layout 总
+            #      面积，未达 50% 逃过判据①，仍霸占 rel 分母 → 25 张 √2 页框（12600×8910×15
+            #      + 25200×17820×10，ratio 精确 1.4142）rel 被压到 0.16~0.64% 全拒 → fc=1。
+            #      真图纸页框长宽比必 ≤ ~2.1（A 系 + 常用加长），2.5 留足余量；ratio>2.5 又
+            #      占 layout ≥15% 的只可能是内容排版外框/条带）。
+            #  真整页图框即使 area_ratio≈100%（图纸目录 42000×29700）也近 √2 且 ratio≤2.5，
+            #  两种判据都不命中，仍作分母无害（单图框 layout 中即 rel=1）。
+            #  这类大底框自身仍可被条件 A 收入候选，最终由包裹剔除收掉（内含 ≥2 独立尺寸组）。
+            if (c['area_ratio'] >= 0.5 and abs(c['ratio'] / (2 ** 0.5) - 1) > 0.10) or \
+               (c['area_ratio'] >= 0.15 and c['ratio'] > 2.5):
                 continue
             ln = c['layout']
             if ln not in layout_max_area or c['area'] > layout_max_area[ln]:
