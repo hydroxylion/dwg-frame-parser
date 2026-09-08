@@ -94,14 +94,17 @@ function matchStandardExact(w, h) {
 // 其中 **k 必须落在常见制图比例白名单 COMMON_PLOT_SCALES**（1/2/2.5/4/5/10/20/25/
 // 40/50/75/80/100/150/200/250/300/400/500）——保留 2.5/75 等合法非整数比例，同时
 // 挡住 39.05/95.16 之类自定义倍数。k 相同 → 比例自动一致，无需显式比较比例。
-// 容差用**毫米级绝对偏差**（≤5mm）：真实缩放图的噪声是坐标取整/单位换算的毫米级
-// 误差（1683≈2×841 差 1mm、421≈420 差 1mm、A1×100=84100 差 0；842×2084≈A0+3/4
-// 竖版 841×2080 差 1/4mm）；而"比例接近但非白名单倍数"的框（封面 28261×19985≈A4×
-// 95.16 差 46/35mm、长中苑模板 23287×16333≈A2×39 差 121mm、电子称页 29788×21062≈
-// A0×25.05 差 63/37mm）每条边都差数十 mm，必然被拒——除非它真是白名单倍率出图。
+// 容差用**毫米级绝对偏差**（≤2mm），且 **只对缩放版 k≥2 生效**——1:1（k=1）标准幅面
+// 必须与精确表逐位相等（见 matchStandardExact），不再做"尺寸误差"判断（2026-09-08
+// 用户口径：夹具装配图 420×597≈A2 差 3mm、光轴 594×418≈A2 差 2mm、421×298≈A3 差 1mm
+// 等"看着像标准但尺寸不取整"的框一律不认标准，落回非标族）。k≥2 的真实缩放图噪声
+// 是坐标取整/单位换算的毫米级误差（1683≈2×841 差 1mm、A1×100=84100 差 0），2mm 足够。
+// 曾用 5mm（为保 842×2084 的 A0+3/4 双解）过宽；842×2084（差 4mm）不命中 k=1 的
+// A0+3/4，改判 A2+3/4×2 缩放。比例接近但非白名单倍率的框（封面 28261×19985≈A4×95.16、
+// 长中苑模板 23287×16333≈A2×39 等）每条边差数十 mm，必然被拒——除非它真是白名单倍率出图。
 // 同形双解时（如 842×2084 既 ≈A0+3/4(k=1) 又 ≈A2+3/4×2）优先更小的 k = 更大的基础幅面。
 function matchScaledStandard(w, h) {
-    const TOL_ABS = 5; // 每边允许的绝对偏差（mm），吸收取整/单位噪声
+    const TOL_ABS = 2; // 每边允许的绝对偏差（mm），仅缩放版 k≥2 吸收取整/单位噪声
 
     // 同时遍历 STANDARD_PAPERS（含加长幅面）和 BASE_PAPERS（基础幅面），
     // 确保 A1+1/4×100 等加长幅面的缩放尺寸也能被识别
@@ -110,12 +113,13 @@ function matchScaledStandard(w, h) {
     let best = null;
     for (const paper of allPapers) {
         for (const k of COMMON_PLOT_SCALES) {
+            if (k === 1) continue; // 1:1 必须精确（matchStandardExact 已覆盖），此处不做尺寸误差判断
             const dw = Math.abs(w - k * paper.w);
             const dh = Math.abs(h - k * paper.h);
             if (dw > TOL_ABS || dh > TOL_ABS) continue; // 任一边超容差即非白名单倍率缩放
             const residual = Math.max(dw, dh);
-            // 优先更小的 k（更大的基础幅面，语义更 canonical：842×2084 ≈ A0+3/4×1 应
-            // 判 A0+3/4 而非 A2+3/4×2——后者只是它的"半幅同形"）；k 相同再取残差小者
+            // 优先更小的 k（更大的基础幅面，语义更 canonical：同残差下 84100×59400 选
+            // A1×1 缩放而非 A2×2 之类的"半幅同形"）；k 相同再取残差小者
             if (best === null || k < best.k ||
                 (k === best.k && residual < best.residual - 1e-9)) {
                 best = { paper, k, residual };
@@ -130,16 +134,10 @@ function matchScaledStandard(w, h) {
     let displayName = paper.name;
     if (displayName.endsWith('_')) displayName = displayName.slice(0, -1);
 
-    let label;
-    if (k === 1) {
-        // 与标准幅面几乎一致（尺寸误差 ≤5mm，但非精确值）
-        label = `${displayName} · 标准（尺寸误差 ≤5mm）`;
-    } else {
-        label = `${displayName} × ${k} (缩放)`;
-    }
+    // k=1 已在循环中跳过（1:1 精确由 matchStandardExact 处理），此处仅缩放版 k≥2
     return {
         type: 'standard',
-        label: label,
+        label: `${displayName} × ${k} (缩放)`,
         detail: `${w} × ${h} mm · 等比缩放`,
         scale: k,
         confidenceFrame: 1.0,
