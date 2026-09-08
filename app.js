@@ -1264,15 +1264,76 @@ function escHtml(str) {
 }
 
 // ---------- 导出 CSV ----------
+// 所有图框尺寸文本（与"图框数徽章气泡"同款内容）：按尺寸聚合、逐行展示，
+// 相同 宽×高 只显示一次并计 ×n。数据来源优先级：
+//   framesMeta(结构化) → framesAll(全量文本) → framesText(摘要，去掉"等 N 个"截断)
+//   → 单图框/手动输入记录回退到主框 w×h。失败记录（无尺寸）返回空串。
+function buildFramesDimText(rec) {
+    if (!rec) return '';
+    const lines = [];
+    if (rec.framesMeta && rec.framesMeta.length > 0) {
+        rec.framesMeta.forEach(m => {
+            if (m && m.w && m.h) lines.push(`${Math.round(m.w)}×${Math.round(m.h)}`);
+        });
+    } else if (rec.framesAll) {
+        String(rec.framesAll).split('、').forEach(s => {
+            const dim = s.split('(')[0].trim();
+            if (dim) lines.push(dim);
+        });
+    } else if (rec.framesText) {
+        // 摘要形如 "841×594(模型空间)、594×420(布局) 等 20 个"：逐条目取 '(' 前的尺寸，
+        // 末尾"等 N 个"截断文本因尺寸形如 "594×420" 不受影响，直接复用同一解析
+        String(rec.framesText).split('、').forEach(s => {
+            const dim = s.split('(')[0].trim();
+            if (dim) lines.push(dim);
+        });
+    } else if (rec.w && rec.h) {
+        lines.push(`${Math.round(rec.w)}×${Math.round(rec.h)}`);
+    }
+    // 按尺寸聚合：相同 宽×高 只保留一个，计数 ×n（保持出现顺序）
+    const dimOrder = [];
+    const dimCount = new Map();
+    lines.forEach(dim => {
+        if (!dimCount.has(dim)) {
+            dimCount.set(dim, 0);
+            dimOrder.push(dim);
+        }
+        dimCount.set(dim, dimCount.get(dim) + 1);
+    });
+    return dimOrder.map(dim => dim + (dimCount.get(dim) > 1 ? ` ×${dimCount.get(dim)}` : '')).join('\n');
+}
+
+// 布局分布文本（Excel「布局分布」列，风格同图框尺寸：每个空间一行）：
+//   {"模型空间":3, "布局 \"Sheet1\"":2} → "模型空间×3\n布局 "Sheet1"×2"
+// 旧记录无 layoutCounts 时退化为 layoutCountsText（顿号分隔逐段转行）；再无则空串。
+function buildFramesLayoutText(rec) {
+    if (!rec) return '';
+    const lc = rec.layoutCounts;
+    if (lc && typeof lc === 'object') {
+        const entries = Object.entries(lc);
+        if (entries.length > 0) {
+            return entries.map(([layout, n]) => `${layout}×${n}`).join('\n');
+        }
+    }
+    if (rec.layoutCountsText) {
+        return String(rec.layoutCountsText).split('、').filter(Boolean).join('\n');
+    }
+    return '';
+}
+
 function exportCsv(filtered) {
     if (records.length === 0) { alert('暂无记录可导出'); return; }
     const data = filtered || records;
     if (data.length === 0) { alert('当前筛选结果为空，无可导出记录'); return; }
 
-    const headers = ['序号', '图纸名称', '宽(mm)', '高(mm)', '类型', '实际判断结果', '图框置信度(%)', '比例置信度(%)', '预期幅面', '匹配预期', '备注', '图框数'];
+    // 列序：图纸名称后紧跟「图框数 / 布局分布 / 图框尺寸」，其余按原顺序（宽/高/类型/判断结果/…）
+    const headers = ['序号', '图纸名称', '图框数', '布局分布', '图框尺寸', '宽(mm)', '高(mm)', '类型', '实际判断结果', '图框置信度(%)', '比例置信度(%)', '预期幅面', '匹配预期', '备注'];
     const rows = data.map((rec, idx) => [
         idx + 1,
         rec.name || '',
+        (rec.frameCount && rec.frameCount > 0) ? rec.frameCount : 1,
+        buildFramesLayoutText(rec),
+        buildFramesDimText(rec),
         (rec.w && rec.w > 0) ? rec.w : '',
         (rec.h && rec.h > 0) ? rec.h : '',
         getRecordType(rec),
@@ -1282,7 +1343,6 @@ function exportCsv(filtered) {
         rec.expected,
         rec.match === 'yes' ? '是' : (rec.match === 'no' ? '否' : '待确认'),
         rec.note,
-        (rec.frameCount && rec.frameCount > 0) ? rec.frameCount : 1,
     ]);
     let csv = '\uFEFF' + headers.join(',') + '\n';
     rows.forEach(row => {
@@ -1317,6 +1377,34 @@ function exportCsv(filtered) {
     document.body.removeChild(link);
 }
 
+// 引号感知 CSV 解析：支持字段内逗号与换行（导出"图框尺寸"单元格含多行聚合文本，
+// 每行换行符在引号内不会被拆成多条记录）
+function parseCsvRows(text) {
+    const rows = [];
+    let row = [], field = '', inQ = false;
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (inQ) {
+            if (ch === '"') {
+                if (text[i + 1] === '"') { field += '"'; i++; }
+                else inQ = false;
+            } else {
+                field += ch;
+            }
+        } else if (ch === '"') {
+            inQ = true;
+        } else if (ch === ',') {
+            row.push(field); field = '';
+        } else if (ch === '\n') {
+            row.push(field); rows.push(row); row = []; field = '';
+        } else if (ch !== '\r') {
+            field += ch;
+        }
+    }
+    if (field !== '' || row.length > 0) { row.push(field); rows.push(row); }
+    return rows;
+}
+
 document.getElementById('exportCsvBtn').addEventListener('click', function() {
     exportCsv(getFilteredRecords());
 });
@@ -1336,35 +1424,53 @@ document.getElementById('importFileInput').addEventListener('change', function(e
     const reader = new FileReader();
     reader.onload = function(event) {
         const csvText = event.target.result;
-        const lines = csvText.split('\n').filter(line => line.trim() !== '');
-        if (lines.length < 2) {
+        // 引号感知解析（兼容字段内换行），再按表头名定位列——新旧导出列序都可用
+        const rows = parseCsvRows(csvText).filter(r => r.some(c => String(c).trim() !== ''));
+        if (rows.length < 2) {
             alert('CSV 文件为空或格式不正确');
             return;
         }
-        const headers = lines[0].split(',').map(h => h.trim());
-        const hasName = headers.some(h => h.includes('图纸名称') || h.includes('名称'));
-        if (!hasName) {
+        const headers = rows[0].map(h => String(h).trim());
+        const colIdx = names => {
+            for (const n of names) {
+                const i = headers.findIndex(h => h.includes(n));
+                if (i >= 0) return i;
+            }
+            return -1;
+        };
+        const iName = colIdx(['图纸名称', '名称']);
+        if (iName < 0) {
             if (!confirm('CSV 表头似乎与导出的格式不符，是否继续导入？')) return;
         }
+        const iW = colIdx(['宽(mm)', '宽']);
+        const iH = colIdx(['高(mm)', '高']);
+        const iType = colIdx(['类型']);
+        const iRes = colIdx(['实际判断结果']);
+        const iFc = colIdx(['图框置信度']);
+        const iSc = colIdx(['比例置信度']);
+        const iExp = colIdx(['预期幅面']);
+        const iMatch = colIdx(['匹配预期']);
+        const iNote = colIdx(['备注']);
+        const iCnt = colIdx(['图框数']);
+        const cell = (r, i) => (i >= 0 && i < r.length) ? String(r[i] || '').trim() : '';
         let importedCount = 0;
         const newRecords = [];
-        for (let i = 1; i < lines.length; i++) {
-            const cols = lines[i].split(',').map(c => c.trim());
-            if (cols.length < 11) continue;
-            const name = cols[1] || '';
-            const w = parseInt(cols[2]) || 0;
-            const h = parseInt(cols[3]) || 0;
-            const type = cols[4] || 'nonstandard';
-            const actualResult = cols[5] || '';
-            const frameConf = cols[6] || '';
-            const scaleConf = cols[7] || '';
-            const expected = cols[8] || '';
-            const matchRaw = cols[9] || '待确认';
+        for (let i = 1; i < rows.length; i++) {
+            const r = rows[i];
+            const name = cell(r, iName);
+            const w = parseInt(cell(r, iW)) || 0;
+            const h = parseInt(cell(r, iH)) || 0;
+            const type = cell(r, iType) || 'nonstandard';
+            const actualResult = cell(r, iRes) || '';
+            const frameConf = cell(r, iFc);
+            const scaleConf = cell(r, iSc);
+            const expected = cell(r, iExp);
+            const matchRaw = cell(r, iMatch) || '待确认';
             let match = 'pending';
             if (matchRaw === '是') match = 'yes';
             else if (matchRaw === '否') match = 'no';
-            const note = cols[10] || '';
-            const frameCount = parseInt(cols[11]) || 1;
+            const note = cell(r, iNote);
+            const frameCount = parseInt(cell(r, iCnt)) || 1;
             const isFailed = (w <= 0 || h <= 0) || type === 'failed' || actualResult.includes('解析失败');
             const record = {
                 id: ++recordIdCounter,
