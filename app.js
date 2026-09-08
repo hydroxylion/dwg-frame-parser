@@ -588,12 +588,17 @@ async function parseSingleFile(file) {
             const h = data.height;
             const result = judgeSize(w, h);
             const name = file.relativePath || file.name.replace(/\.[^.]+$/, '');
-            // 多图框信息：后端返回本次检测到的全部图框候选
+            // 多图框信息：后端返回本次检测到的全部图框候选 + 按布局分组的图框数
             const candidates = Array.isArray(data.candidates) ? data.candidates : [];
             const frameCount = (typeof data.frame_count === 'number' && data.frame_count > 0)
                 ? data.frame_count
                 : (candidates.length || 1);
-            addRecord(w, h, result, name, filePath, { frameCount, candidates });
+            const layoutCounts = (data.frame_counts_by_layout
+                && typeof data.frame_counts_by_layout === 'object'
+                && Object.keys(data.frame_counts_by_layout).length > 0)
+                ? data.frame_counts_by_layout
+                : null;
+            addRecord(w, h, result, name, filePath, { frameCount, candidates, layoutCounts });
             return true;
         } catch (err) {
             addFailedRecord(file.relativePath || file.name, err.message || '未知错误', filePath);
@@ -827,11 +832,30 @@ function formatFramesAll(candidates) {
     return candidates.map(c => `${c.width}×${c.height}(${c.layout})`).join('、');
 }
 
+// 按布局分组的图框数文本：{"模型空间":3, "布局 \"Sheet1\"":2} → "模型空间×3、布局 "Sheet1"×2"
+function formatLayoutCountsText(layoutCounts) {
+    if (!layoutCounts || typeof layoutCounts !== 'object') return '';
+    return Object.entries(layoutCounts)
+        .map(([layout, n]) => `${layout}×${n}`)
+        .join('、');
+}
+
 function addRecord(w, h, result, name, path, framesInfo) {
     const framePct = result.confidenceFrame !== undefined ? (result.confidenceFrame * 100).toFixed(1) : '';
     const scalePct = result.confidenceScale !== undefined ? (result.confidenceScale * 100).toFixed(1) : '';
     const frameCount = (framesInfo && framesInfo.frameCount) || 1;
     const candidates = (framesInfo && framesInfo.candidates) || [];
+    // 布局分布优先用后端 frame_counts_by_layout；字段缺失（旧后端/旧记录）时按
+    // candidates 的 layout 自行聚合兜底，保证"模型空间几个/布局几个"始终可展示
+    let layoutCounts = (framesInfo && framesInfo.layoutCounts) || null;
+    if (!layoutCounts && candidates.length > 0) {
+        const agg = {};
+        candidates.forEach(c => {
+            const k = (c && c.layout) || '未知';
+            agg[k] = (agg[k] || 0) + 1;
+        });
+        layoutCounts = Object.keys(agg).length > 0 ? agg : null;
+    }
     // 多图框信息由记录表「图框数」列展示，这里不再拼进实际判断结果
     const actualResult = result.label + ' · ' + result.detail;
     // 结构化候选（每框 w/h/layout），供逐框分类判断"标准+非标混合"
@@ -858,6 +882,8 @@ function addRecord(w, h, result, name, path, framesInfo) {
         framesText: frameCount > 1 ? formatFramesText(candidates) : '',
         framesAll: frameCount > 1 ? formatFramesAll(candidates) : '',
         framesMeta: framesMeta,
+        layoutCounts: layoutCounts,
+        layoutCountsText: formatLayoutCountsText(layoutCounts),
     };
     records.push(record);
     saveRecords();
@@ -991,8 +1017,13 @@ function renderRecords() {
         const hasFrameCount = rec.frameCount && rec.frameCount > 0;
         let frameCountHtml = '—';
         if (hasFrameCount) {
+            // 布局分布次级文本（模型空间×N、布局 "Sheet1"×M …），仅多图框时显示在图框
+            // 数下方，无需悬停即可看到"哪个空间有几张图框"；单框行不显示（等价冗余）
+            const distHtml = (rec.frameCount > 1 && rec.layoutCountsText)
+                ? `<div class="frame-dist" title="${escHtml(rec.layoutCountsText)}">${escHtml(rec.layoutCountsText)}</div>`
+                : '';
             frameCountHtml = (rec.frameCount > 1)
-                ? `<span class="type-tag multi-frame tip-anchor" data-frames="${escHtml(rec.framesText || '')}" data-all="${escHtml(rec.framesAll || rec.framesText || '')}">🖼 ×${rec.frameCount}</span>`
+                ? `<span class="type-tag multi-frame tip-anchor" data-frames="${escHtml(rec.framesText || '')}" data-all="${escHtml(rec.framesAll || rec.framesText || '')}" data-layouts="${escHtml(JSON.stringify(rec.layoutCounts || {}))}">🖼 ×${rec.frameCount}</span>${distHtml}`
                 : String(rec.frameCount);
         }
 

@@ -1420,6 +1420,16 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
 
         frame_count = len(frame_like) if frame_like else len(all_candidates)
 
+        # ---------- 按布局分组图框数 ----------
+        # frame_count 是模型空间 + 所有布局空间的合计；此处按 layout 字段分开统计
+        # （如 {"模型空间": 3, "布局 \"Sheet1\"": 2}），方便前端展示"每个空间几张图框"。
+        # 只统计通过特征筛选与清洗后的候选（frame_like）；force_max 模式下若无符合
+        # 特征的图框（frame_like 为空），返回空字典，但主框尺寸仍取最大候选。
+        frame_counts_by_layout = {}
+        for c in frame_like:
+            ln = c.get('layout', '未知')
+            frame_counts_by_layout[ln] = frame_counts_by_layout.get(ln, 0) + 1
+
         # ---------- 强制最大矩形模式 ----------
         if mode == 'force_max':
             best = max(all_candidates, key=lambda c: c['area'])
@@ -1434,6 +1444,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 'width': round(width),
                 'height': round(height),
                 'frame_count': frame_count,
+                'frame_counts_by_layout': frame_counts_by_layout,
                 'candidates': build_payload(frame_like if frame_like else all_candidates),
                 'xref_warnings': xref_warnings,
             }
@@ -1494,6 +1505,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             'width': width,
             'height': height,
             'frame_count': frame_count,
+            'frame_counts_by_layout': frame_counts_by_layout,
             'candidates': build_payload(valid_candidates),
             'xref_warnings': xref_warnings,
         }
@@ -1548,6 +1560,7 @@ def upload_file():
             'height': result['height'],
             'unit': unit,
             'frame_count': result['frame_count'],
+            'frame_counts_by_layout': result.get('frame_counts_by_layout', {}),
             'candidates': result['candidates'],
             'xref_warnings': result.get('xref_warnings', []),
         })

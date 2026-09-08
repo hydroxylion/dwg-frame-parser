@@ -684,6 +684,17 @@
             cursor: pointer;
             white-space: nowrap;
         }
+        /* 图框数下的布局分布次级文本：模型空间×N、布局 "Sheet1"×M … */
+        .frame-dist {
+            font-size: 11px;
+            color: #6b7d94;
+            margin-top: 1px;
+            line-height: 1.35;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 200px;
+        }
         /* 多图框气泡（悬停弹出 / 可钉住 / 一键复制全部 / 超长可滚动） */
         .tip-pop {
             position: fixed;
