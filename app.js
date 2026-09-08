@@ -1103,6 +1103,8 @@ function ensureTipPop() {
         tipPop.className = 'tip-pop';
         tipPop.style.display = 'none';
         document.body.appendChild(tipPop);
+        // 气泡整体可交互后，点击内部不冒泡到 document（避免钉住时误关）
+        tipPop.addEventListener('click', ev => ev.stopPropagation());
     }
     return tipPop;
 }
@@ -1131,8 +1133,34 @@ function showTip(anchor) {
     }).join('');
     const nDim = dimOrder.length;
     const truncated = nRaw > 20;                      // 原始图框超 20 个才显示"…等 N 个"摘要行
+    // 空间分布（模型空间 / 各布局的图框数）：徽章携带 JSON {布局名: 数量}，
+    // 逐行完整展示（布局多时可滚动），不再单行省略截断
+    const layoutsRaw = anchor.dataset.layouts || '';
+    let layoutRowsHtml = '';
+    if (layoutsRaw && layoutsRaw !== '{}') {
+        let entries = [];
+        try { entries = Object.entries(JSON.parse(layoutsRaw)); } catch (_) { entries = []; }
+        if (!entries.length) {
+            // 旧数据兼容：顿号分隔的 "模型空间×3、布局 "Sheet1"×2" 文本逐项拆分
+            entries = String(layoutsRaw).split('、').filter(Boolean).map(t => {
+                const m = t.match(/^(.*?)(?:×(\d+))?$/);
+                return [m[1], m[2] || ''];
+            });
+        }
+        if (entries.length) {
+            layoutRowsHtml =
+                `<div class="tip-layouts">
+                   <div class="tip-layouts-head">📐 空间分布（${entries.length} 个空间）</div>
+                   <div class="tip-layouts-list">`
+                + entries.map(([name, n]) =>
+                    `<div class="tip-layout-line">${escHtml(name)}${n ? ` <span class="tip-times">×${n}</span>` : ''}</div>`
+                ).join('')
+                + `</div></div>`;
+        }
+    }
     tipPop.innerHTML =
         `<div class="tip-head">共 ${nRaw} 个图框${nDim > 1 ? `（${nDim} 种尺寸）` : ''}${truncated ? ' <span class="tip-more">· 下方滚动查看</span>' : ''}</div>`
+        + layoutRowsHtml
         + (truncated ? `<div class="tip-summary" title="${escHtml(framesText)}">${escHtml(framesText)}</div>` : '')
         + `<div class="tip-list">${dimRows}</div>`
         + `<div class="tip-actions">
@@ -1143,23 +1171,24 @@ function showTip(anchor) {
     tipPop.style.display = 'block';
     clearTimeout(tipHideTimer);
     bindTipActions();
-    // 鼠标移开时若非钉住，延迟保留后隐藏（留截图窗口）
+    // 悬停气泡内部（列表滚动区 / 操作区）时保持显示，移出后延迟隐藏（留截图窗）
+    tipPop.onmouseenter = () => clearTimeout(tipHideTimer);
+    tipPop.onmouseleave = () => {
+        if (!tipPinned && tipPop.style.display === 'block') {
+            clearTimeout(tipHideTimer);
+            tipHideTimer = setTimeout(() => { hideTip(); }, TIP_KEEP_MS);
+        }
+    };
     if (!tipPinned) {
         tipHideTimer = setTimeout(() => { hideTip(); }, TIP_KEEP_MS);
     }
 }
 
 function bindTipActions() {
-    // 操作区可交互（气泡其余区域 pointer-events:none）；悬停其上暂停自动隐藏
+    // hover 保持/延迟隐藏由 showTip 中的 tipPop.onmouseenter/onmouseleave 统一管理
+    //（气泡整体可交互），此处只绑定按钮动作
     const actions = tipPop.querySelector('.tip-actions');
     if (!actions) return;
-    actions.addEventListener('mouseenter', () => clearTimeout(tipHideTimer));
-    actions.addEventListener('mouseleave', () => {
-        if (!tipPinned && tipPop.style.display === 'block') {
-            clearTimeout(tipHideTimer);
-            tipHideTimer = setTimeout(() => { hideTip(); }, TIP_KEEP_MS);
-        }
-    });
     actions.querySelector('.tip-pin').addEventListener('click', ev => {
         ev.stopPropagation();
         if (tipPinned) { hideTip(); return; }   // 再次点击已固定的气泡 → 关闭
@@ -1248,9 +1277,10 @@ function bindTipAnchors(root) {
     });
 }
 
-// 点击页面其它区域关闭钉住的气泡；滚动/窗口缩放时隐藏（位置可能失效）
-document.addEventListener('click', function() {
-    if (tipPinned) hideTip();
+// 点击页面其它区域关闭钉住的气泡（点击气泡内部不关闭，便于滚动/查看/复制）；
+// 滚动/窗口缩放时隐藏（位置可能失效）
+document.addEventListener('click', function(e) {
+    if (tipPinned && (!tipPop || !tipPop.contains(e.target))) hideTip();
 });
 ['scroll', 'resize'].forEach(evt => {
     window.addEventListener(evt, function() {

@@ -707,8 +707,8 @@
             font-size: 13px;
             line-height: 1.8;
             box-shadow: 0 10px 30px rgba(10, 25, 50, 0.35);
-            pointer-events: none;
-            max-width: 420px;
+            pointer-events: auto;       /* 整个气泡可交互：列表区支持滚动，hover 不消失 */
+            max-width: 560px;
             min-width: 220px;
         }
         .tip-pop .tip-head {
@@ -721,6 +721,29 @@
             color: #7f9ac0;
             font-weight: 400;
         }
+        /* 空间分布区块：逐行展示每个空间（模型空间/各布局）的图框数，多空间可滚动看全 */
+        .tip-pop .tip-layouts {
+            margin: 3px 0 5px;
+            padding-bottom: 4px;
+            border-bottom: 1px dashed rgba(255, 255, 255, 0.18);
+        }
+        .tip-pop .tip-layouts-head {
+            color: #8fe0c4;
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 1px;
+        }
+        .tip-pop .tip-layouts-list {
+            max-height: 220px;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(255, 255, 255, 0.35) transparent;
+            pointer-events: auto;   /* 允许滚轮/拖动滚动条看全更多空间 */
+        }
+        .tip-pop .tip-layouts-list .tip-layout-line {
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
         .tip-pop .tip-summary {
             color: #8fa6c8;
             font-size: 12px;
@@ -732,17 +755,18 @@
             margin-bottom: 2px;
         }
         .tip-pop .tip-list {
-            max-height: 420px;          /* 约 18 行：超过即出现滚动条 */
+            max-height: 300px;          /* 约 15 行：超过即出现滚动条 */
             overflow-y: auto;
             margin: 2px 0 6px;
             scrollbar-width: thin;
             scrollbar-color: rgba(255, 255, 255, 0.35) transparent;
+            pointer-events: auto;       /* 允许滚轮/拖动滚动条看全尺寸 */
         }
         .tip-pop .tip-list .tip-line {
             white-space: nowrap;
             font-variant-numeric: tabular-nums;
         }
-        .tip-pop .tip-list .tip-times {
+        .tip-pop .tip-times {
             color: #ffd28a;
             font-weight: 600;
             font-size: 12px;
