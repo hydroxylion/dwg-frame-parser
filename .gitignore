@@ -11,8 +11,13 @@ node_modules/
 .idea/
 .vscode/
 
-# 日志与运行时产物
+# 日志与运行时产物（*.log 覆盖 parser.log；parser.log.* 覆盖轮转历史 parser.log.1~.4）
 *.log
+parser.log.*
+
+# 回归/诊断的临时输出
+tmp_*.txt
+tmp_*.json
 
 # 上传文件与临时目录
 uploads/

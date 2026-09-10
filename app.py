@@ -2,6 +2,7 @@ import os
 import tempfile
 import logging
 import traceback
+from logging.handlers import RotatingFileHandler
 import ezdxf
 from ezdxf import bbox as ezdxf_bbox
 from ezdxf.addons import odafc
@@ -18,14 +19,61 @@ app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 # 工作线程内向 stdout 执行 print() 可能抛出 OSError [Errno 22] Invalid argument，
 # 会直接把整个解析请求搞挂（解析本身其实是成功的）。
 # 因此所有日志一律走 safe_log()：控制台打印失败不影响解析结果，同时写入 parser.log。
+#
+# 按大小轮转（RotatingFileHandler）：单文件超过 LOG_MAX_BYTES 即切分，最多保留
+# LOG_BACKUP_COUNT 个历史文件（parser.log.1 / .2 / .3 / .4），磁盘占用上限
+# ≈ 10MB × (1+4) = 50MB。
+#   背景：排查密集期（每天上传十几张图纸）日志增长很快，2026-09-01~09-10 已累积
+#   6.6MB 且从未轮转；一次批量回归（20 张 × 2 版本串行解析）就能写掉数 MB。
+#   delay=True：启动时先不打开文件，首次写日志才创建，避免无谓占用文件句柄。
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'parser.log')
-logging.basicConfig(
-    filename=LOG_FILE,
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    encoding='utf-8',
-)
+LOG_MAX_BYTES = 10 * 1024 * 1024   # 单文件上限 10MB
+LOG_BACKUP_COUNT = 4               # 保留 4 个历史文件（parser.log.1 ~ .4）
+
+
+def _archive_oversized_log():
+    """把"已经超过阈值"的 parser.log 预归档为 .1，然后轮转历史文件序号。
+
+    RotatingFileHandler 自身就能处理超限文件（首次写入即切分），但它只在"写日志
+    那一刻"动作，结果是新日志先追加进那个巨大的旧文件、混在一起才切走。启动前
+    先归档，可让新一轮运行从干净的 parser.log 开始，历史记录完整留在 .1。
+      典型场景：切换到轮转机制时，parser.log 里已累积 6.6MB 旧记录（2026-09-01
+      起），归档后新日志的排查体验更清爽。
+      失败不抛异常：文件被其它进程占用（Flask 正在运行）时直接跳过，交给
+      RotatingFileHandler 在写入时自行处理。
+    """
+    try:
+        if not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) < LOG_MAX_BYTES:
+            return
+        # 历史序号整体后移：.3 → .4、.2 → .3、.1 → .2，最旧的 .4 被覆盖丢弃
+        for i in range(LOG_BACKUP_COUNT - 1, 0, -1):
+            src, dst = f'{LOG_FILE}.{i}', f'{LOG_FILE}.{i + 1}'
+            if os.path.exists(src):
+                os.replace(src, dst)
+        os.replace(LOG_FILE, f'{LOG_FILE}.1')
+    except OSError:
+        pass  # 被占用 / 权限不足：不阻断启动，交给 handler 在写入时切分
+
+
+_archive_oversized_log()
+
 logger = logging.getLogger('dwg-parser')
+logger.setLevel(logging.INFO)
+# 幂等：Flask debug 模式会用 reloader 重启进程、或模块被重复导入时，避免重复挂 handler
+if not logger.handlers:
+    _file_handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding='utf-8',
+        delay=True,
+    )
+    _file_handler.setFormatter(
+        logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+    logger.addHandler(_file_handler)
+    # 不向 root logger 传播：否则 Flask/werkzeug 的 root handler（basicConfig 或
+    # 默认 lastResort）会让同一条日志在控制台重复输出一遍
+    logger.propagate = False
 
 
 def safe_log(msg):
