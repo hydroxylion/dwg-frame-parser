@@ -1266,6 +1266,49 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         frame_like = [c for c in all_candidates if is_frame_like(c)]
         pass_feature_count = len(frame_like)
 
+        # ---------- 同块名族"一荣俱荣"传播（2.8米皮带线 fc 3→13） ----------
+        # 场景：同一个标准图框块被以多种比例重复插入，尺寸跨度极大（2.8米皮带线：
+        #   块 A4-横-杨勇 以 ×1 / ×2×8 / ×4 / ×10 / ×20 共 12 次插入，插入后尺寸
+        #   297×210 ~ 5940×4200）。特征筛选是"逐实例"判定的，小尺度实例在相对面积法
+        #   （条件C）下必然吃亏：即使 ×20 那张已确认是图框，×1 那张的 rel 也只有
+        #   0.25%。但"这个块是图框"其实是一个整体事实——同一个块画了 12 次，没有理由
+        #   只有最大的那张算图框。故按块名分组做一次传播：族内只要有 ≥1 个实例通过
+        #   既有判定（A/B/C/D/A+），整族一并放行。
+        #   与条件E（A+）的分工：A+ 看"块模板是不是标准图幅"（不依赖族内是否已有种子，
+        #   可兜住"整族都是小尺度、连最大实例也过不了原判定"的情形）；本传播则适用于
+        #   自定义尺寸图框块（块定义非 A 系列，但族内大尺寸实例已靠条件A/C 通过）——
+        #   例如效果图.dwg 的 A$C5242259E 图框块（17098×12319，ratio 1.388）。
+        #   防误传播约束：族内**所有**实例的长宽比都须接近 √2（±10%）——装饰块阵列
+        #   （柱网/门窗/家具，比例远离 √2）不会被连带放行；同类族里出现一个比例异常
+        #   的实例即整族放弃传播（保守取向，宁可漏收不可误收）。
+        _SQRT2_FAMILY = 2 ** 0.5   # 纸张框比例基准，供族内一致性校验
+        _seed_names = {c.get('block_name') for c in frame_like
+                       if c.get('type') == '块参照插入' and c.get('block_name')}
+        if _seed_names:
+            _block_family = {}
+            for c in all_candidates:
+                if c.get('type') == '块参照插入' and c.get('block_name'):
+                    _block_family.setdefault(c['block_name'], []).append(c)
+            _in_frame_like = {id(c) for c in frame_like}
+            _propagated_total = 0
+            for _bn in _seed_names:
+                _fam = _block_family.get(_bn, [])
+                if len(_fam) < 2:
+                    continue  # 单实例族无"重复排版"语义，不做传播
+                if not all(abs(c['ratio'] - _SQRT2_FAMILY) / _SQRT2_FAMILY <= 0.10
+                           for c in _fam):
+                    continue  # 族内存在比例异常的实例 → 整族放弃（防装饰块误传播）
+                _add = [c for c in _fam if id(c) not in _in_frame_like]
+                if not _add:
+                    continue
+                frame_like.extend(_add)
+                _propagated_total += len(_add)
+                _sizes = sorted({f"{c['width']:.0f}x{c['height']:.0f}" for c in _add})
+                safe_log(f"  [同块名族传播] {_bn}（{len(_fam)} 个实例，均已过种子判定）"
+                         f" → 补入 {len(_add)} 个候选：{', '.join(_sizes)}")
+            if _propagated_total:
+                pass_feature_count = len(frame_like)
+
         # ---------- 外层包裹框识别（优化点1） ----------
         # 场景：几张图框外面又画了一个大框，把多个图框包在里面。这种大框会被当成图框，
         # 且去重时会把内部真图框当嵌套物剔掉（去重方向"留大剔小"正好反了）。
