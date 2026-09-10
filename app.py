@@ -827,6 +827,11 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 'rectangularity': 1.0,
                 'block_name': _bn,
                 'insert_layer': _entity.dxf.layer,
+                # 块定义 bbox 尺寸（未应用 INSERT 缩放）：供特征筛选的 A+ 判据
+                # "块模板本身是不是标准图幅"使用（2.8米皮带线 的 A4-横-杨勇 块定义
+                # 即 297×210=A4，12 个实例以 ×1/×2/×4/×10/×20 插入）。
+                'block_def_w': abs(_bb_def[2] - _bb_def[0]),
+                'block_def_h': abs(_bb_def[3] - _bb_def[1]),
             })
             _insert_kept += 1
         except Exception:
@@ -1053,6 +1058,13 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         MIN_FRAME_SHORT_SIDE = 400   # 条件 B 短边下限（mm）；过滤门窗等构件小矩形，真图框经条件 A 保底
         SIZE_ROUNDNESS_EPS = 0.1     # 尺寸规整容差（mm）：宽高与最近整数的差 ≤ 0.1 视为整数
         EXPLICIT_TYPES = {'闭合多段线', '直线矩形'}
+        # 标准 A 系列短边集合（A0~A5）：块模板尺寸校验用（条件E / A+ 通道）
+        A_SERIES_SHORT_SIDES = (841, 594, 420, 297, 210, 148, 105)
+        # 常用制图比例白名单（与前端 app.js COMMON_PLOT_SCALES 同口径）：
+        #   条件E（A+）用它校验"块模板 × k = 实例尺寸"中的 k 是不是合法出图倍率，
+        #   挡住 39.05 / 95.16 之类自定义倍数缩放块（长中苑模板框、封面套图等）。
+        COMMON_PLOT_SCALES = (1, 2, 2.5, 4, 5, 10, 20, 25, 40, 50, 75, 80,
+                              100, 150, 200, 250, 300, 400, 500)
         # 条件 C：大尺寸真图框识别（相对面积法，跟单位无关）
         #   场景：多张图框画在同一模型空间（如整本图纸的 9 张图都在 Model 里），
         #   layout 总包围盒巨大 → 单图框面积占比极低（<0.1%），条件 A 全挂；
@@ -1208,6 +1220,47 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     and _near_sqrt2 and _rect_same_size >= 2
                     and c['rel_area_ratio'] >= 0.01):
                 return True
+            # 条件E（A+ 通道）："块模板本身就是标准图幅" + 实例按常用制图比例等比缩放。
+            #   场景：同一个标准图幅图框块被以多种比例重复插入（2.8米皮带线.DWG：块
+            #   A4-横-杨勇 块定义 297×210=A4，12 个实例以 ×1/×2×8/×4/×10/×20 插入，
+            #   尺寸跨度 20 倍）。此时相对面积法（条件C）必败——最大实例 ×20 占了
+            #   rel=100%，最小的 ×1 只剩 0.25%，10 个实例全被 10% 门槛拒（fc 3/13）。
+            #   而"块定义就是 A4"这件事与缩放倍数无关：判据改为看块模板本身——
+            #     ① 块定义短边命中标准 A 系列、长边 ≈ 短边×√2（块模板是标准图幅）；
+            #     ② 实例尺寸 / 块定义尺寸 = k（宽高各自比值一致，即等比；兼容块被
+            #        rotation 90° 插入时宽高互换），且 k 落在 COMMON_PLOT_SCALES 白名单。
+            #   与条件B/C 的区别：不依赖面积占比、不依赖绝对尺寸，只看"模板标准 + 倍率合法"。
+            #   挡住装饰块：家具/门窗符号块定义尺寸不在 A 系列、比例也远离 √2；自定义
+            #   倍率缩放（39.05× 等）被白名单拦下。
+            if c['type'] == '块参照插入':
+                _bdw = c.get('block_def_w') or 0
+                _bdh = c.get('block_def_h') or 0
+                if _bdw > 0 and _bdh > 0:
+                    _b_short = min(_bdw, _bdh)
+                    _b_long = max(_bdw, _bdh)
+                    _is_std_paper = any(
+                        abs(_b_short - _s) <= 1.0 and abs(_b_long - _s * _SQRT2) <= 1.0
+                        for _s in A_SERIES_SHORT_SIDES)
+                    if _is_std_paper:
+                        # 宽高分别对块定义宽高求比（两种对应关系：原向 / 旋转 90° 互换）
+                        _k_ok = False
+                        for _dw, _dh in ((_bdw, _bdh), (_bdh, _bdw)):
+                            _kw = c['width'] / _dw
+                            _kh = c['height'] / _dh
+                            _kmax = max(_kw, _kh)
+                            if _kmax <= 0:
+                                continue
+                            # 等比：两方向比值相对差 ≤ 0.5%（吸收浮点/取整噪声）
+                            if abs(_kw - _kh) > _kmax * 0.005:
+                                continue
+                            _k = (_kw + _kh) / 2
+                            # k 落在常用制图比例白名单（相对容差 1%，容纳 2.5 等非整数比例）
+                            if any(abs(_k - _s) <= max(0.01, _s * 0.01)
+                                   for _s in COMMON_PLOT_SCALES):
+                                _k_ok = True
+                                break
+                        if _k_ok:
+                            return True
             return False
 
         frame_like = [c for c in all_candidates if is_frame_like(c)]
