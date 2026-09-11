@@ -1,192 +1,193 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<html lang="zh-CN" data-page-node-id="Uqe6iE0QkAAfIgBhsHG0yN">
+<head data-page-node-id="WmvoShutHZ2HWYBCEEa9Hb">
+    <meta charset="UTF-8" data-page-node-id="ZdtEHA1G7xxqsuC6v6Q8DN" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="jP0Hy1ppCD9Ai9Fqxxmgcl" />
     <title>图纸图框标准检测工具 v3 · 批量上传</title>
     <!-- 引用外部样式 -->
-    <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="style.css" data-page-node-id="3PFLSMrVHFaDrKnG12JIPc" />
 </head>
-<body>
-<div class="container">
-    <h1>📐 图框标准检测 <small>v3 · 批量上传 + 筛选</small></h1>
-    <div class="subtitle">输入图纸幅面尺寸（宽 × 高）及图纸名称，或批量上传 DWG/DXF 文件（可多选）</div>
+<body data-page-node-id="ySKtlLnZVTafsE1QrUczHw">
+<div class="container" data-page-node-id="DYFynf1xsPtKGX2BLQFUIZ">
+    <h1 data-page-node-id="wDCZQPnqVmNyFvrotYHqIb">📐 图框标准检测 <small data-page-node-id="0zUj89GnEtUyRDsQPuJ54l">v3 · 批量上传 + 筛选</small></h1>
+    <div class="subtitle" data-page-node-id="t4WjmF8f0KiTvzrmeW3eMG">输入图纸幅面尺寸（宽 × 高）及图纸名称，或批量上传 DWG/DXF 文件（可多选）</div>
 
-    <div class="grid-2">
+    <div class="grid-2" data-page-node-id="d4tF5Zn0yXVK0c2ouEnJhK">
         <!-- 左侧：手动输入 -->
-        <div class="card">
-            <div class="card-title">✏️ 手动输入 <span class="badge">宽 × 高</span></div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>宽 (mm)</label>
-                    <input type="number" id="manualWidth" placeholder="1189" min="1" step="1" />
+        <div class="card" data-page-node-id="XkMsLhpfA7bz2UnmfRvhW2">
+            <div class="card-title" data-page-node-id="bBBqzu4hTVKKYqw5hOYbry">✏️ 手动输入 <span class="badge" data-page-node-id="d0Al8aVDimGBZShsOJdFvD">宽 × 高</span></div>
+            <div class="form-row" data-page-node-id="nvPsa2RyqhR4Ndc7IYO3M0">
+                <div class="form-group" data-page-node-id="qfSPiY3rtA8HHjU5VE1j0L">
+                    <label data-page-node-id="YLhwQEw6Pruje4WCjCHY8C">宽 (mm)</label>
+                    <input type="number" id="manualWidth" placeholder="1189" min="1" step="1" data-page-node-id="kuWdVxhOiyGeJWLelfx90x" />
                 </div>
-                <div class="form-group">
-                    <label>高 (mm)</label>
-                    <input type="number" id="manualHeight" placeholder="841" min="1" step="1" />
-                </div>
-            </div>
-            <div class="form-row" style="margin-top:8px;">
-                <div class="form-group form-group-name">
-                    <label>📄 图纸名称</label>
-                    <input type="text" id="manualName" placeholder="如：建筑-A0-01" style="min-width:150px;" />
+                <div class="form-group" data-page-node-id="5lANvFHnFvTJ6e2i1HWDDA">
+                    <label data-page-node-id="CKJ1A0ocC9cTgjwdE4A8cs">高 (mm)</label>
+                    <input type="number" id="manualHeight" placeholder="841" min="1" step="1" data-page-node-id="SkWLAr9GjLlgvfnqmEORFl" />
                 </div>
             </div>
-            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:8px;">
-                <button class="btn btn-primary" id="btnCheckManual">🔍 判断</button>
-                <button class="btn btn-outline" id="btnClearManual">清空</button>
+            <div class="form-row" style="margin-top:8px;" data-page-node-id="PhUeiLhD3JH8LiOsjmxNx8">
+                <div class="form-group form-group-name" data-page-node-id="RIk2nmtsaJCojTeUGOVsfv">
+                    <label data-page-node-id="ZmhMbyVIGvaZ8lu5i0GPk9">📄 图纸名称</label>
+                    <input type="text" id="manualName" placeholder="如：建筑-A0-01" style="min-width:150px;" data-page-node-id="vmja3B5nZpiQ7L8b9njZAa" />
+                </div>
             </div>
-            <div class="result-box" id="manualResult">
-                <div class="empty">请输入宽高后点击「判断」</div>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:8px;" data-page-node-id="of2ivCNt3wumOwqPHKcIO8">
+                <button class="btn btn-primary" id="btnCheckManual" data-page-node-id="8Az2uvxWi83gA13WhVoTTh">🔍 判断</button>
+                <button class="btn btn-outline" id="btnClearManual" data-page-node-id="7qXT5sxxGSeezSdVtiSYVO">清空</button>
             </div>
-            <div style="margin-top:14px;">
-                <div class="text-muted" style="margin-bottom:6px; font-weight:500;">快速示例：</div>
-                <div style="display:flex; flex-wrap:wrap; gap:6px;">
-                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="1189" data-h="841" data-name="A0标准">A0</button>
-                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="841" data-h="594" data-name="A1标准">A1</button>
-                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="594" data-h="420" data-name="A2标准">A2</button>
-                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="420" data-h="297" data-name="A3标准">A3</button>
-                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="297" data-h="210" data-name="A4标准">A4</button>
-                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="1338" data-h="841" data-name="A0+1/8">A0+1/8</button>
-                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="1051" data-h="594" data-name="A1+1/4">A1+1/4</button>
-                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="891" data-h="420" data-name="A2+1/2">A2+1/2</button>
-                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="630" data-h="297" data-name="A3+1/2">A3+1/2</button>
-                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="841" data-h="891" data-name="特例841x891">特例</button>
-                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="32753" data-h="23158" data-name="非标大图">非标加长</button>
-                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="1189" data-h="42050" data-name="scale50测试">scale=50</button>
-                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="5000" data-h="3000" data-name="完全非标测试">完全非标</button>
+            <div class="result-box" id="manualResult" data-page-node-id="I2sT1bwGUZ4WE0MTIOuTWA">
+                <div class="empty" data-page-node-id="EV383Xt41GGAgCscwwOf7L">请输入宽高后点击「判断」</div>
+            </div>
+            <div style="margin-top:14px;" data-page-node-id="ESIzWh28OMBIlnJZIoKj9h">
+                <div class="text-muted" style="margin-bottom:6px; font-weight:500;" data-page-node-id="AUCHeYpGmRoSuyw6ziAhT0">快速示例：</div>
+                <div style="display:flex; flex-wrap:wrap; gap:6px;" data-page-node-id="8FttnQ6WD8QP57YNRP2K8A">
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="1189" data-h="841" data-name="A0标准" data-page-node-id="9gHv8pOeqk8mIw8TJnKd5a">A0</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="841" data-h="594" data-name="A1标准" data-page-node-id="BMduxLbOgRlhFht00bJnIP">A1</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="594" data-h="420" data-name="A2标准" data-page-node-id="DTL9VLD1QZ1PoqPUNJMTM6">A2</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="420" data-h="297" data-name="A3标准" data-page-node-id="N7JQ0b3X7RtF2R2BE2almj">A3</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="297" data-h="210" data-name="A4标准" data-page-node-id="VzaRABfUkW1zTwK2sy1zW2">A4</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="1338" data-h="841" data-name="A0+1/8" data-page-node-id="hfqbaLiOIXKRWocbT59Hh1">A0+1/8</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="1051" data-h="594" data-name="A1+1/4" data-page-node-id="9gPp1yTlbNfXu2ZeJA5FeR">A1+1/4</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="891" data-h="420" data-name="A2+1/2" data-page-node-id="2P9lCGp5Dr3frGDwLZMI4D">A2+1/2</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="630" data-h="297" data-name="A3+1/2" data-page-node-id="FOxlZgeEmZ9tLGIFrFvWkl">A3+1/2</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="841" data-h="891" data-name="特例841x891" data-page-node-id="Lm0ftNEIFstKFrj8nkQ6Lv">特例</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="32753" data-h="23158" data-name="非标大图" data-page-node-id="UB2e3jFMrFw8ksPFnHhu13">非标加长</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="1189" data-h="42050" data-name="scale50测试" data-page-node-id="Ggcywuw1jqOwvMyQ77LQtz">scale=50</button>
+                    <button class="btn btn-outline" style="padding:4px 14px; font-size:13px;" data-w="5000" data-h="3000" data-name="完全非标测试" data-page-node-id="sHfSH32pXmBOUaqh2fnv6o">完全非标</button>
                 </div>
             </div>
         </div>
 
         <!-- 右侧：DWG 导入（批量） -->
-        <div class="card">
-            <div class="card-title">📁 批量导入 DWG/DXF <span class="badge" id="dwgStatus">需本地服务</span></div>
-            <div class="upload-zone" id="uploadZone">
-                <div class="icon">📄</div>
-                <div class="text">点击或拖拽上传多个 DWG/DXF 文件 或 文件夹</div>
-                <div class="hint" id="uploadHint">拖拽文件夹将自动递归遍历所有子目录</div>
-                <input type="file" id="fileInput" accept=".dwg,.DWG,.dxf,.DXF" multiple />
+        <div class="card" data-page-node-id="YhgFU2YHYkDvFkl5rmnhoU">
+            <div class="card-title" data-page-node-id="f9y7VqjAyEpXtlZfCvg8zd">📁 批量导入 DWG/DXF <span class="badge" id="dwgStatus" data-page-node-id="eRuT4s5JhkBBzrpg7lQNpQ">需本地服务</span></div>
+            <div class="upload-zone" id="uploadZone" data-page-node-id="yTrbfD4tib6RF0UIkZuOqi">
+                <div class="icon" data-page-node-id="TUVvH1RR4UPwgySssMvPmB">📄</div>
+                <div class="text" data-page-node-id="kBqhJAJSs1l7vlT0m2IfDp">点击或拖拽上传多个 DWG/DXF 文件 或 文件夹</div>
+                <div class="hint" id="uploadHint" data-page-node-id="HAkvyFfdVvvoAI0otCclJJ">拖拽文件夹将自动递归遍历所有子目录</div>
+                <input type="file" id="fileInput" accept=".dwg,.DWG,.dxf,.DXF" multiple data-page-node-id="q1R7urd6wFTCWArg50NIOH" />
             </div>
             <!-- 批量状态 -->
-            <div class="batch-status" id="batchStatus">
-                <span>
-                    <span class="progress-text" id="batchProgress">准备处理...</span>
-                    <span class="file-name" id="batchCurrentFile"></span>
+            <div class="batch-status" id="batchStatus" data-page-node-id="8WUQTmNNS81H87dG864Mf3">
+                <span data-page-node-id="57BLBg6N2AbEWbxowmyP4U">
+                    <span class="progress-text" id="batchProgress" data-page-node-id="DG6Evz24Tmx3WYtmjaaBiG">准备处理...</span>
+                    <span class="file-name" id="batchCurrentFile" data-page-node-id="T3C9umWvVt30FcHubEI70G"></span>
                 </span>
-                <button class="btn-stop" id="btnStopBatch">⏹ 停止</button>
+                <button class="btn-stop" id="btnStopBatch" data-page-node-id="ExlQyhu4ZHFlUmve1V4KpK">⏹ 停止</button>
             </div>
-            <div class="upload-options">
-                <div class="option-group">
-                    <label>优先检测：</label>
-                    <select id="prioritySelect">
-                        <option value="polyline">闭合多段线</option>
-                        <option value="line_rect">直线矩形</option>
+            <div class="upload-options" data-page-node-id="p1UFjvpqX3ObAWpBCNaqBJ">
+                <div class="option-group" data-page-node-id="hEx0UVTIOWGAYmM63CHe8v">
+                    <label data-page-node-id="nvHBLjcmEfIRx9O5CjWu9U">优先检测：</label>
+                    <select id="prioritySelect" data-page-node-id="Fd4xivRHzBFUZzpkWkjVPS">
+                        <option value="polyline" data-page-node-id="u71cJFYheJEYIAGhuf4Q8g">闭合多段线</option>
+                        <option value="line_rect" data-page-node-id="fI3VnT1n9Z3rHbmAaluoGB">直线矩形</option>
                     </select>
                 </div>
-                <div class="option-group">
-                    <label>单位：</label>
-                    <select id="unitSelect">
-                        <option value="mm">毫米 (mm)</option>
-                        <option value="inch">英寸 (inch)</option>
+                <div class="option-group" data-page-node-id="3viszsylLb7HDFbqM4QD0f">
+                    <label data-page-node-id="mPeztJ3TvlsW1sD6DwAWWG">单位：</label>
+                    <select id="unitSelect" data-page-node-id="uDPDVGwpoCBu79wOyTKj3S">
+                        <option value="mm" data-page-node-id="l6v58DawaX1wRokGdhuwAY">毫米 (mm)</option>
+                        <option value="inch" data-page-node-id="GYqka1h55DdzKyaW31armh">英寸 (inch)</option>
                     </select>
                 </div>
-                <div class="option-group">
-                    <label>检测模式：</label>
-                    <select id="modeSelect">
-                        <option value="smart">智能检测（推荐）</option>
-                        <option value="force_max">强制最大矩形</option>
+                <div class="option-group" data-page-node-id="QygOzRST1adwfGWWATVocV">
+                    <label data-page-node-id="xdJnq5QEM0Cr3yDxqePXPk">检测模式：</label>
+                    <select id="modeSelect" data-page-node-id="DUupj4DRAJUbMVxbcyXzuF">
+                        <option value="smart" data-page-node-id="G2hcYM4DX7NCuBn1gCxaGo">智能检测（推荐）</option>
+                        <option value="force_max" data-page-node-id="933ZyD7U1mClvyD33nIgpb">强制最大矩形</option>
                     </select>
                 </div>
             </div>
-            <div id="fileInfoContainer" style="display:none;">
-                <div class="file-info">
-                    <span class="name" id="fileName">已选 <span id="fileCount">0</span> 个文件</span>
-                    <span class="size" id="fileSize"></span>
-                    <button class="btn btn-outline" style="padding:4px 16px; font-size:13px;" id="btnRemoveFile">✕ 清空</button>
+            <div id="fileInfoContainer" style="display:none;" data-page-node-id="rueiPdVG1x1y8EOFPVuOex">
+                <div class="file-info" data-page-node-id="MYE2XnPIbvJCQLrrtJ96fI">
+                    <span class="name" id="fileName" data-page-node-id="7Fu39pdbykOU55Y8GYiJda">已选 <span id="fileCount" data-page-node-id="5wFKYZGEPIghHgvOGgsV2F">0</span> 个文件</span>
+                    <span class="size" id="fileSize" data-page-node-id="FUhVMZKZKOGhQE8ikK3xqv"></span>
+                    <button class="btn btn-outline" style="padding:4px 16px; font-size:13px;" id="btnRemoveFile" data-page-node-id="KXmjJQDdACGsLfbFdknjfr">✕ 清空</button>
                 </div>
             </div>
-            <div class="result-box" id="dwgResult">
-                <div class="empty">上传文件后自动批量解析</div>
+            <div class="result-box" id="dwgResult" data-page-node-id="LMODXFxrsqHjghlZhbTgkl">
+                <div class="empty" data-page-node-id="IYN2cBOAJjWCNDeVsqYcP8">上传文件后自动批量解析</div>
             </div>
-            <div id="dwgParseStatus" style="margin-top:10px; font-size:14px; color:#5e6f8d; min-height:22px;"></div>
-            <div style="margin-top:14px; font-size:13px; color:#7e92b0; background:#f4f8fe; padding:12px 16px; border-radius:12px; line-height:1.6;">
-                💡 <strong>提示：</strong> 可一次选择多个文件或拖拽整个文件夹，系统将自动递归遍历并解析所有 .dwg/.dxf 文件。点击「停止」按钮可在当前文件完成后停止。
+            <div id="dwgParseStatus" style="margin-top:10px; font-size:14px; color:#5e6f8d; min-height:22px;" data-page-node-id="uxOY22PusZqnDyHo7u6fso"></div>
+            <div style="margin-top:14px; font-size:13px; color:#7e92b0; background:#f4f8fe; padding:12px 16px; border-radius:12px; line-height:1.6;" data-page-node-id="wUQRCziEFJYHnv6JEKEFS9">
+                💡 <strong data-page-node-id="aG3o36JCoPnM6PDE0KG6Ti">提示：</strong> 可一次选择多个文件或拖拽整个文件夹，系统将自动递归遍历并解析所有 .dwg/.dxf 文件。点击「停止」按钮可在当前文件完成后停止。
             </div>
         </div>
     </div>
 
-    <div class="legend">
-        <span style="font-weight:600; color:#0b1c33;">判断结果：</span>
-        <span class="legend-item"><span class="dot std"></span> 标准图纸</span>
-        <span class="legend-item"><span class="dot ext"></span> 非标加长</span>
-        <span class="legend-item"><span class="dot fallback"></span> 近似匹配</span>
-        <span class="legend-item"><span class="dot non"></span> 非标准</span>
-        <span class="legend-item"><span class="dot failed"></span> 解析失败</span>
-        <span style="color:#8fa2be; margin-left:auto; font-size:12px;">数据自动保存在浏览器本地</span>
+    <div class="legend" data-page-node-id="HZuCOgPZ6YkHtBaHxPZDR6">
+        <span style="font-weight:600; color:#0b1c33;" data-page-node-id="t7HPKz3hZnJkfWdJCJbq5z">判断结果：</span>
+        <span class="legend-item" data-page-node-id="lxyCozaRxV41AkES4mN7rV"><span class="dot std" data-page-node-id="Ig7LVoi1D1kKbHID41z0kw"></span> 标准图纸</span>
+        <span class="legend-item" data-page-node-id="QkyvY5UJyOvZMc0PjEllOJ"><span class="dot ext" data-page-node-id="V7lcqzFvgFpB0xo8S65lD2"></span> 非标加长</span>
+        <span class="legend-item" data-page-node-id="2x2ks3nQaZwFiwtAQCDAjr"><span class="dot fallback" data-page-node-id="busBl7GmsjrcRrQHZkTq3h"></span> 近似匹配</span>
+        <span class="legend-item" data-page-node-id="6Y3Ia59KoWGPyl0H7o4eiN"><span class="dot non" data-page-node-id="bHsVFpVoxKaUJP1UVBe9bo"></span> 非标准</span>
+        <span class="legend-item" data-page-node-id="SoYUcHsc8DqJo977i89gMo"><span class="dot failed" data-page-node-id="1m9eRbwFbvGZwIsZC72Mdy"></span> 解析失败</span>
+        <span style="color:#8fa2be; margin-left:auto; font-size:12px;" data-page-node-id="OI2pDDT9GJyueXlqCPH5qk">数据自动保存在浏览器本地</span>
     </div>
 
     <!-- 测试记录区域 -->
-    <div class="record-section" id="recordSection">
-        <div class="record-header">
-            <h2>📋 测试记录 <span class="badge-count" id="recordCount">0 条</span></h2>
-            <div class="record-toolbar">
-                <button class="btn btn-success" id="exportCsvBtn">⬇ 导出筛选结果</button>
-                <button class="btn btn-secondary" id="exportAllCsvBtn">📄 导出全部</button>
-                <button class="btn btn-secondary" id="importCsvBtn">📂 导入 CSV</button>
-                <button class="btn btn-dangerous" id="genScriptBtn">🧹 生成删除脚本</button>
-                <button class="btn btn-danger" id="batchDeleteBtn" disabled title="删除已勾选的记录">🗑 批量删除 <span id="batchDeleteCount">0</span></button>
-                <button class="btn btn-danger" id="clearRecordsBtn">🗑 清空记录</button>
+    <div class="record-section" id="recordSection" data-page-node-id="KA4AgrdZESnqnSmJPqmuyT">
+        <div class="record-header" data-page-node-id="m9WVlmaoSVJem1CaO2pSod">
+            <h2 data-page-node-id="s7dTeoMzMBYMv4G88oZ7BW">📋 测试记录 <span class="badge-count" id="recordCount" data-page-node-id="C2MAUOmPb7RSBVzhS8kAyP">0 条</span></h2>
+            <div class="record-toolbar" data-page-node-id="GPrSgYoIvpoLAQEMiuO0TZ">
+                <button class="btn btn-success" id="exportXlsxBtn" title="导出 Excel（列宽按内容自适应）" data-page-node-id="EXL5aRNFJGd3u3tHc8rqY8">⬇ 导出 Excel</button>
+                <button class="btn btn-secondary" id="exportAllXlsxBtn" title="导出全部记录为 Excel（列宽按内容自适应）" data-page-node-id="Es5sHvUBdYHxle7GcsOii4">📊 导出全部 Excel</button>
+                <button class="btn btn-secondary" id="exportCsvBtn" title="导出 CSV（Excel 打开需手动调整列宽）" data-page-node-id="7aPwuZcYqqDVqfihU0uccp">📄 导出 CSV</button>
+                <button class="btn btn-secondary" id="importCsvBtn" data-page-node-id="APwhri98D1QCwCCe4uGrl9">📂 导入 CSV</button>
+                <button class="btn btn-dangerous" id="genScriptBtn" data-page-node-id="dnPVTBwiESONSfZjA2bVGn">🧹 生成删除脚本</button>
+                <button class="btn btn-danger" id="batchDeleteBtn" disabled title="删除已勾选的记录" data-page-node-id="8n9iGKq5FNY2u5Sq6BoZ18">🗑 批量删除 <span id="batchDeleteCount" data-page-node-id="ViOt4tx6qLeHkV8yDpo9cj">0</span></button>
+                <button class="btn btn-danger" id="clearRecordsBtn" data-page-node-id="BxnVPoSmlS5bbiBTMOBWbR">🗑 清空记录</button>
             </div>
         </div>
         <!-- 筛选栏（多选复选框） -->
-        <div class="filter-bar">
-            <label>📊 筛选类型：</label>
-            <div class="filter-checkboxes" id="filterCheckboxes">
-                <label class="filter-option">
-                    <input type="checkbox" value="standard" checked /> ✅ 标准
+        <div class="filter-bar" data-page-node-id="wmtgMLjKr7xdtGEqSMS760">
+            <label data-page-node-id="k334uqOGSWOZQD29OOmx4H">📊 筛选类型：</label>
+            <div class="filter-checkboxes" id="filterCheckboxes" data-page-node-id="EXjKpygdHkPK2dwe2y5Nnv">
+                <label class="filter-option" data-page-node-id="JKoKgEsbEwOf3CM6MkJw5s">
+                    <input type="checkbox" value="standard" checked data-page-node-id="g2g3GCWt1JdrwumwXPhRrr" /> ✅ 标准
                 </label>
-                <label class="filter-option">
-                    <input type="checkbox" value="extended" checked /> 📏 非标加长
+                <label class="filter-option" data-page-node-id="H2TfkSlm7wGkFGDbUP74P9">
+                    <input type="checkbox" value="extended" checked data-page-node-id="1UjhyiQgygJ1ArbReZrxzs" /> 📏 非标加长
                 </label>
-                <label class="filter-option">
-                    <input type="checkbox" value="fallback" checked /> 🔍 近似匹配
+                <label class="filter-option" data-page-node-id="0arrC7ybbPrF5fOTjzF7ny">
+                    <input type="checkbox" value="fallback" checked data-page-node-id="psiCDag9Qi2iSrWO9d7zMF" /> 🔍 近似匹配
                 </label>
-                <label class="filter-option">
-                    <input type="checkbox" value="nonstandard" checked /> ❌ 非标准
+                <label class="filter-option" data-page-node-id="aA2us4R5yeBlf3bgCzaH3n">
+                    <input type="checkbox" value="nonstandard" checked data-page-node-id="tNYbouZXaHH44yA1PwX523" /> ❌ 非标准
                 </label>
-                <label class="filter-option">
-                    <input type="checkbox" value="failed" checked /> ⚠️ 解析失败
+                <label class="filter-option" data-page-node-id="cjMSP52vs0F8DF2aavlQis">
+                    <input type="checkbox" value="failed" checked data-page-node-id="proFXKaLs6YPOiPYfTtNBq" /> ⚠️ 解析失败
                 </label>
-                <label class="filter-option">
-                    <input type="checkbox" value="mixed" checked /> ⚠️ 混合（多类型/多标准并存）
+                <label class="filter-option" data-page-node-id="lGeHBZxM4xDsbSCvUZXzuw">
+                    <input type="checkbox" value="mixed" checked data-page-node-id="Dtk5Dc987nOH6MG1ZFTqyO" /> ⚠️ 混合（多类型/多标准并存）
                 </label>
             </div>
-            <span class="filter-count" id="filterCount">共 0 条</span>
+            <span class="filter-count" id="filterCount" data-page-node-id="NXGUx5VlLQAG3s4ERwl0Od">共 0 条</span>
         </div>
-        <input type="file" id="importFileInput" accept=".csv" style="display:none;" />
-        <div class="record-table-wrap">
-            <table class="record-table" id="recordTable">
-                <thead>
-                    <tr>
-                        <th class="col-check"><input type="checkbox" id="checkAll" title="全选 / 取消全选当前筛选" /></th>
-                        <th>#</th>
-                        <th style="min-width:140px;">图纸名称</th>
-                        <th>宽 (mm)</th>
-                        <th>高 (mm)</th>
-                        <th style="min-width:70px;">图框数</th>
-                        <th style="min-width:100px;">类型</th>
-                        <th style="min-width:180px;">实际判断结果</th>
-                        <th>图框置信度</th>
-                        <th>比例置信度</th>
-                        <th style="min-width:90px;">预期幅面</th>
-                        <th style="min-width:100px;">匹配预期</th>
-                        <th style="min-width:100px;">备注</th>
-                        <th style="width:40px;">操作</th>
+        <input type="file" id="importFileInput" accept=".csv" style="display:none;" data-page-node-id="RC4YkukeHExdPQ4TpZGerT" />
+        <div class="record-table-wrap" data-page-node-id="k3MGhiUf2lDot36H5vtgBT">
+            <table class="record-table" id="recordTable" data-page-node-id="KwOU8vNQ6Q9VTUUFCHrJFA">
+                <thead data-page-node-id="Z5zAiVXCYY9aw49LwfpVPy">
+                    <tr data-page-node-id="nCi7sX9Dx8otMkf6cpfPzg">
+                        <th class="col-check" data-page-node-id="e4xCUYUM2BuhgT1PWABjFT"><input type="checkbox" id="checkAll" title="全选 / 取消全选当前筛选" data-page-node-id="kxB8IaD3KvHECX8gGM1eDb" /></th>
+                        <th data-page-node-id="05uOqexx6dzdIBfMiKfV4k">#</th>
+                        <th style="min-width:140px;" data-page-node-id="43MfBFHYmSD2Tsxt1z5iRI">图纸名称</th>
+                        <th data-page-node-id="fTnFylQ1jgdWqRWjhB2dhM">宽 (mm)</th>
+                        <th data-page-node-id="1X31QgmgFLhtuGtyFMrB7v">高 (mm)</th>
+                        <th style="min-width:70px;" data-page-node-id="ms9oby9bj2VQuWqTav6D2T">图框数</th>
+                        <th style="min-width:100px;" data-page-node-id="JrblV1ymbnKx0ybY9NiFKg">类型</th>
+                        <th style="min-width:180px;" data-page-node-id="XQvKGacyHyEnDVQ0DaOCut">实际判断结果</th>
+                        <th data-page-node-id="wVFhEN9U64EgRBDwcCycDw">图框置信度</th>
+                        <th data-page-node-id="Gwqg6FKMMn5zuCf3jyGkAU">比例置信度</th>
+                        <th style="min-width:90px;" data-page-node-id="cE0mHj9tS1z9pi7rlkot0T">预期幅面</th>
+                        <th style="min-width:100px;" data-page-node-id="GQ80E1RApjjDux5S0d3blM">匹配预期</th>
+                        <th style="min-width:100px;" data-page-node-id="v7bCEJvW0QBFBTdvpyubxC">备注</th>
+                        <th style="width:40px;" data-page-node-id="veq4qKEEAkri5hFDjm368l">操作</th>
                     </tr>
                 </thead>
-                <tbody id="recordBody">
-                    <tr><td colspan="14" class="record-empty">暂无记录</td></tr>
+                <tbody id="recordBody" data-page-node-id="GPVH4nCfEV8U3OpkuKGPTP">
+                    <tr data-page-node-id="XTVzdFAoxYMmOHOW0WKotv"><td colspan="14" class="record-empty" data-page-node-id="y1CnRns13fzBFK61nQczqZ">暂无记录</td></tr>
                 </tbody>
             </table>
         </div>
@@ -194,6 +195,9 @@
 </div>
 
 <!-- 引用外部 JavaScript -->
+<!-- xlsx-js-style：Excel 导出（SheetJS 的带样式分支，支持写单元格样式；
+     原版 SheetJS 免费版会丢弃 cell.s，导致换行/加粗不生效）。本地引入，离线可用 -->
+<script src="vendor/xlsx-style.bundle.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -1044,11 +1044,14 @@ function renderRecords() {
             : '';
         const typeHtml = `<span class="type-tag ${typeInfo.cls}">${typeInfo.label}</span>${mixedHtml}`;
         // 图框数列：展示该图纸检测到的图框数量（模型空间 + 布局空间合计）。
-        // 悬停/点击任一单元格均可弹出气泡查看明细——**单图框也要能看**（首要用途是
+        // 点击任一单元格弹出气泡查看明细——**单图框也要能看**（首要用途是
         // "这一张来自模型空间还是布局空间"，多图框则是空间分布 + 尺寸清单）。
         // 手动输入/失败记录无候选数据，锚点仍保留，气泡内显示 "—"，不做猜测。
+        // 注意：tipAttrs 只含 data-* 属性，class 由各分支自行拼装——绝不能把
+        // class 写进来，否则与外层 class 重复生成两个 class 属性，浏览器只认
+        // 第一个，tip-anchor 会被丢弃导致事件绑不上（气泡打不开）。
         const hasFrameCount = rec.frameCount && rec.frameCount > 0;
-        const tipAttrs = `class="tip-anchor" data-frames="${escHtml(rec.framesText || '')}" data-all="${escHtml(rec.framesAll || rec.framesText || '')}" data-layouts="${escHtml(JSON.stringify(rec.layoutCounts || {}))}" data-primary-layout="${escHtml(rec.primaryLayout || '')}"`;
+        const tipAttrs = `data-frames="${escHtml(rec.framesText || '')}" data-all="${escHtml(rec.framesAll || rec.framesText || '')}" data-layouts="${escHtml(JSON.stringify(rec.layoutCounts || {}))}" data-primary-layout="${escHtml(rec.primaryLayout || '')}"`;
         let frameCountHtml = '—';
         if (hasFrameCount) {
             // 布局分布次级文本（模型空间×N、布局 "Sheet1"×M …），仅多图框时显示在图框
@@ -1057,11 +1060,11 @@ function renderRecords() {
                 ? `<div class="frame-dist" title="${escHtml(rec.layoutCountsText)}">${escHtml(rec.layoutCountsText)}</div>`
                 : '';
             frameCountHtml = (rec.frameCount > 1)
-                ? `<span class="type-tag multi-frame ${tipAttrs}">🖼 ×${rec.frameCount}</span>${distHtml}`
-                : `<span class="frame-count-single ${tipAttrs}" title="悬停查看图框来源空间">${rec.frameCount}</span>`;
+                ? `<span class="type-tag multi-frame tip-anchor" ${tipAttrs}>🖼 ×${rec.frameCount}</span>${distHtml}`
+                : `<span class="frame-count-single tip-anchor" ${tipAttrs} title="点击查看图框来源空间">${rec.frameCount}</span>`;
         } else {
-            // 无有效图框数（手动输入/解析失败）：仍可悬停查看空间信息（通常为 —）
-            frameCountHtml = `<span class="frame-count-single ${tipAttrs}">—</span>`;
+            // 无有效图框数（手动输入/解析失败）：仍可点击查看空间信息（通常为 —）
+            frameCountHtml = `<span class="frame-count-single tip-anchor" ${tipAttrs}>—</span>`;
         }
 
         html += `<tr class="${rowClass}">
@@ -1124,15 +1127,13 @@ function renderRecords() {
 }
 
 // ---------- 图框数徽章气泡（可截图） ----------
-// 浏览器原生 title 气泡随鼠标移动消失，无法截图。改用自绘 fixed 定位气泡：
-//   - mouseenter 弹出完整列表（>10 个时顶部带"…等 N 个"摘要，列表可滚动看全部）
-//   - mouseleave 后保留 TIP_KEEP_MS 再消失（留出截图时间窗）；悬停操作区不消失
-//   - 气泡底部按钮：📌 固定（常显，配合截图）/ 再次点击关闭；📋 复制全部（全量数据）
-const TIP_KEEP_MS = 2500;          // 鼠标移出后气泡保留时长（供截图 / 移向操作区）
+// 浏览器原生 title 气泡随鼠标移动消失，无法截图/无法复制。改用自绘 fixed 定位气泡：
+//   - 点击锚点弹出（单图框、多图框统一交互；不做悬停，避免表格里误触/闪动）
+//   - 再点同一锚点点关闭、点页面别处关闭、点气泡内 ✕ 关闭
+//   - 气泡内列表可滚动查看全部尺寸；底部 📋 复制全部（全量数据）
 let tipPop = null;                 // 气泡单例元素
 let tipAnchorEl = null;            // 当前锚点
-let tipHideTimer = null;
-let tipPinned = false;
+let tipPinned = false;             // 气泡是否处于打开状态
 
 function ensureTipPop() {
     if (!tipPop) {
@@ -1213,38 +1214,25 @@ function showTip(anchor) {
         + (truncated ? `<div class="tip-summary" title="${escHtml(framesText)}">${escHtml(framesText)}</div>` : '')
         + (dimRows ? `<div class="tip-list">${dimRows}</div>` : '')
         + `<div class="tip-actions">
-             <button type="button" class="tip-btn tip-pin">${tipPinned ? '📌 已固定' : '📌 固定'}</button>
+             <button type="button" class="tip-btn tip-close">✕ 关闭</button>
              <button type="button" class="tip-btn tip-copy">📋 复制全部</button>
            </div>`;
     positionTip(anchor);
     tipPop.style.display = 'block';
-    clearTimeout(tipHideTimer);
     bindTipActions();
-    // 悬停气泡内部（列表滚动区 / 操作区）时保持显示，移出后延迟隐藏（留截图窗）
-    tipPop.onmouseenter = () => clearTimeout(tipHideTimer);
-    tipPop.onmouseleave = () => {
-        if (!tipPinned && tipPop.style.display === 'block') {
-            clearTimeout(tipHideTimer);
-            tipHideTimer = setTimeout(() => { hideTip(); }, TIP_KEEP_MS);
-        }
-    };
-    if (!tipPinned) {
-        tipHideTimer = setTimeout(() => { hideTip(); }, TIP_KEEP_MS);
-    }
 }
 
 function bindTipActions() {
-    // hover 保持/延迟隐藏由 showTip 中的 tipPop.onmouseenter/onmouseleave 统一管理
-    //（气泡整体可交互），此处只绑定按钮动作
+    // 气泡整体可交互（列表可滚动、可复制），此处只绑定底部两个按钮动作
     const actions = tipPop.querySelector('.tip-actions');
     if (!actions) return;
-    actions.querySelector('.tip-pin').addEventListener('click', ev => {
-        ev.stopPropagation();
-        if (tipPinned) { hideTip(); return; }   // 再次点击已固定的气泡 → 关闭
-        tipPinned = true;
-        clearTimeout(tipHideTimer);
-        tipPop.querySelector('.tip-pin').textContent = '📌 已固定';
-    });
+    const closeBtn = actions.querySelector('.tip-close');
+    if (closeBtn) {
+        closeBtn.addEventListener('click', ev => {
+            ev.stopPropagation();
+            hideTip();
+        });
+    }
     const copyBtn = actions.querySelector('.tip-copy');
     copyBtn.addEventListener('click', async ev => {
         ev.stopPropagation();
@@ -1302,25 +1290,20 @@ function hideTip() {
         tipPinned = false;
         tipAnchorEl = null;
     }
-    clearTimeout(tipHideTimer);
 }
 
 function bindTipAnchors(root) {
+    // 仅点击触发（不做悬停弹出）：悬停方式在表格里容易误触/闪动，点击更可控，
+    // 单图框与多图框统一走同一套交互——点一下弹出、再点关闭、点别处关闭。
     root.querySelectorAll('.tip-anchor').forEach(el => {
-        el.addEventListener('mouseenter', function() {
-            tipPinned = false;
-            tipAnchorEl = this;
-            showTip(this);
-        });
         el.addEventListener('click', function(ev) {
-            ev.stopPropagation();
+            ev.stopPropagation();   // 阻止冒泡到 document，避免刚打开就被"点别处关闭"收掉
             if (tipPop && tipPop.style.display === 'block' && this === tipAnchorEl) {
-                if (tipPinned) { hideTip(); return; }      // 再次点击钉住的徽章 → 关闭
-                tipPinned = true;                          // 未钉住点击 → 钉住常显
-            } else {
-                tipPinned = true;
-                tipAnchorEl = this;
+                hideTip();          // 再次点击同一个锚点 → 关闭
+                return;
             }
+            tipPinned = true;
+            tipAnchorEl = this;
             showTip(this);
         });
     });
@@ -1400,12 +1383,91 @@ function buildFramesLayoutText(rec) {
     return '';
 }
 
-function exportCsv(filtered) {
-    if (records.length === 0) { alert('暂无记录可导出'); return; }
-    const data = filtered || records;
-    if (data.length === 0) { alert('当前筛选结果为空，无可导出记录'); return; }
+// ---------- 导出 XLSX（列宽自适应） ----------
+// CSV 格式本身不存储列宽，Excel 打开只能套默认宽度（8.43 字符），无法自适应。
+// 这里用 SheetJS 生成真正的 .xlsx，并按每列内容计算列宽。
+//
+// 列宽计算规则：
+//   Excel 的列宽单位 wch = "默认字体下 0 字符的宽度"。
+//   早期版本简单地"中文算 2、其它算 1"，对纯中文列准确，但对混合文本会失真——
+//   例如「布局 "A1-出图窗口"×2」里的空格与直引号，实际只有 0 字符宽的 0.6 倍左右，
+//   按 1 计会高估，而数字/大写字母又接近正好 1 个 0 字符宽。
+//   这里改用实测字符宽度表（Calibri 11 的 advance width ÷ 0 字符宽）来算，
+//   与 Excel 自身的算法基本一致。
+//   - 多行单元格（图框尺寸 / 布局分布用 \n 分行）按最长的那一行算
+//   - 表头也参与比较，避免数据比表头短时列被压得太窄
+//   - 宽度夹在 [MIN, MAX] 之间：太窄会顶出 ###，太宽一屏放不下
+const XLSX_COL_WIDTH_MIN = 6;
+const XLSX_COL_WIDTH_MAX = 42;
+const XLSX_COL_WIDTH_PAD = 1.6;      // 留一点边距，避免贴边/出现 ###
 
-    // 列序：图纸名称后紧跟「图框数 / 布局分布 / 图框尺寸」，其余按原顺序（宽/高/类型/判断结果/…）
+// 0 字符宽在 Calibri 11 下约 7px，作为换算基准
+const XLSX_MDW = 7.0;
+// 窄字符：实际宽度明显小于 0 字符宽的 ASCII（空格、引号、标点、i l j 等）
+const XLSX_NARROW_PX = {
+    ' ': 3.7, '!': 3.9, '"': 4.4, "'": 3.0, '(': 4.4, ')': 4.4, ',': 3.0, '.': 3.0,
+    ':': 3.0, ';': 3.0, '[': 4.4, ']': 4.4, '\\': 4.4, '{': 4.8, '}': 4.8, '|': 3.0,
+    '-': 4.4, '/': 4.4, '`': 4.4, 'f': 3.9, 'i': 3.0, 'j': 3.3, 'l': 3.0, 'r': 4.4,
+    't': 4.4, 'I': 4.4,
+};
+// 宽字符：明显宽于 0 字符宽的 ASCII（W M m w 等）
+const XLSX_WIDE_PX = {
+    'M': 9.3, 'W': 10.2, 'm': 10.4, 'w': 9.4, '@': 10.2, '%': 9.5,
+};
+// 0 字符宽本身
+const XLSX_MDW_PX = { '0': 7.0 };
+
+// 单字符宽度（以 0 字符宽为单位）：
+//   CJK / 全角 / emoji 按 2；窄字符、宽字符查表；其余 ASCII 按 1
+function displayWidth(ch) {
+    const c = ch.codePointAt(0);
+    // CJK 统一表意文字（含扩展 A）、CJK 标点、全角字符、韩文
+    if ((c >= 0x1100 && c <= 0x115F) ||      // 韩文字母
+        (c >= 0x2E80 && c <= 0x303E) ||      // CJK 部首 / 标点
+        (c >= 0x3041 && c <= 0x33FF) ||      // 假名 / CJK 兼容
+        (c >= 0x3400 && c <= 0x4DBF) ||      // CJK 扩展 A
+        (c >= 0x4E00 && c <= 0x9FFF) ||      // CJK 统一表意文字
+        (c >= 0xA000 && c <= 0xA4CF) ||      // 彝文
+        (c >= 0xAC00 && c <= 0xD7A3) ||      // 韩文音节
+        (c >= 0xF900 && c <= 0xFAFF) ||      // CJK 兼容表意文字
+        (c >= 0xFE30 && c <= 0xFE6F) ||      // CJK 兼容形式
+        (c >= 0xFF00 && c <= 0xFF60) ||      // 全角 ASCII
+        (c >= 0xFFE0 && c <= 0xFFE6) ||      // 全角符号
+        (c >= 0x1F300 && c <= 0x1FAFF) ||    // emoji
+        (c >= 0x20000 && c <= 0x3FFFD)) {    // CJK 扩展 B 及以上
+        return 2;
+    }
+    if (XLSX_MDW_PX[ch] !== undefined) return 1;
+    if (XLSX_NARROW_PX[ch] !== undefined) return XLSX_NARROW_PX[ch] / XLSX_MDW;
+    if (XLSX_WIDE_PX[ch] !== undefined) return XLSX_WIDE_PX[ch] / XLSX_MDW;
+    return 1;
+}
+
+function textDisplayWidth(str) {
+    let w = 0;
+    for (const ch of String(str == null ? '' : str)) w += displayWidth(ch);
+    return w;
+}
+
+// 按内容计算每列的字符宽度：逐行取最大值，再夹到 [MIN, MAX]
+function computeColWidths(headers, rows) {
+    return headers.map((h, ci) => {
+        let maxW = textDisplayWidth(h);
+        rows.forEach(row => {
+            const cell = row[ci];
+            if (cell == null) return;
+            // 多行单元格逐行比较，取最长的一行
+            String(cell).split('\n').forEach(line => {
+                const w = textDisplayWidth(line);
+                if (w > maxW) maxW = w;
+            });
+        });
+        return Math.min(XLSX_COL_WIDTH_MAX, Math.max(XLSX_COL_WIDTH_MIN, maxW + XLSX_COL_WIDTH_PAD));
+    });
+}
+
+// 导出用的数据表（CSV 与 XLSX 共用同一套表头/行构造，避免两处漂移）
+function buildExportTable(data) {
     const headers = ['序号', '图纸名称', '图框数', '布局分布', '图框尺寸', '宽(mm)', '高(mm)', '类型', '实际判断结果', '图框置信度(%)', '比例置信度(%)', '预期幅面', '匹配预期', '备注'];
     const rows = data.map((rec, idx) => [
         idx + 1,
@@ -1423,6 +1485,102 @@ function exportCsv(filtered) {
         rec.match === 'yes' ? '是' : (rec.match === 'no' ? '否' : '待确认'),
         rec.note,
     ]);
+    return { headers, rows };
+}
+
+// 导出文件名后缀（按当前勾选的筛选类型），CSV 与 XLSX 共用
+function buildExportSuffix() {
+    const typeLabelsShort = {
+        standard: '标准',
+        extended: '非标加长',
+        fallback: '近似匹配',
+        nonstandard: '非标准',
+        failed: '解析失败',
+        mixed: '混合',
+    };
+    const allTypes = ['standard', 'extended', 'fallback', 'nonstandard', 'failed', 'mixed'];
+    const active = getActiveFilters();
+    return (active.length === allTypes.length || active.length === 0)
+        ? '全部'
+        : active.map(t => typeLabelsShort[t] || t).join('+');
+}
+
+function exportXlsx(filtered) {
+    if (records.length === 0) { alert('暂无记录可导出'); return; }
+    const data = filtered || records;
+    if (data.length === 0) { alert('当前筛选结果为空，无可导出记录'); return; }
+    if (typeof XLSX === 'undefined') {
+        alert('Excel 导出组件未加载（vendor/xlsx-style.bundle.js），请刷新页面重试，或改用「导出 CSV」。');
+        return;
+    }
+
+    const { headers, rows } = buildExportTable(data);
+    // 数字列写成数字，Excel 里可直接求和/排序（置信度列同样是数字）
+    const NUMBER_COLS = new Set([0, 2, 5, 6, 9, 10]);
+    const aoa = [
+        headers,
+        ...rows.map(row => row.map((cell, ci) => {
+            if (NUMBER_COLS.has(ci)) {
+                const n = Number(cell);
+                if (cell !== '' && cell != null && !Number.isNaN(n)) return n;
+            }
+            return cell == null ? '' : String(cell);
+        })),
+    ];
+
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+    // 列宽自适应：!'cols' 是 xlsx 的列宽定义（wch = 字符宽度）
+    ws['!cols'] = computeColWidths(headers, rows).map(w => ({ wch: w }));
+    // 冻结表头行
+    ws['!freeze'] = { xSplit: 0, ySplit: 1 };
+
+    // 单元格样式：数据行顶端对齐 + 自动换行；表头加粗 + 浅灰底 + 居中。
+    // 注意：这里用的是 xlsx-js-style（SheetJS 的带样式分支），
+    // 原版 SheetJS 免费版会把 cell.s 静默丢弃。wrapText 对"布局分布""图框尺寸"
+    // 这类含 \n 的多行文本是**必须**的——没有它 Excel 会把多行挤成一行显示。
+    const range = XLSX.utils.decode_range(ws['!ref']);
+    for (let R = range.s.r; R <= range.e.r; R++) {
+        for (let C = range.s.c; C <= range.e.c; C++) {
+            const addr = XLSX.utils.encode_cell({ r: R, c: C });
+            const cell = ws[addr];
+            if (!cell) continue;
+            cell.s = (R === 0)
+                ? {
+                    font: { bold: true },
+                    fill: { fgColor: { rgb: 'F0F3F8' } },
+                    alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+                }
+                : { alignment: { vertical: 'top', wrapText: true } };
+        }
+    }
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '图框检测记录');
+    const fileName = `图框检测记录_${buildExportSuffix()}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+
+    const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+
+    // 不用 XLSX.writeFile：它在浏览器分支里把 Blob 的 type 写死成 application/octet-stream，
+    // 传 mimeType 也无效。这里自己取字节 + 造 Blob，确保 MIME 是 xlsx 的标准类型。
+    const MIME_XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    const blob = new Blob([buf], { type: MIME_XLSX });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    // 及时释放，长列表反复导出时不占内存
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+}
+
+function exportCsv(filtered) {
+    if (records.length === 0) { alert('暂无记录可导出'); return; }
+    const data = filtered || records;
+    if (data.length === 0) { alert('当前筛选结果为空，无可导出记录'); return; }
+
+    const { headers, rows } = buildExportTable(data);
     let csv = '\uFEFF' + headers.join(',') + '\n';
     rows.forEach(row => {
         const escaped = row.map(cell => {
@@ -1436,21 +1594,7 @@ function exportCsv(filtered) {
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    // 根据当前勾选的筛选类型生成文件名后缀
-    const typeLabelsShort = {
-        standard: '标准',
-        extended: '非标加长',
-        fallback: '近似匹配',
-        nonstandard: '非标准',
-        failed: '解析失败',
-        mixed: '混合',
-    };
-    const allTypes = ['standard', 'extended', 'fallback', 'nonstandard', 'failed', 'mixed'];
-    const active = getActiveFilters();
-    const suffix = (active.length === allTypes.length || active.length === 0)
-        ? '全部'
-        : active.map(t => typeLabelsShort[t] || t).join('+');
-    link.download = `图框检测记录_${suffix}_${new Date().toISOString().slice(0,10)}.csv`;
+    link.download = `图框检测记录_${buildExportSuffix()}_${new Date().toISOString().slice(0,10)}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -1484,12 +1628,16 @@ function parseCsvRows(text) {
     return rows;
 }
 
-document.getElementById('exportCsvBtn').addEventListener('click', function() {
-    exportCsv(getFilteredRecords());
+document.getElementById('exportXlsxBtn').addEventListener('click', function() {
+    exportXlsx(getFilteredRecords());
 });
 
-document.getElementById('exportAllCsvBtn').addEventListener('click', function() {
-    exportCsv(records);
+document.getElementById('exportAllXlsxBtn').addEventListener('click', function() {
+    exportXlsx(records);
+});
+
+document.getElementById('exportCsvBtn').addEventListener('click', function() {
+    exportCsv(getFilteredRecords());
 });
 
 // ---------- 导入 CSV ----------

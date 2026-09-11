@@ -152,5 +152,47 @@ const r7 = buildRecord(13, many, { '模型空间': 13 });
 check('framesText 有 "等 13 个"', r7.framesText.endsWith(' 等 13 个'), true);
 check('framesAll 完整 13 条', r7.framesAll.split('、').length, 13);
 
+// ---- 8. 源码级回归：气泡打不开的根因（重复 class 属性）+ 交互方式 ----
+// 气泡打不开的历史 bug：tipAttrs 字符串里带了 class="tip-anchor"，
+// 与外层 <span class="..."> 拼在一起 → 同一个标签出现两个 class 属性。
+// 浏览器按 HTML 规范的 duplicate-attribute 规则取「后者」，于是第一个 class
+// 里的样式类被丢弃（实测 html.parser 确认：最终 class 只剩 tip-anchor）。
+// 这里扫描 app.js 源码，确保该写法不再出现。
+// 端到端交互（真实 DOM 点击开合）见 test_tip_interaction.js（需 jsdom）。
+console.log('\n=== 8. 源码级回归（重复 class / 交互方式）===');
+const fs = require('fs');
+const path = require('path');
+const src = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+
+// tipAttrs 的定义体里不能出现 class=
+const tipAttrsDef = src.match(/const tipAttrs = `([^`]*)`/);
+check('tipAttrs 定义存在', !!tipAttrsDef, true);
+check('tipAttrs 内不含 class= （否则与外层 class 重复）',
+    tipAttrsDef ? /class=/.test(tipAttrsDef[1]) : true, false);
+check('tipAttrs 含 4 个 data 属性',
+    tipAttrsDef ? (tipAttrsDef[1].match(/data-/g) || []).length : 0, 4);
+
+// 每个锚点分支都必须显式带 tip-anchor
+check('多图框分支含 tip-anchor', /class="type-tag multi-frame tip-anchor"/.test(src), true);
+check('单图框分支含 tip-anchor', /class="frame-count-single tip-anchor"/.test(src), true);
+
+// 不允许出现「同一元素两个 class 属性」的拼接形态
+check('无重复 class 拼接', /class="[^"]*"\s+class=/.test(src), false);
+check('无 ${tipAttrs} 出现在 class 引号内部', /class="[^"]*\$\{tipAttrs\}/.test(src), false);
+
+// 交互：只允许点击，不得残留悬停弹出
+check('bindTipAnchors 绑定 click', /el\.addEventListener\('click'/.test(src), true);
+check('无 mouseenter 悬停弹出', /addEventListener\('mouseenter'/.test(src), false);
+check('无 tipPop.onmouseenter 悬停保持', /tipPop\.onmouseenter/.test(src), false);
+check('无 tipPop.onmouseleave 延迟隐藏', /tipPop\.onmouseleave/.test(src), false);
+check('无 tip-pin 固定按钮', /tip-pin/.test(src), false);
+check('无 TIP_KEEP_MS 残留', /TIP_KEEP_MS/.test(src), false);
+check('无 tipHideTimer 残留', /tipHideTimer/.test(src), false);
+check('操作区有 tip-close 关闭按钮', /class="tip-btn tip-close"/.test(src), true);
+check('bindTipActions 绑定 tip-close', /querySelector\('\.tip-close'\)/.test(src), true);
+check('单框锚点标题提示为「点击」', /点击查看图框来源空间/.test(src), true);
+check('再次点击同一锚点即关闭',
+    /this === tipAnchorEl\)\s*\{\s*hideTip\(\);/.test(src), true);
+
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);

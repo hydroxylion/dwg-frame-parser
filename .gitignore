@@ -25,3 +25,6 @@ temp/
 
 # 临时诊断脚本
 tmp_*.py
+
+# 测试产出的临时 Excel
+tmp_*.xlsx

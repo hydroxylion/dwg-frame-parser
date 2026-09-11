@@ -817,6 +817,130 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         _block_bbox_cache[_name] = _bb_ret
         return _bb_ret
 
+    _rescued_keys = set()  # 布局空间网格图框救援命中的 bbox key（修法A，见下）
+
+    # ---------- 修法A：布局空间「网格排版图框」救援（2026-09-11） ----------
+    # 场景：DS4 四层 阁楼 平面系统图 (1).dwg —— 真实图框有 6 个，程序只报 5 个。
+    #   6 个真图框全部在 **布局1**（图纸空间），是块参照 A$C5AB964F6 的 6 个实例：
+    #   尺寸全等 434.1×311.1、位置 3 列 × 2 行（列距 434.1、行距 311.1，严丝合缝）。
+    #   但块尺寸短边 311.1 < INSERT_MIN_SHORT_SIDE(500)，且 311.1 不在 A 系列
+    #   (841,594,420,297,210,148,105) 中 —— 原因是这张图把 A4 框按 1.0475 倍
+    #   (311.1 = 297 × 1.0475) 画在布局空间，整数判定失效 → 6 个全被预筛当
+    #   "家具符号块"剔除，布局1 候选入库 0 个；程序转而采纳**模型空间**的 5 个
+    #   内容区大块（9900×12900 等），于是报 5 个、且报错了空间。
+    #
+    # 判据（"同尺寸 + 成网格"是排版图纸页的强信号，与绝对尺寸无关）：
+    #   ① 仅对**图纸空间布局**生效（layout_name != '模型空间'）。布局空间本就是
+    #      用来排图纸页的，出现多个等大框即"一版多页"；模型空间不做救援，避免
+    #      影响大量仅有模型空间的图纸（本地 21 张里 19 张只有模型空间）。
+    #   ② 同尺寸（宽高各 ±2mm 且同块名）INSERT ≥ REQUIRED_MIN_COUNT(4) 个。
+    #      4 个起步：DS4 是 6 个；门槛过低会放进"图例阵列/家具阵列"。
+    #   ③ 长宽比 ∈ [FRAME_RATIO_MIN, FRAME_RATIO_MAX]，确保是纸张形状。
+    #   ④ 排列成网格：按 X 聚类得列数 ≥2、按 Y 聚类得行数 ≥2，且网格覆盖率
+    #      ≥ 0.8（实际个数 / 行列乘积），排除"一列排开"（对齐排列的特征）。
+    #   ⑤ 至少一维重复（列数≥2 且行数≥2 已覆盖）。
+    #   命中后把这些 INSERT 的 bbox key 存入 _rescued_keys，预筛时对它们豁免
+    #   短边下限。救援只影响"是否入库"，是否算图框仍由 is_frame_like 决定。
+    _GRID_RESCUE_MIN_COUNT = 4        # 同尺寸实例数下限
+    _GRID_RESCUE_TOL = 2.0            # 同尺寸判定容差（mm）：宽高各自允许偏差
+    _GRID_RESCUE_COVERAGE = 0.80      # 网格覆盖率下限
+    _GRID_RESCUE_ENABLED = os.environ.get('FRAME_PARSER_NO_GRID_RESCUE') != '1'
+    if _GRID_RESCUE_ENABLED and layout_name != '模型空间':
+        # 先按 (块名, 宽, 高) 分桶统计，桶内再做网格判定
+        _grid_buckets = {}
+        for _e in visible_entities:
+            if _e.dxftype() != 'INSERT':
+                continue
+            try:
+                _bn2 = _e.dxf.name
+                _bd2 = _get_block_world_bbox(_bn2)
+                if _bd2 is None:
+                    continue
+                _xs2 = _e.dxf.xscale; _ys2 = _e.dxf.yscale
+                if abs(_xs2) < 1e-9 or abs(_ys2) < 1e-9:
+                    continue
+                _r2 = getattr(_e.dxf, 'rotation', 0)
+                _lp = [(_bd2[0]*_xs2, _bd2[1]*_ys2), (_bd2[2]*_xs2, _bd2[1]*_ys2),
+                       (_bd2[0]*_xs2, _bd2[3]*_ys2), (_bd2[2]*_xs2, _bd2[3]*_ys2)]
+                if _r2:
+                    _cr2 = _math.cos(_r2); _sr2 = _math.sin(_r2)
+                    _lp = [(p[0]*_cr2 - p[1]*_sr2, p[0]*_sr2 + p[1]*_cr2) for p in _lp]
+                _ip2 = (_e.dxf.insert.x, _e.dxf.insert.y)
+                _wp = [(p[0] + _ip2[0], p[1] + _ip2[1]) for p in _lp]
+                if _rot is not None:
+                    _wp = [_rot_pt(p[0], p[1]) for p in _wp]
+                _x0 = min(p[0] for p in _wp); _y0 = min(p[1] for p in _wp)
+                _x1 = max(p[0] for p in _wp); _y1 = max(p[1] for p in _wp)
+                _ww = _x1 - _x0; _hh = _y1 - _y0
+                if _ww <= 0 or _hh <= 0:
+                    continue
+            except Exception:
+                continue
+            _grid_buckets.setdefault(_bn2, []).append({
+                'w': _ww, 'h': _hh, 'x': _x0, 'y': _y0,
+                'x1': _x1, 'y1': _y1,
+            })
+
+        for _bn2, _items in _grid_buckets.items():
+            if len(_items) < _GRID_RESCUE_MIN_COUNT:
+                continue
+            # 桶内再按尺寸细分（同块名可能以不同比例插入）：以首个为基准聚类，
+            # 用贪心 grouping，避免 O(n²) 全比较。
+            _size_groups = []
+            for _it in _items:
+                _placed = False
+                for _g in _size_groups:
+                    if (abs(_it['w'] - _g['w']) <= _GRID_RESCUE_TOL
+                            and abs(_it['h'] - _g['h']) <= _GRID_RESCUE_TOL):
+                        _g['members'].append(_it)
+                        _placed = True
+                        break
+                if not _placed:
+                    _size_groups.append({'w': _it['w'], 'h': _it['h'], 'members': [_it]})
+            for _g in _size_groups:
+                _mem = _g['members']
+                if len(_mem) < _GRID_RESCUE_MIN_COUNT:
+                    continue
+                _gw, _gh = _g['w'], _g['h']
+                _gshort = min(_gw, _gh)
+                _gratio = (max(_gw, _gh) / _gshort) if _gshort > 0 else 0
+                if not (FRAME_RATIO_MIN <= _gratio <= FRAME_RATIO_MAX):
+                    continue
+                # 网格判定：按 X/Y 投影聚类。容差取尺寸的 15%（同列必然 y 重叠，
+                # 列与列之间至少隔一个框宽，15% 足以分开且容忍画图误差）。
+                _tolx = max(_gw * 0.15, 1.0)
+                _toly = max(_gh * 0.15, 1.0)
+
+                def _cluster(vals, tol):
+                    """一维聚类：返回簇列表（每簇是若干值）"""
+                    _vs = sorted(vals)
+                    _out = []
+                    _cur = [_vs[0]]
+                    for _v in _vs[1:]:
+                        if _v - _cur[-1] <= tol:
+                            _cur.append(_v)
+                        else:
+                            _out.append(_cur)
+                            _cur = [_v]
+                    _out.append(_cur)
+                    return _out
+
+                _cols = _cluster([m['x'] for m in _mem], _tolx)
+                _rows = _cluster([m['y'] for m in _mem], _toly)
+                _ncol, _nrow = len(_cols), len(_rows)
+                if _ncol < 2 or _nrow < 2:
+                    continue
+                _coverage = len(_mem) / float(_ncol * _nrow)
+                if _coverage < _GRID_RESCUE_COVERAGE:
+                    continue
+                safe_log(f"  [{layout_name}] 布局空间网格图框救援: 块 {_bn2!r} "
+                         f"{len(_mem)} 个 {_gw:.1f}×{_gh:.1f} (ratio {_gratio:.3f}, 短边 {_gshort:.1f}) "
+                         f"排列成 {_ncol} 列 × {_nrow} 行（覆盖率 {_coverage:.0%}）"
+                         f"→ 豁免短边预筛")
+                for _m in _mem:
+                    _rescued_keys.add((round(_m['x'], 3), round(_m['y'], 3),
+                                       round(_m['x1'], 3), round(_m['y1'], 3)))
+
     _insert_total = 0
     _insert_kept = 0
     _insert_filtered = 0  # 预筛剔除数（非图框级尺寸）
@@ -850,18 +974,21 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             _w = _xM - _xm; _h = _yM - _ym
             if _w <= 0 or _h <= 0:
                 continue
+            _bbox = (_xm, _ym, _xM, _yM)
+            _key = (round(_xm, 3), round(_ym, 3), round(_xM, 3), round(_yM, 3))
             # 预筛：尺寸必须"图框级"才入库，避免家具/符号类小块污染候选库。
             # 短边 <500 但命中标准 A 系列短边（A4 210/A3 297/A2 420…）的块也放行——
             # 小图幅图框块（A4 竖 210×297 等）不能因阈值被误杀。
+            # 另：布局空间「网格排版图框」（修法A）豁免短边下限，见上方救援段。
             _w_short = min(_w, _h)
             _w_ratio = (max(_w, _h) / _w_short) if _w_short > 0 else 0
             _is_a_series_short = any(abs(_w_short - _s) <= 1.0 for _s in _A_SERIES_SHORT_SIDES)
-            if ((_w_short < INSERT_MIN_SHORT_SIDE and not _is_a_series_short) or
+            _is_grid_rescued = _key in _rescued_keys
+            if ((_w_short < INSERT_MIN_SHORT_SIDE and not _is_a_series_short
+                    and not _is_grid_rescued) or
                     not (FRAME_RATIO_MIN <= _w_ratio <= FRAME_RATIO_MAX)):
                 _insert_filtered += 1
                 continue
-            _bbox = (_xm, _ym, _xM, _yM)
-            _key = (round(_xm, 3), round(_ym, 3), round(_xM, 3), round(_yM, 3))
             if _key in seen_bbox:
                 continue
             seen_bbox.add(_key)
@@ -1141,6 +1268,9 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         # 如底图块 X-总图排水底图 88 万级别 INSERT），否则真图框 rel_area 被稀释到 <10%
         # 条件C 全挂（UCS图纸/含远距离底图块的图纸）。
         layout_max_area = {}
+        # 被排除的大框（命中判据①② 的内容级底图/排版外框）单独记一份：它们不能作分母，
+        # 但当 layout 里别无图框级候选时，需要它们来判定"这个 layout 压根没有参照系"。
+        layout_excluded_big = {}
         for c in all_candidates:
             if c['area_ratio'] > 1.0:
                 continue  # 异常候选不作为相对面积参考
@@ -1160,11 +1290,58 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #  这类大底框自身仍可被条件 A 收入候选，最终由包裹剔除收掉（内含 ≥2 独立尺寸组）。
             if (c['area_ratio'] >= 0.5 and abs(c['ratio'] / (2 ** 0.5) - 1) > 0.10) or \
                (c['area_ratio'] >= 0.15 and c['ratio'] > 2.5):
+                _ln = c['layout']
+                if _ln not in layout_excluded_big or c['area'] > layout_excluded_big[_ln]['area']:
+                    layout_excluded_big[_ln] = c
                 continue
             ln = c['layout']
             if ln not in layout_max_area or c['area'] > layout_max_area[ln]:
                 layout_max_area[ln] = c['area']
+        # rel 分母塌缩防护（2026-09-11，运煤胶带机.dwg 7→1）：
+        #   判据①② 会把「整张图纸的外轮廓」踢出分母。若此时 layout 里**没有**留下
+        #   任何图框级候选，分母就会塌缩到某个内容构件上，rel 被放大量级地虚高。
+        #   运煤胶带机（1:1 设备布置图，全图 149823×77215 ratio 1.94 占 layout 97.6%）：
+        #   外轮廓命中判据① 被踢出 → 分母塌缩到一个 8000×7500 的场地符号（占 0.51%）
+        #   → 所有 rel 被放大 192.8 倍 → 7 个设备构件（4054×3159 / 4000×2000 /
+        #   4000×1600 / 4011×1777…）rel 从真实的 0.06~0.11% 虚报成 10.7~21.3%，
+        #   全部越过条件C 的 10% 门槛。
+        #   判据：分母相对 layout 占比过小（<1%），且被排除的大框占 layout 绝大部分
+        #   （≥50%）——即"layout 被一个非纸框大轮廓整体包住，里面全是内容"。
+        #   这种 layout 的特质是：那个大轮廓就是图框（整张图即一页），不该再从里面
+        #   挑构件；把该空间 rel 置 0，只保留条件A/B 等不依赖 rel 的通道，于是大轮廓
+        #   自身经条件A（占比≥15%）被选中，构件全部落选。
+        #   为什么占比阈值取 1% 而不是 5%：被误伤的既有场景里，分母占比可以低到
+        #   0.11%（RF雅安 84100×59400），但它**同时**满足"大框占比不高"（RF雅安无
+        #   被排除大框、分母本身即真图框）——本判据要求"分母占比 <1%" **且**
+        #   "存在占比 ≥50% 的被排除大框"两个条件同时成立，RF雅安/滨江/一层平面图/
+        #   一楼大厅等都不满足后者（它们的分母是真图框或内容框但未被整体包住）。
+        _REL_DENOM_MIN_SHARE = 0.01
+        if os.environ.get('FRAME_PARSER_NO_DENOM_GUARD') == '1':
+            _REL_DENOM_MIN_SHARE = 0.0     # A/B 回归对照用
+        _no_ref_layouts = set()
+        for _ln, _ma in layout_max_area.items():
+            _total = msp_total if _ln == '模型空间' else None
+            if _total is None:
+                # 布局空间总面积：用该 layout 候选的 area/area_ratio 反推最稳妥
+                _total = 0
+                for _c in all_candidates:
+                    if _c['layout'] == _ln and _c['area_ratio'] > 0:
+                        _total = max(_total, _c['area'] / _c['area_ratio'])
+            if _total <= 0 or _ma / _total >= _REL_DENOM_MIN_SHARE:
+                continue
+            _big = layout_excluded_big.get(_ln)
+            if _big is None or _big['area'] / _total < 0.5:
+                continue
+            _no_ref_layouts.add(_ln)
+            safe_log(f"  [{_ln}] rel 分母（{_ma:,.0f}）仅占 layout {_ma / _total * 100:.2f}%，"
+                     f"且存在占 layout {_big['area'] / _total * 100:.1f}% 的被排除大框"
+                     f"（{_big['width']:.0f}×{_big['height']:.0f} ratio {_big['ratio']:.3f}）"
+                     f"→ 判定为『整图即图框、内无图框级参照系』，该空间 rel 置 0，"
+                     f"仅保留条件A/B 通道")
         for c in all_candidates:
+            if c['layout'] in _no_ref_layouts:
+                c['rel_area_ratio'] = 0.0
+                continue
             ma = layout_max_area.get(c['layout'], 0)
             c['rel_area_ratio'] = (c['area'] / ma) if ma > 0 else 0.0
 
@@ -1561,6 +1738,29 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             sorted_group = sorted(group, key=lambda c: c['area'], reverse=True)
             capped.extend(sorted_group[:MAX_FRAMES_PER_LAYOUT])
         frame_like = capped
+
+        # ---------- 修法A（续）：布局空间已排版图纸页时，模型空间的内容区块全部让位 ----------
+        # DS4 四层 阁楼 平面系统图 (1).dwg：布局1 识别出 6 个网格排版的真图纸页，
+        # 而模型空间同时"认出"5 个 9900×12900 级的巨型块（实为 1:1 的内容区轮廓，
+        # 不是页面框）。二者叠加会把 fc 从正确的 6 抬高到 11，且主框尺寸会取错
+        # （取模型空间最大的 13423×9014 而不是布局空间的 434×311）。
+        # 判据：布局空间存在「网格排版图框」（即命中了上面的救援，或本 layout 内
+        # 同尺寸同块名 INSERT ≥4 个且过 is_frame_like）→ 该图按"一版多页"处理，
+        # 模型空间候选全部剔除。理由：布局空间是出图页面空间，一旦其中排出多个
+        # 等大页面框，模型空间就只是这些页面的内容源，其内的任何大框都不是图框。
+        # 与既有的"模型空间降级清洗"同源思路，但更彻底（那条只清 全实体包围盒，
+        # 本条清模型空间的全部候选）。
+        if 'FRAME_PARSER_NO_LAYOUT_WINS' not in os.environ:
+            _paper_layouts = [ln for ln in {c['layout'] for c in frame_like}
+                              if ln != '模型空间']
+            _paper_frame_n = sum(1 for c in frame_like if c['layout'] != '模型空间')
+            _model_frame_n = sum(1 for c in frame_like if c['layout'] == '模型空间')
+            if _paper_layouts and _paper_frame_n >= 4 and _model_frame_n > 0:
+                _before = len(frame_like)
+                frame_like = [c for c in frame_like if c['layout'] != '模型空间']
+                safe_log(f"  [布局空间优先] 布局空间 {_paper_layouts} 已识别 {_paper_frame_n} 个"
+                         f"网格排版图纸页 → 剔除模型空间候选 {_before - len(frame_like)} 个"
+                         f"（模型空间仅为页面内容源，其大框不是图框）")
 
         frame_count = len(frame_like) if frame_like else len(all_candidates)
 

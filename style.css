@@ -695,9 +695,9 @@
             text-overflow: ellipsis;
             max-width: 200px;
         }
-        /* 单图框数：作为气泡锚点可悬停（虚线底提示可交互），空间来源在气泡内展示 */
+        /* 单图框数：气泡锚点，点击弹出（虚线底提示可点击），空间来源在气泡内展示 */
         .frame-count-single {
-            cursor: help;
+            cursor: pointer;
             border-bottom: 1px dashed #a8b6c9;
         }
         /* 多图框气泡（悬停弹出 / 可钉住 / 一键复制全部 / 超长可滚动） */
