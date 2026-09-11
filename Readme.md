@@ -82,6 +82,12 @@ ezdxf 默认不加载 XREF 外部文件，引用块会漏识别图框。检测�
 
 ## 三、优化记录
 
+### 2026-09-11
+
+- **单图框气泡展示空间来源**：此前空间布局气泡只在多图框（`frameCount > 1`）时出现，单张图纸看不到图框来自模型空间还是布局空间。现改为**所有记录**的「图框数」列都是气泡锚点——单图框时气泡内以「📐 空间来源」单行展示所在空间（如 `模型空间`、`布局 "Sheet1"`），多图框仍走「📐 空间分布（N 个空间）」逐行清单；图框数列本身仍只显示数字（单框加虚线下划线提示可悬停），不占额外列宽
+- **数据构建调整**：`framesText` / `framesAll` 从"仅多图框构建"改为统一构建（单框即 `841×594(模型空间)` 单条），新增 `primaryLayout` 承载单框空间来源；`showTip` 移除 `nRaw === 0` 早退（否则手册输入/无候选记录根本弹不出气泡），尺寸列表为空时跳过该区块
+- **旧记录升级兼容**：`loadRecords` 增加字段补全——历史记录（localStorage）缺 `framesText`/`framesAll`/`primaryLayout`/`layoutCounts` 时按 `framesMeta` 就地补齐，无需重新解析图纸；`framesMeta` 也缺失的（手动输入/解析失败）保持缺失，气泡内显示 `—` 占位，绝不猜测。新增 `test_single_frame_tip.js`（22 用例覆盖单框两种空间、无数据降级、多框回归、旧记录补全、超 10 条截断）
+
 ### 2026-09-10
 
 - **日志按大小轮转**：`basicConfig` 换成 `RotatingFileHandler`（单文件 10MB、保留 4 份历史 `parser.log.1~.4`、磁盘上限 ≈50MB、UTF-8、`delay=True`）；新增 `_archive_oversized_log()` 启动预归档（超阈值的既有日志先归档为 `.1` 并后移历史序号，被占用时静默跳过）；logger `propagate=False` 避免经 root handler 重复输出，handler 挂载做幂等处理（兼容 Flask reloader 重启与模块重复导入）。背景：`parser.log` 自 2026-09-01 累积 6.6MB 且从未轮转，一次 20 张图纸的批量回归就能写掉数 MB
@@ -205,4 +211,5 @@ python app.py
 | `style.css` | 前端样式 |
 | `test_backend_rules.py` | 后端规则端到端测试（ezdxf 构造图纸） |
 | `test_judge_logic.js` | 前端尺寸分类逻辑单元测试 |
+| `test_single_frame_tip.js` | 单图框空间来源气泡的数据构建与 HTML 生成测试 |
 | `parser.log` | 运行日志（轮转，含 `.1`~`.4` 历史文件，已在 .gitignore） |
