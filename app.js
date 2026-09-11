@@ -717,6 +717,32 @@ function loadRecords() {
             const parsed = JSON.parse(stored);
             if (Array.isArray(parsed)) {
                 records = parsed;
+                // 旧记录字段补全（升级兼容）：早期版本单图框不构建 framesText/framesAll，
+                // 也没有 primaryLayout，导致单框气泡拿不到空间信息。此处按 framesMeta
+                // 就地补齐，无需重新解析图纸；补不出的（无 framesMeta）保持缺失 → 显示 —
+                records.forEach(rec => {
+                    const meta = Array.isArray(rec.framesMeta) ? rec.framesMeta : [];
+                    if (!rec.framesAll && meta.length > 0) {
+                        rec.framesAll = meta.map(m => `${m.w}×${m.h}(${m.layout})`).join('、');
+                    }
+                    if (!rec.framesText && meta.length > 0) {
+                        rec.framesText = meta.slice(0, 10).map(m => `${m.w}×${m.h}(${m.layout})`).join('、')
+                            + (meta.length > 10 ? ` 等 ${meta.length} 个` : '');
+                    }
+                    if (!rec.primaryLayout && meta.length > 0) {
+                        rec.primaryLayout = (meta.find(m => m && m.layout) || {}).layout || null;
+                    }
+                    // 布局分布兜底：旧记录无 layoutCounts 时按 framesMeta 聚合
+                    if (!rec.layoutCounts && meta.length > 0) {
+                        const agg = {};
+                        meta.forEach(m => {
+                            const k = (m && m.layout) || '未知';
+                            agg[k] = (agg[k] || 0) + 1;
+                        });
+                        rec.layoutCounts = agg;
+                        rec.layoutCountsText = formatLayoutCountsText(agg);
+                    }
+                });
                 if (records.length > 0) {
                     const maxId = Math.max(...records.map(r => r.id || 0));
                     recordIdCounter = maxId;
@@ -879,11 +905,16 @@ function addRecord(w, h, result, name, path, framesInfo) {
         note: '',
         isFailed: false,
         frameCount: frameCount,
-        framesText: frameCount > 1 ? formatFramesText(candidates) : '',
-        framesAll: frameCount > 1 ? formatFramesAll(candidates) : '',
+        // 图框明细文本：多图框为完整清单，单图框也为"该框尺寸(所在空间)"单条——
+        // 气泡在单框时同样要展示"来自模型空间还是布局空间"，故统一构建
+        framesText: formatFramesText(candidates),
+        framesAll: formatFramesAll(candidates),
         framesMeta: framesMeta,
         layoutCounts: layoutCounts,
         layoutCountsText: formatLayoutCountsText(layoutCounts),
+        // 单图框的空间来源（模型空间 / 布局 "Sheet1"），气泡内以"空间来源"标题展示。
+        // 取不到候选（旧记录 / 后端未返回 candidates）时为 null → 气泡显示 "—"，不做猜测
+        primaryLayout: (framesMeta.find(m => m && m.layout) || {}).layout || null,
     };
     records.push(record);
     saveRecords();
@@ -1013,18 +1044,24 @@ function renderRecords() {
             : '';
         const typeHtml = `<span class="type-tag ${typeInfo.cls}">${typeInfo.label}</span>${mixedHtml}`;
         // 图框数列：展示该图纸检测到的图框数量（模型空间 + 布局空间合计）。
-        // 多图框时用紫色徽章，悬停可查看全部候选的尺寸与所在空间；手动输入/失败记录显示 —。
+        // 悬停/点击任一单元格均可弹出气泡查看明细——**单图框也要能看**（首要用途是
+        // "这一张来自模型空间还是布局空间"，多图框则是空间分布 + 尺寸清单）。
+        // 手动输入/失败记录无候选数据，锚点仍保留，气泡内显示 "—"，不做猜测。
         const hasFrameCount = rec.frameCount && rec.frameCount > 0;
+        const tipAttrs = `class="tip-anchor" data-frames="${escHtml(rec.framesText || '')}" data-all="${escHtml(rec.framesAll || rec.framesText || '')}" data-layouts="${escHtml(JSON.stringify(rec.layoutCounts || {}))}" data-primary-layout="${escHtml(rec.primaryLayout || '')}"`;
         let frameCountHtml = '—';
         if (hasFrameCount) {
             // 布局分布次级文本（模型空间×N、布局 "Sheet1"×M …），仅多图框时显示在图框
-            // 数下方，无需悬停即可看到"哪个空间有几张图框"；单框行不显示（等价冗余）
+            // 数下方；单框的空间来源走气泡（表格列宽有限，且单条信息放气泡更清爽）
             const distHtml = (rec.frameCount > 1 && rec.layoutCountsText)
                 ? `<div class="frame-dist" title="${escHtml(rec.layoutCountsText)}">${escHtml(rec.layoutCountsText)}</div>`
                 : '';
             frameCountHtml = (rec.frameCount > 1)
-                ? `<span class="type-tag multi-frame tip-anchor" data-frames="${escHtml(rec.framesText || '')}" data-all="${escHtml(rec.framesAll || rec.framesText || '')}" data-layouts="${escHtml(JSON.stringify(rec.layoutCounts || {}))}">🖼 ×${rec.frameCount}</span>${distHtml}`
-                : String(rec.frameCount);
+                ? `<span class="type-tag multi-frame ${tipAttrs}">🖼 ×${rec.frameCount}</span>${distHtml}`
+                : `<span class="frame-count-single ${tipAttrs}" title="悬停查看图框来源空间">${rec.frameCount}</span>`;
+        } else {
+            // 无有效图框数（手动输入/解析失败）：仍可悬停查看空间信息（通常为 —）
+            frameCountHtml = `<span class="frame-count-single ${tipAttrs}">—</span>`;
         }
 
         html += `<tr class="${rowClass}">
@@ -1114,7 +1151,9 @@ function showTip(anchor) {
     const allText = anchor.dataset.all || framesText; // 全量明细（复制用）
     const rawLines = String(allText).split('、').filter(Boolean);
     const nRaw = rawLines.length;
-    if (nRaw === 0) return;
+    // 单图框无候选明细（手动输入/失败记录/旧数据）时不再直接返回——仍要展示
+    // "空间来源"，取不到就显示 "—"（绝不猜测）
+    const primaryLayout = anchor.dataset.primaryLayout || '';
     ensureTipPop();
     // 按尺寸聚合：相同 宽×高 只显示一个，计数 ×n（保持原出现顺序）
     const dimOrder = [];
@@ -1157,12 +1196,22 @@ function showTip(anchor) {
                 ).join('')
                 + `</div></div>`;
         }
+    } else {
+        // 无空间分布数据（单图框 / 旧记录）：展示"空间来源"单行。单图框的核心诉求
+        // 就是"这张图框来自模型空间还是布局空间"，拿不到时显示 —（占位不猜测）
+        layoutRowsHtml =
+            `<div class="tip-layouts">
+               <div class="tip-layouts-head">📐 空间来源</div>
+               <div class="tip-layouts-list">
+                 <div class="tip-layout-line">${primaryLayout ? escHtml(primaryLayout) : '<span class="tip-none">—</span>'}</div>
+               </div>
+             </div>`;
     }
     tipPop.innerHTML =
         `<div class="tip-head">共 ${nRaw} 个图框${nDim > 1 ? `（${nDim} 种尺寸）` : ''}${truncated ? ' <span class="tip-more">· 下方滚动查看</span>' : ''}</div>`
         + layoutRowsHtml
         + (truncated ? `<div class="tip-summary" title="${escHtml(framesText)}">${escHtml(framesText)}</div>` : '')
-        + `<div class="tip-list">${dimRows}</div>`
+        + (dimRows ? `<div class="tip-list">${dimRows}</div>` : '')
         + `<div class="tip-actions">
              <button type="button" class="tip-btn tip-pin">${tipPinned ? '📌 已固定' : '📌 固定'}</button>
              <button type="button" class="tip-btn tip-copy">📋 复制全部</button>

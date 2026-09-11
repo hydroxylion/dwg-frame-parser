@@ -695,6 +695,11 @@
             text-overflow: ellipsis;
             max-width: 200px;
         }
+        /* 单图框数：作为气泡锚点可悬停（虚线底提示可交互），空间来源在气泡内展示 */
+        .frame-count-single {
+            cursor: help;
+            border-bottom: 1px dashed #a8b6c9;
+        }
         /* 多图框气泡（悬停弹出 / 可钉住 / 一键复制全部 / 超长可滚动） */
         .tip-pop {
             position: fixed;
@@ -771,6 +776,10 @@
             font-weight: 600;
             font-size: 12px;
             margin-left: 2px;
+        }
+        /* 空间信息缺失时的占位符（—）：弱化显示，表明"取不到"而非"空字符串" */
+        .tip-pop .tip-none {
+            color: #7f9ac0;
         }
         .tip-pop .tip-actions {
             display: flex;
