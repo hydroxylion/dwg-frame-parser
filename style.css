@@ -749,16 +749,6 @@
             white-space: nowrap;
             font-variant-numeric: tabular-nums;
         }
-        .tip-pop .tip-summary {
-            color: #8fa6c8;
-            font-size: 12px;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            border-bottom: 1px dashed rgba(255, 255, 255, 0.16);
-            padding: 0 0 3px;
-            margin-bottom: 2px;
-        }
         .tip-pop .tip-list {
             max-height: 300px;          /* 约 15 行：超过即出现滚动条 */
             overflow-y: auto;

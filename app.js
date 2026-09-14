@@ -1148,7 +1148,7 @@ function ensureTipPop() {
 }
 
 function showTip(anchor) {
-    const framesText = anchor.dataset.frames || '';   // 摘要（前10 + 等 N 个，展示用）
+    const framesText = anchor.dataset.frames || '';   // 摘要（前10 + 等 N 个）——仅作 allText 缺失时的兜底，气泡不再单独展示该行
     const allText = anchor.dataset.all || framesText; // 全量明细（复制用）
     const rawLines = String(allText).split('、').filter(Boolean);
     const nRaw = rawLines.length;
@@ -1172,7 +1172,7 @@ function showTip(anchor) {
         return `<div class="tip-line">${escHtml(dim)}${n > 1 ? ` <span class="tip-times">×${n}</span>` : ''}</div>`;
     }).join('');
     const nDim = dimOrder.length;
-    const truncated = nRaw > 20;                      // 原始图框超 20 个才显示"…等 N 个"摘要行
+    const truncated = nRaw > 20;                      // 原始图框超 20 个才在标题旁提示"· 下方滚动查看"
     // 空间分布（模型空间 / 各布局的图框数）：徽章携带 JSON {布局名: 数量}，
     // 逐行完整展示（布局多时可滚动），不再单行省略截断
     const layoutsRaw = anchor.dataset.layouts || '';
@@ -1211,7 +1211,6 @@ function showTip(anchor) {
     tipPop.innerHTML =
         `<div class="tip-head">共 ${nRaw} 个图框${nDim > 1 ? `（${nDim} 种尺寸）` : ''}${truncated ? ' <span class="tip-more">· 下方滚动查看</span>' : ''}</div>`
         + layoutRowsHtml
-        + (truncated ? `<div class="tip-summary" title="${escHtml(framesText)}">${escHtml(framesText)}</div>` : '')
         + (dimRows ? `<div class="tip-list">${dimRows}</div>` : '')
         + `<div class="tip-actions">
              <button type="button" class="tip-btn tip-close">✕ 关闭</button>
