@@ -565,6 +565,79 @@ def detect_rectangles_from_lines(entity_list, rot=None):
     rects.sort(key=lambda r: (r[2] - r[0]) * (r[3] - r[1]), reverse=True)
     return rects
 
+
+# ---------- 标题栏条纹检测（条件G：同模板缩放套图救援 用，2026-09-14） ----------
+def _merge_stripe_intervals(intervals, gap=15.0):
+    """合并 y 区间（同一条竖线被文字/洞口打断成多段时拼回覆盖范围）"""
+    if not intervals:
+        return []
+    intervals = sorted(intervals)
+    out = [list(intervals[0])]
+    for lo, hi in intervals[1:]:
+        if lo <= out[-1][1] + gap:
+            out[-1][1] = max(out[-1][1], hi)
+        else:
+            out.append([lo, hi])
+    return out
+
+
+def has_title_stripe(h_segs, v_segs, rect):
+    """检测矩形的「标题栏条纹」结构签名。
+
+    场景（胜利公寓２ 4→6）：6 个图框是同一模板按 1×/1:2.5/1:4/1:4.46 四种出图
+    比例排版，长宽比全部精确等于 1.4257。小尺寸实例 rel 6.25%/5.02% 过不了条件C
+    （分母是最大的图框）、短边 4613/4133 超条件B 上限 2000、尺寸互不相同条件D
+    也不适用 → 全通道否决漏检。但 6 个框共享同一模板结构：框右侧有一条竖向
+    标题栏条纹（两条全高竖线围出带宽 ≈11%×框宽，带内横向分隔线 ≥2 条）。
+
+    判据（对矩形左右两侧各检查一遍）：
+      - 侧边 25% 区域内，覆盖 ≥80% 框高且两端触及框边的竖线（合并断段后统计，
+        框边界本身也计为候选边）≥2 条，相邻两条围出带宽 ∈ [5%, 25%]×框宽；
+      - 带内横向分隔线 ≥2 条（线段横跨带宽 ≥60%，允许略超出带边 10 单位——
+        分隔线常延伸到框边界）。
+    decoy 校验（胜利公寓２ 实测 10 个房间/构件矩形全部不命中）：
+      房间右缘的柜/架类符号也会围出窄竖带，但带宽仅 ≈2.4%×框宽，被 5% 下限滤除。
+
+    h_segs/v_segs：[(lo, hi, y/x), ...] 已转正（全局旋转矫正后）的水平/垂直线段
+    rect：(x1, y1, x2, y2)
+    """
+    x1, y1, x2, y2 = rect[0], rect[1], rect[2], rect[3]
+    W, H = x2 - x1, y2 - y1
+    if W <= 0 or H <= 0:
+        return False
+    for side in ('right', 'left'):
+        if side == 'right':
+            z0, z1 = x2 - W * 0.25, x2
+            edges = {x2}
+        else:
+            z0, z1 = x1, x1 + W * 0.25
+            edges = {x1}
+        # 带内垂直线按 x 聚类，合并断段后要求"全高柱"（覆盖 ≥80% 且触及两端）
+        vcl = {}
+        for lo, hi, x in v_segs:
+            if z0 - 5 <= x <= z1 + 5 and lo >= y1 - 5 and hi <= y2 + 5:
+                vcl.setdefault(round(x, 0), []).append((lo, hi))
+        for xk, ivs in vcl.items():
+            m = _merge_stripe_intervals(ivs)
+            total = sum(hi - lo for lo, hi in m)
+            if (total >= H * 0.8 and m[0][0] <= y1 + H * 0.06
+                    and m[-1][1] >= y2 - H * 0.06):
+                edges.add(xk)
+        xs = sorted(edges)
+        for i in range(len(xs) - 1):
+            xa, xb = xs[i], xs[i + 1]
+            bw = xb - xa
+            if not (W * 0.05 <= bw <= W * 0.25):
+                continue
+            divs = set()
+            for lo, hi, y in h_segs:
+                if y1 - 2 <= y <= y2 + 2 and xa - 10 <= lo and hi <= xb + 10 \
+                        and (hi - lo) >= bw * 0.6:
+                    divs.add(round(y / 10))
+            if len(divs) >= 2:
+                return True
+    return False
+
 # ---------- 图框特征判定 ----------
 # 归一化长宽比：横版/竖版统一用 长/短边 表示，避免竖版图框（如 841x1189）被误杀
 # 合理区间 [1.05, 5.5]：
@@ -801,12 +874,27 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                     _pts.append((_c[0]-_r, _c[1]-_r))
                     _pts.append((_c[0]+_r, _c[1]+_r))
                 elif _t == 'INSERT':
+                    # 嵌套 INSERT：按 DXF 变换规范组合 p_world = insert + R(rot)·S·(p − base)。
+                    # 旧实现既不减子块基点也不处理子块旋转——子块带旋转时父块 bbox 直接算错。
                     _bb = _get_block_world_bbox(_ent.dxf.name, _visited)
                     if _bb is not None:
                         _ipt = (_ent.dxf.insert.x, _ent.dxf.insert.y)
                         _xs = _ent.dxf.xscale; _ys = _ent.dxf.yscale
-                        _pts.append((_ipt[0] + _bb[0]*_xs, _ipt[1] + _bb[1]*_ys))
-                        _pts.append((_ipt[0] + _bb[2]*_xs, _ipt[1] + _bb[3]*_ys))
+                        try:
+                            _nb = doc.blocks[_ent.dxf.name].block.dxf.base_point
+                            _nbx, _nby = _nb.x, _nb.y
+                        except Exception:
+                            _nbx = _nby = 0.0
+                        _nc = [(_bb[0]-_nbx, _bb[1]-_nby), (_bb[2]-_nbx, _bb[1]-_nby),
+                               (_bb[0]-_nbx, _bb[3]-_nby), (_bb[2]-_nbx, _bb[3]-_nby)]
+                        _nc = [(_p[0]*_xs, _p[1]*_ys) for _p in _nc]
+                        _nrot = getattr(_ent.dxf, 'rotation', 0)
+                        if _nrot:
+                            _nr = _math.radians(_nrot)   # DXF rotation 单位是度，cos/sin 需弧度
+                            _ncr = _math.cos(_nr); _nsr = _math.sin(_nr)
+                            _nc = [(_p[0]*_ncr - _p[1]*_nsr, _p[0]*_nsr + _p[1]*_ncr) for _p in _nc]
+                        for _p in _nc:
+                            _pts.append((_ipt[0] + _p[0], _ipt[1] + _p[1]))
             except Exception:
                 continue
         if not _pts:
@@ -859,11 +947,19 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 _xs2 = _e.dxf.xscale; _ys2 = _e.dxf.yscale
                 if abs(_xs2) < 1e-9 or abs(_ys2) < 1e-9:
                     continue
+                # 块基点 + 旋转（度→弧度）：DXF 变换 insert + R·S·(p − base)，与主 INSERT 路径同规范
+                try:
+                    _nb2 = doc.blocks[_bn2].block.dxf.base_point
+                    _nb2x, _nb2y = _nb2.x, _nb2.y
+                except Exception:
+                    _nb2x = _nb2y = 0.0
                 _r2 = getattr(_e.dxf, 'rotation', 0)
-                _lp = [(_bd2[0]*_xs2, _bd2[1]*_ys2), (_bd2[2]*_xs2, _bd2[1]*_ys2),
-                       (_bd2[0]*_xs2, _bd2[3]*_ys2), (_bd2[2]*_xs2, _bd2[3]*_ys2)]
+                _lp = [(_bd2[0]-_nb2x, _bd2[1]-_nb2y), (_bd2[2]-_nb2x, _bd2[1]-_nb2y),
+                       (_bd2[0]-_nb2x, _bd2[3]-_nb2y), (_bd2[2]-_nb2x, _bd2[3]-_nb2y)]
+                _lp = [(p[0]*_xs2, p[1]*_ys2) for p in _lp]
                 if _r2:
-                    _cr2 = _math.cos(_r2); _sr2 = _math.sin(_r2)
+                    _rad2 = _math.radians(_r2)
+                    _cr2 = _math.cos(_rad2); _sr2 = _math.sin(_rad2)
                     _lp = [(p[0]*_cr2 - p[1]*_sr2, p[0]*_sr2 + p[1]*_cr2) for p in _lp]
                 _ip2 = (_e.dxf.insert.x, _e.dxf.insert.y)
                 _wp = [(p[0] + _ip2[0], p[1] + _ip2[1]) for p in _lp]
@@ -957,11 +1053,23 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             if abs(_xs) < 1e-9 or abs(_ys) < 1e-9:
                 continue
             _ins_rot = getattr(_entity.dxf, 'rotation', 0)
-            _bx1, _by1, _bx2, _by2 = _bb_def
+            # 块基点：DXF 变换规范为 p_world = insert + R(rot)·S·(p − base)。
+            # 基点非 0 的块若不减去，bbox 会整体平移 base×scale（本图 3/106 个块非零基点）。
+            try:
+                _bp = doc.blocks[_bn].block.dxf.base_point
+                _bpx, _bpy = _bp.x, _bp.y
+            except Exception:
+                _bpx = _bpy = 0.0
+            _bx1, _by1, _bx2, _by2 = (_bb_def[0]-_bpx, _bb_def[1]-_bpy,
+                                      _bb_def[2]-_bpx, _bb_def[3]-_bpy)
             _local_pts = [(_bx1*_xs, _by1*_ys), (_bx2*_xs, _by1*_ys),
                           (_bx1*_xs, _by2*_ys), (_bx2*_xs, _by2*_ys)]
             if _ins_rot:
-                _cr = _math.cos(_ins_rot); _sr = _math.sin(_ins_rot)
+                # 关键：DXF rotation 单位是「度」，math.cos/sin 只吃「弧度」——
+                # 旧实现把度直接喂给 cos/sin（rot=180 被当成 180 弧度≈233°），
+                # 胜利公寓２ 马桶块 500×750 rot=180 被算成 900×850、位置飞出 100 万 mm。
+                _rad = _math.radians(_ins_rot)
+                _cr = _math.cos(_rad); _sr = _math.sin(_rad)
                 _local_pts = [(p[0]*_cr - p[1]*_sr, p[0]*_sr + p[1]*_cr)
                               for p in _local_pts]
             _ip = (_entity.dxf.insert.x, _entity.dxf.insert.y)
@@ -1084,6 +1192,7 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     # 2. 直线矩形（多矩形检测：每个由 4 条直线围出的区域都是一个候选）
     lines = [ent for ent in visible_entities if ent.dxftype() == 'LINE']
     if lines:
+        _rect_start = len(candidates)
         for rect_bbox in detect_rectangles_from_lines(lines, rot=_rot):
             x1, y1, x2, y2 = rect_bbox
             width = x2 - x1
@@ -1097,6 +1206,55 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                     'height': height,
                     'layout': layout_name
                 })
+        # 2.5 标题栏条纹标记（条件G 用，2026-09-14）：为图框级的直线矩形候选
+        #     预计算「右侧/左侧竖向标题栏条纹」结构签名，主流程二扫时用于
+        #     「同模板缩放套图救援」（胜利公寓２：6 框同模板四种比例，小尺寸
+        #     实例 rel/短边全不过既有通道，靠条纹签名 + 与已入选框同 ratio 救回）。
+        #     性能护栏：detect_rectangles_from_lines 按面积降序返回，只标记前
+        #     _STRIPE_MARK_MAX 个且 ratio 在图框区间内的候选（真图框必是大候选，
+        #     小构件矩形不会进入前 400 也进不了救援）。
+        _STRIPE_MARK_MAX = 400
+        _rect_cands = candidates[_rect_start:]
+        _mark_n = 0
+        if _rect_cands:
+            _h_segs, _v_segs = [], []
+            for ent in visible_entities:
+                _t = ent.dxftype()
+                try:
+                    if _t == 'LINE':
+                        _sx, _sy = ent.dxf.start.x, ent.dxf.start.y
+                        _ex, _ey = ent.dxf.end.x, ent.dxf.end.y
+                    elif _t == 'LWPOLYLINE':
+                        _pts = list(ent.get_points('xy'))
+                        _cl = _pts + ([_pts[0]] if ent.closed else [])
+                    else:
+                        continue
+                except Exception:
+                    continue
+                if _t == 'LINE':
+                    _pair = [(_sx, _sy, _ex, _ey)]
+                else:
+                    _pair = [(_cl[i][0], _cl[i][1], _cl[i+1][0], _cl[i+1][1])
+                             for i in range(len(_cl) - 1)]
+                for _sx, _sy, _ex, _ey in _pair:
+                    _p1 = _rot_pt(_sx, _sy)
+                    _p2 = _rot_pt(_ex, _ey)
+                    if abs(_p1[1] - _p2[1]) < 1.0 and abs(_p2[0] - _p1[0]) > 1.0:
+                        _h_segs.append((min(_p1[0], _p2[0]), max(_p1[0], _p2[0]), _p1[1]))
+                    elif abs(_p1[0] - _p2[0]) < 1.0 and abs(_p2[1] - _p1[1]) > 1.0:
+                        _v_segs.append((min(_p1[1], _p2[1]), max(_p1[1], _p2[1]), _p1[0]))
+            for _c in _rect_cands:
+                if _mark_n >= _STRIPE_MARK_MAX:
+                    break
+                _w, _h = _c['width'], _c['height']
+                _short = min(_w, _h)
+                if _short <= 0:
+                    continue
+                _r = max(_w, _h) / _short
+                if not (FRAME_RATIO_MIN <= _r <= 2.5):
+                    continue  # 条纹救援只面向页形候选；细长条不算
+                _mark_n += 1
+                _c['title_stripe'] = has_title_stripe(_h_segs, _v_segs, _c['bbox'])
     # 3. 如果没有候选，取全实体包围盒（降级）
     #    排除 VIEWPORT：视口是布局空间的显示窗口（透视模型空间的"取景框"），
     #    不是图纸内容。布局里只有 VIEWPORT 说明图纸内容全在模型空间，
@@ -1195,17 +1353,27 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             raise ValueError("未找到任何有效边界")
 
         def build_payload(cands):
-            """把候选列表转成前端可展示的结构（按面积降序，最多 20 条）"""
+            """把候选列表转成前端可展示的结构（按面积降序，全量返回）。
+
+            注意：此处必须与 frame_count / frame_counts_by_layout 同源同量——
+            早期为控制 payload 只返回前 20 条，导致多图框图纸（如 21 框的
+            春风公寓2）气泡标题按截断后明细统计出 20，而空间分布按全量
+            统计出 21，前端两处数字对不上。明细是小对象，全量返回无压力。
+            """
             result_cands = []
-            for c in sorted(cands, key=lambda x: x['area'], reverse=True)[:20]:
+            for c in sorted(cands, key=lambda x: x['area'], reverse=True):
                 cw, ch = c['width'], c['height']
+                bx1, by1, bx2, by2 = c['bbox']
                 if unit.lower() == 'inch':
                     cw, ch = cw * 25.4, ch * 25.4
+                    bx1, by1, bx2, by2 = bx1 * 25.4, by1 * 25.4, bx2 * 25.4, by2 * 25.4
                 result_cands.append({
                     'layout': c['layout'],
                     'type': c['type'],
                     'width': round(cw),
                     'height': round(ch),
+                    # 世界坐标 bbox（供调试/测试断言位置；前端当前不用此字段）
+                    'bbox': [round(bx1), round(by1), round(bx2), round(by2)],
                 })
             return result_cands
 
@@ -1534,6 +1702,169 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             if _propagated_total:
                 pass_feature_count = len(frame_like)
 
+        # ---------- 条件G：同模板缩放套图救援（2026-09-14，胜利公寓２ 4→6） ----------
+        # 场景：6 个图框是同一模板按 1×/1:2.5/1:4/1:4.46 四种出图比例排版，长宽比
+        #   全部精确等于 1.4257。特征判定是"逐实例"的，小尺寸实例必然吃亏：
+        #   rel 分母是最大的图框 → 26305×18450 rel=100%、10522×7380 rel=16% 过条件C，
+        #   但 6576×4613 rel=6.25%、5892×4133 rel=5.02% <10% 被拒；短边 4613/4133
+        #   超 2000 条件B 结构性不可达；area_ratio 0.66%/0.53% <15% 条件A 不可达；
+        #   尺寸互不相同（同尺寸≥2 的条件D 也不适用）→ 全通道否决漏检 2 张。
+        # 判据（两个信号同时成立才救援）：
+        #   ① 结构签名：候选是直线矩形且带「标题栏条纹」（右侧/左侧 25% 内两条
+        #      全高竖线围出带宽 5%~25%×框宽的竖带、带内横向分隔线 ≥2 条）——
+        #      这是标题栏的典型画法，decoy 校验：同图 10 个房间/构件矩形全部不命中；
+        #   ② 同模板：长宽比与同 layout 内某个已入选「直线矩形」图框一致（±1%）——
+        #      同一模板不同出图比例，比例不会变。
+        # 与同块名族传播的分工：那条管"块参照"族（同块名多次插入），本条管
+        #   "直线矩形画的套图"（无块、纯线段，大小实例尺寸无公度，4.46 倍非整数倍）。
+        _COND_G_ENABLED = os.environ.get('FRAME_PARSER_NO_COND_G') != '1'
+        if _COND_G_ENABLED and frame_like:
+            _sel_rect_ratios = {c['ratio'] for c in frame_like
+                                if c['type'] == '直线矩形'}
+            if _sel_rect_ratios:
+                _in_fl = {id(c) for c in frame_like}
+                _g_added = []
+                for c in all_candidates:
+                    if id(c) in _in_fl or c['type'] != '直线矩形':
+                        continue
+                    if not c.get('title_stripe'):
+                        continue
+                    if not any(abs(c['ratio'] - _r) / _r <= 0.01
+                               for _r in _sel_rect_ratios):
+                        continue
+                    frame_like.append(c)
+                    _in_fl.add(id(c))
+                    _g_added.append(c)
+                if _g_added:
+                    pass_feature_count = len(frame_like)
+                    _sizes_g = ', '.join(
+                        '%.0fx%.0f' % (c['width'], c['height']) for c in _g_added)
+                    safe_log(f"  [条件G·同模板套图救援] 补入 {len(_g_added)} 个"
+                             f"带标题栏条纹的同比例直线矩形: {_sizes_g}")
+
+        # ---------- 条件H：主导模板比例 + 内容丰富救援（2026-09-14，春风公寓2 16→21） ----------
+        # 场景：21 个图框是同一模板按四种出图比例排版，长宽比全部精确等于 1.4444。
+        #   右侧 5 张小图框（17472×12096 / 14560×10080×3 / 10735×7432）逐实例判定
+        #   全通道否决：rel 3.7~9.9% <10%（条件C 拒，分母是最大图框）、area_ratio
+        #   0.1~0.4% <15%（条件A 拒）、短边 7432~12096 >2000（条件B 结构性不可达）、
+        #   非直线矩形（条件D 不适用）、标题栏只有一条全高分隔线没有横向分隔线
+        #   （条件G 条纹签名不命中）→ 漏检 5 张。
+        # 判据（三个信号同时成立才救援）：
+        #   ① 主导模板比例：候选长宽比与同 layout 内 ≥3 个已入选图框共享的比例一致
+        #      （±1%）——同一模板缩放出图，比例是指纹、不会变；主导门槛 ≥3 排除
+        #      "只有一个大框"的孤立场景；
+        #   ② 内容丰富：候选 bbox 内完全包含 ≥ COND_H_MIN_ENTITIES 个实体——真页面
+        #      框内必有大量图纸内容（春风公寓2 实测 52~839 个），而比例恰好落在
+        #      1.4444±1% 的窗户 decoy（1277×882，ratio 1.4478）框内只有自身边线
+        #      （实测 5~6 个）→ 被内容数干净排除；
+        #   ③ 显式矩形类型（闭合多段线/直线矩形）——块参照族已有"同块名族传播"覆盖。
+        #   救援对象的内框（虚线层 17203/14336/10570 等）同样命中（内容相同、比例
+        #   1.455 在 1.4444±1% 内），随后由嵌套去重"留大剔小"收掉，不影响计数。
+        # 与条件G 的分工：G 靠"标题栏条纹"结构签名（条纹带+横向分隔线），H 靠
+        #   "比例指纹+框内内容量"——两签名互补，覆盖标题栏画法不同的套图。
+        _COND_H_ENABLED = os.environ.get('FRAME_PARSER_NO_COND_H') != '1'
+        COND_H_MIN_ENTITIES = 12   # 框内完全包含实体数下限（春风公寓2: 真框 52+ vs decoy ≤11）
+        COND_H_DOMINANT_MIN = 3    # 主导比例至少 shared by 3 个已入选图框
+        # 比例聚类/匹配容差 ±0.5%：模板拷贝（复制+缩放）的比例精确到 1e-6 量级，
+        # 0.5% 已足够宽松；更重要的是**防止近邻比例混簇**——新古典式 21728×15365
+        # （ratio 1.4141）与其内框 21302×14939（ratio 1.4259，同一页的均匀内缩重复
+        # 画法，绝对内缩使 ratio 偏移 0.83%）在 ±1% 下会合并成"伪主导簇"，导致
+        # 家具详图边框 3900×2720（ratio 1.4338，距 1.4259 仅 0.55%）被误救（fc 2→3）。
+        # 收紧到 ±0.5% 后两簇各自凑不满 ≥3 → 主导不存在 → 该图 H 自动失效。
+        COND_H_RATIO_TOL = 0.005
+        if _COND_H_ENABLED and frame_like:
+            _dominant = {}   # layout -> {ratio, ...}
+            for _ln in {c['layout'] for c in frame_like}:
+                _rs = [c['ratio'] for c in frame_like if c['layout'] == _ln]
+                for _r in set(_rs):
+                    if sum(1 for _x in _rs if abs(_x - _r) / _r <= COND_H_RATIO_TOL) >= COND_H_DOMINANT_MIN:
+                        _dominant.setdefault(_ln, set()).add(_r)
+            if _dominant:
+                _in_fl_h = {id(c) for c in frame_like}
+                _h_cands = []
+                for c in all_candidates:
+                    if id(c) in _in_fl_h or c['type'] not in ('闭合多段线', '直线矩形'):
+                        continue
+                    _drs = _dominant.get(c['layout'])
+                    if not _drs:
+                        continue
+                    if not any(abs(c['ratio'] - _r) / _r <= COND_H_RATIO_TOL for _r in _drs):
+                        continue
+                    _h_cands.append(c)
+                if _h_cands:
+                    # 每个 layout 一次性收集实体 bbox（O(N)），再对少量候选做包含计数
+                    _ent_bbs = {}
+                    for _ln in {c['layout'] for c in _h_cands}:
+                        if _ln == '模型空间':
+                            _lay = doc.modelspace()
+                        else:
+                            try:
+                                _lay = doc.layouts.get(_ln[3:-1] if _ln.startswith('布局 "') else _ln)
+                            except Exception:
+                                continue
+                        _bbs = []
+                        for ent in _lay:
+                            _t = ent.dxftype()
+                            if _t not in ('LINE', 'LWPOLYLINE', 'POLYLINE', 'ARC', 'CIRCLE',
+                                          'INSERT', 'ELLIPSE', 'SPLINE', 'HATCH', 'SOLID',
+                                          'TEXT', 'MTEXT', 'DIMENSION'):
+                                continue
+                            try:
+                                if _t == 'LINE':
+                                    _bb = (min(ent.dxf.start.x, ent.dxf.end.x),
+                                           min(ent.dxf.start.y, ent.dxf.end.y),
+                                           max(ent.dxf.start.x, ent.dxf.end.x),
+                                           max(ent.dxf.start.y, ent.dxf.end.y))
+                                else:
+                                    _bb4 = get_entity_bbox(ent, doc)
+                                    _bb = None if _bb4 is None else tuple(_bb4[:4])
+                            except Exception:
+                                continue
+                            if _bb is not None:
+                                _bbs.append(_bb)
+                        _ent_bbs[_ln] = _bbs
+                    _h_added = []
+                    # 防护栏：已被某个"已入选"图框完全包住的候选不救援——嵌套去重
+                    # 反正会把它剔掉，救入只是噪音。春风公寓2 实证：1280×1850 虚线
+                    # 窗套（ratio 1.4453 命中主导比例、框内 12+ 实体）在已检出的
+                    # 26000×18000 框内，若无此护栏会被救入（全靠去重兜底）。
+                    # 注：右侧 4 个内框（17203/14336×3/10570）不受影响——它们的外框
+                    # 此时尚未入选，不在"已入选"之列。
+                    _fl_by_lay = {}
+                    for _fc in frame_like:
+                        _fl_by_lay.setdefault(_fc['layout'], []).append(_fc)
+                    for c in _h_cands:
+                        _skip = False
+                        for _fc in _fl_by_lay.get(c['layout'], ()):
+                            _fb = _fc['bbox']
+                            if (c['bbox'][0] >= _fb[0] - 1 and c['bbox'][1] >= _fb[1] - 1 and
+                                    c['bbox'][2] <= _fb[2] + 1 and c['bbox'][3] <= _fb[3] + 1):
+                                _skip = True
+                                break
+                        if _skip:
+                            continue
+                        _bbs = _ent_bbs.get(c['layout'])
+                        if _bbs is None:
+                            continue
+                        _x1, _y1, _x2, _y2 = c['bbox']
+                        _n = 0
+                        for _bx1, _by1, _bx2, _by2 in _bbs:
+                            if (_bx1 >= _x1 - 1 and _by1 >= _y1 - 1 and
+                                    _bx2 <= _x2 + 1 and _by2 <= _y2 + 1):
+                                _n += 1
+                                if _n >= COND_H_MIN_ENTITIES:
+                                    break
+                        if _n >= COND_H_MIN_ENTITIES:
+                            frame_like.append(c)
+                            _in_fl_h.add(id(c))
+                            _h_added.append(c)
+                    if _h_added:
+                        pass_feature_count = len(frame_like)
+                        _sizes_h = ', '.join(
+                            '%.0fx%.0f' % (c['width'], c['height']) for c in _h_added)
+                        safe_log(f"  [条件H·主导比例内容救援] 补入 {len(_h_added)} 个"
+                                 f"同主导比例且框内内容丰富的矩形: {_sizes_h}")
+
         # ---------- 外层包裹框识别（优化点1） ----------
         # 场景：几张图框外面又画了一个大框，把多个图框包在里面。这种大框会被当成图框，
         # 且去重时会把内部真图框当嵌套物剔掉（去重方向"留大剔小"正好反了）。
@@ -1566,6 +1897,20 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             """剔除"外层包裹框"：内部包含 ≥ MIN_WRAPPED_FRAMES 个其他图框候选的大框"""
             if len(cands) <= 2:
                 return cands, 0
+            # 主导模板比例（2026-09-14，春风公寓2）：同 layout 内 ≥3 个候选共享的
+            # ratio（±1% 聚类）。用途：见下方"主导比例内容区边界"判定。
+            _wrap_dominant = {}
+            _wrap_ratios = {}
+            for _c in cands:
+                _wrap_ratios.setdefault(_c['layout'], []).append(_c['ratio'])
+            for _ln, _rs in _wrap_ratios.items():
+                _s = set()
+                for _r in set(_rs):
+                    # 与条件H 同口径的 ±0.5% 聚类（防近邻比例混簇，见 COND_H_RATIO_TOL 注）
+                    if sum(1 for _x in _rs if abs(_x - _r) / _r <= 0.005) >= 3:
+                        _s.add(_r)
+                if _s:
+                    _wrap_dominant[_ln] = _s
             # 按 layout 分组，组内判断包含（不同 layout 不在同一坐标系）
             layout_groups = {}
             for idx, c in enumerate(cands):
@@ -1619,8 +1964,30 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                 break
                         if not placed:
                             groups.append([ic, 1])
+                    # 主导比例内容区边界判定（2026-09-14，春风公寓2 16→21）：
+                    #   虚线层 67627×31514 ratio 2.146 内容区边界包住 1 张 26000×18000
+                    #   （ratio 1.4444 主导模板）真页框 + 其 25600×17600 内框（同一尺寸组），
+                    #   旧规则"组数≥2 或 同组≥3"都不满足 → 包裹框漏剔 → 去重"留大剔小"
+                    #   把真页框吃了。补判据：某尺寸组的比例命中主导模板比例（±1%）
+                    #   且与外框自身比例差异 >10%（排除同框重复画法——重复画法比例必
+                    #   与外框一致）→ 该外框是"内容区边界"而非图框，剔除。
+                    #   decoy 校验：标题栏小框比例（竖向 2~3）不命中主导横版比例，
+                    #   且面积通常 <50%×外框也不会进 inners……即便进组，其比例与主导
+                    #   模板比例不同，不触发。真·加长图框（ratio 2.0 左右）内部只有
+                    #   同比例重复画法，比例差 <10% 不触发。
+                    _dom_hit = False
+                    _drs_w = _wrap_dominant.get(layout_name, set())
+                    if _drs_w and os.environ.get('FRAME_PARSER_NO_WRAP_DOM') != '1':
+                        _big_r = max(big['width'], big['height']) / min(big['width'], big['height'])
+                        for g in groups:
+                            _gr = max(g[0]['width'], g[0]['height']) / min(g[0]['width'], g[0]['height'])
+                            if (any(abs(_gr - _dr) / _dr <= 0.005 for _dr in _drs_w)
+                                    and abs(_gr - _big_r) / _big_r > 0.10):
+                                _dom_hit = True
+                                break
                     if (len(groups) >= MIN_WRAPPED_FRAMES or
-                            any(g[1] >= MIN_WRAPPED_SAME_SIZE for g in groups)):
+                            any(g[1] >= MIN_WRAPPED_SAME_SIZE for g in groups) or
+                            _dom_hit):
                         remove_set.add(i)
                         inner_desc = "; ".join(f"{g[0]['width']:.0f}x{g[0]['height']:.0f}×{g[1]}" for g in groups)
                         safe_log(f"  [包裹框剔除] {big['layout']} | {big['width']:.1f}x{big['height']:.1f} | 独立尺寸组{len(groups)} | bbox={big['bbox']} | 组: {inner_desc}")

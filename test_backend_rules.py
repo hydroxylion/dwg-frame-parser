@@ -8,6 +8,7 @@
   5. 正方形垃圾边界：smart 模式拒绝（触发前端 force_max 重试链路）
   6. rel 分母塌缩防护：整图即图框时内部构件不得入选（运煤胶带机.dwg）
   7. 布局空间网格图框救援 + 布局空间优先：布局空间成版页框识别（DS4 四层阁楼平面系统图）
+  8. 条件G 同模板缩放套图救援：带标题栏条纹的同比例小尺寸实例救回（胜利公寓２）
 """
 import io
 import sys
@@ -497,6 +498,137 @@ check('布局空间优先: 模型空间候选被整体剔除 (smart)', lambda: p
       lambda r: r['frame_count'] == 6
       and r['frame_counts_by_layout'] == {'布局 "布局1"': 6}
       and (r['width'], r['height']) == (434, 311))
+
+# ---- 用例 31：条件G·同模板缩放套图救援——小尺寸实例带标题栏条纹被救回 ----
+# 场景复刻胜利公寓２：2 个大图框（26305×18450 直线矩形，rel=100% 过条件C）+
+#   1 个同比例小图框（6576×4613，ratio 同为 1.4257）。小框 rel=6.25% <10% 被 C 拒、
+#   短边 4613 >2000 被 B 拒、area_ratio <15% 被 A 拒 → 必须靠条件G：
+#   小框右侧画标题栏条纹（两条全高竖线围出带宽 11%×框宽 + 带内 2 条横向分隔线）
+#   → 条纹签名命中 + 与已入选大框同 ratio（±1%）→ 救援，fc=3。
+def build_scaled_sheets_doc(with_stripe):
+    doc = make_doc()
+    msp = doc.modelspace()
+    add_line_rect(msp, 0, 0, 26305, 18450)
+    add_line_rect(msp, 30000, 0, 26305, 18450)
+    sx, sy, sw, sh = 60000, 0, 6576, 4613
+    add_line_rect(msp, sx, sy, sw, sh)
+    if with_stripe:
+        bx0 = sx + sw * 0.89           # 条纹左边缘（带宽 11%×框宽）
+        # 条纹左竖线两端各缩进 1%（真实图纸标题栏竖线不与框边完全贯通，
+        # 否则会被 has_internal_divider 判为"拼合外包络"拒绝整框）
+        msp.add_line((bx0, sy + sh * 0.01), (bx0, sy + sh * 0.99))
+        # 右侧全高竖线 = 框边界本身（add_line_rect 已画），只需分隔横线
+        msp.add_line((bx0, sy + sh * 0.45), (sx + sw, sy + sh * 0.45))
+        msp.add_line((bx0, sy + sh * 0.75), (sx + sw, sy + sh * 0.75))
+    return to_bytes(doc)
+
+check('条件G同模板套图: 带标题栏条纹的小尺寸实例被救回 (smart)',
+      lambda: parse(build_scaled_sheets_doc(True)),
+      lambda r: r['frame_count'] == 3
+      and r['frame_counts_by_layout'] == {'模型空间': 3})
+
+# ---- 用例 32：条件G边界——无条纹结构不救援 ----
+# 与用例 31 唯一变量是"小框是否画了标题栏条纹"：无条纹 → 结构签名不成立，
+#   小框仍被 A/B/C/D 全通道否决 → fc=2（防"同 ratio 就放行"的过度救援）
+check('条件G同模板套图: 无条纹的同比例小框不救援 (smart)',
+      lambda: parse(build_scaled_sheets_doc(False)),
+      lambda r: r['frame_count'] == 2
+      and (r['width'], r['height']) == (26305, 18450))
+
+# ---- 用例 33：条件H·主导比例内容救援——小尺寸实例框内内容丰富被救回 ----
+# 场景复刻春风公寓２：4 个 26000×18000 闭合多段线图框（ratio 1.4444，rel=100%
+#   全过条件C → 主导比例成立）+ 1 个同比例小框（5200×3600，ratio 1.4444）。
+#   小框 rel=4% <10% 被 C 拒、area_ratio 极小被 A 拒、短边 3600 >2000 被 B 拒、
+#   非直线矩形 D 不适用、无条纹 G 不命中 → 必须靠条件H：比例命中主导模板
+#   （±1%）+ 框内完全包含 ≥12 个实体（真页面框内必有图纸内容）→ 救援，fc=5。
+#   远端散点把 layout 总面积拉大（压低 area_ratio，模拟真实图纸的内容散布）。
+def build_dominant_ratio_doc(small_inside_frame):
+    doc = make_doc()
+    msp = doc.modelspace()
+    for _i in range(4):
+        add_closed_rect(msp, _i * 30000, 0, 26000, 18000)
+    if small_inside_frame:
+        # decoy：与用例 33 唯一变量是位置——小框画在第一个已入选图框内部
+        # （防护栏：已被已入选图框包住的候选不救援）→ fc=4
+        sx, sy = 2000, 2000
+    else:
+        sx, sy = 130000, 0
+    add_closed_rect(msp, sx, sy, 5200, 3600)
+    for _k in range(12):   # 框内 12 条短线（图纸内容；竖线错位不成矩形）
+        msp.add_line((sx + 100 + _k * 400, sy + 100),
+                     (sx + 100 + _k * 400, sy + 300 + (_k % 3) * 200))
+    msp.add_line((400000, 50000), (400100, 50100))   # 远端散点拉大总面积
+    return to_bytes(doc)
+
+check('条件H主导比例: 框内内容丰富的同比例小框被救回 (smart)',
+      lambda: parse(build_dominant_ratio_doc(False)),
+      lambda r: r['frame_count'] == 5
+      and r['frame_counts_by_layout'] == {'模型空间': 5})
+
+# ---- 用例 34：条件H边界——已被已入选图框包住的候选不救援 ----
+# 同一小框放进 26000 图框内部：嵌套去重本会剔掉它，救援只是噪音且有虚增风险
+#   （春风公寓２ 实证：1280×1850 虚线窗套 decoy）→ 防护栏跳过 → fc=4
+check('条件H主导比例: 已入选图框内部的同比例小框不救援 (smart)',
+      lambda: parse(build_dominant_ratio_doc(True)),
+      lambda r: r['frame_count'] == 4
+      and (r['width'], r['height']) == (26000, 18000))
+
+# ---- 用例 35：包裹框剔除·主导比例——内容区边界包住单个真页框时剔外留内 ----
+# 场景复刻春风公寓２：67627×31514（ratio 2.146，虚线内容区边界，rel=100% 过
+#   条件C）包住 1 张 26000×18000 主导页框。旧规则"组数≥2 或 同组≥3"都不满足
+#   → 包裹框漏剔 → 去重"留大剔小"把真页框吃了（主框错误地取 67627×31514）。
+#   新判据：内部尺寸组比例命中主导模板（±1%）且与外框比例差 >10% → 剔外框。
+#   断言主框 = 26000×18000（基线行为下主框会是 67627×31514）。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 0, 0, 67627, 31514)          # 内容区边界（ratio 2.146）
+add_closed_rect(msp, 2000, 2000, 26000, 18000)    # 被包住的真页框
+for _i in range(3):
+    add_closed_rect(msp, 80000 + _i * 30000, 0, 26000, 18000)
+data = to_bytes(doc)
+check('包裹框主导比例: 内容区边界被剔、内部真页框保留 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 4
+      and (r['width'], r['height']) == (26000, 18000))
+
+# ---- 用例 36：INSERT rotation 单位是「度」——cos/sin 必须先转弧度（胜利公寓２ 马桶块教训） ----
+# 块定义 297×210（A4 横版），以 rot=90、scale=10 插入。真实世界 bbox：
+#   R(90°)·S·p = (−y, x)，四角 (0,0)(2970,0)(2970,2100)(0,2100) → (0,0)(0,2970)(−2100,2970)(−2100,0)
+#   + insert(100000,100000) → bbox=(97900,100000)-(100000,102970)，尺寸 2100×2970。
+# 旧实现把 90（度）直接喂给 math.cos（按弧度解释≈-0.448/0.894，相当于转 116.6°），
+# bbox 尺寸/位置全错（胜利公寓２ 马桶块 500×750 rot=180 被算成 900×850、飞出 100 万 mm）。
+doc = make_doc()
+msp = doc.modelspace()
+_blk = doc.blocks.new(name='FRAME_ROT90')
+add_closed_rect(_blk, 0, 0, 297, 210)
+msp.add_blockref('FRAME_ROT90', (100000, 100000), dxfattribs={'rotation': 90, 'xscale': 10, 'yscale': 10})
+data = to_bytes(doc)
+def _check_rot_insert(r):
+    c = r['candidates'][0]
+    bx1, by1, bx2, by2 = c['bbox']
+    return (c['width'], c['height']) == (2100, 2970) \
+        and (round(bx1), round(by1), round(bx2), round(by2)) == (97900, 100000, 100000, 102970)
+check('INSERT旋转: rot=90 度→弧度换算后 bbox 与 DXF 规范一致 (smart)',
+      lambda: parse(data), _check_rot_insert)
+
+# ---- 用例 37：非零块基点——p_world = insert + R·S·(p − base) 的 base 必须减掉 ----
+# 同块但几何画在 (500,500)-(797,710)、base_point=(500,500)：世界 bbox 应与
+# "几何绕原点画 + 基点 0" 完全等价（2100×2970 @ (97900,100000)）。
+# 旧实现不减基点 → bbox 平移 base×scale×旋转，位置错 21 万 mm 以上。
+doc = make_doc()
+msp = doc.modelspace()
+_blk = doc.blocks.new(name='FRAME_BASE')
+add_closed_rect(_blk, 500, 500, 297, 210)
+_blk.block.dxf.base_point = (500, 500, 0)
+msp.add_blockref('FRAME_BASE', (100000, 100000), dxfattribs={'rotation': 90, 'xscale': 10, 'yscale': 10})
+data = to_bytes(doc)
+def _check_base_insert(r):
+    c = r['candidates'][0]
+    bx1, by1, bx2, by2 = c['bbox']
+    return (c['width'], c['height']) == (2100, 2970) \
+        and (round(bx1), round(by1), round(bx2), round(by2)) == (97900, 100000, 100000, 102970)
+check('INSERT基点: 非零 base_point 被正确扣除 (smart)',
+      lambda: parse(data), _check_base_insert)
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)
