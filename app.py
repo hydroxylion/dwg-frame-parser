@@ -1150,6 +1150,25 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         _aligned_log = []
         _a_series_protected = []  # 白名单保护（图框类块，不参与对齐剔除）
         _rm_idx = set()
+        # 第一遍：先收集所有命中 A系列/√2 保护的图框块短边 →
+        #   "同模板短边保护"用（2026-09-14，1号2号楼柱平法施工图）：
+        #   同一套图的图框块常存在新旧版本（template_院标准图框_a0 与
+        #   ..._a020221031172552，图框本体同为 841×1189@150），新版本块内多贴了
+        #   参照标签等外溢内容 → bbox 高被撑到 222937（ratio 1.767），√2 保护
+        #   失效 → 3 个实例被当装饰阵列剔除 → 漏 3 张图框。信号：真图框是同
+        #   模板复制，其**短边与已保护图框块的短边一致（±1%）**——装饰块
+        #   （柱 700×1215 等）短边不会恰好等于图框短边。
+        _frame_short_sides = set()
+        for _bn, _grp in _bn_groups.items():
+            if len(_grp) < 3:
+                continue
+            _s0 = candidates[_grp[0]]
+            _s0min = min(_s0['width'], _s0['height'])
+            _s0max = max(_s0['width'], _s0['height'])
+            if _is_standard_a_series(_s0['width'], _s0['height']):
+                _frame_short_sides.add(_s0min)
+            elif _s0min > 0 and abs(_s0max / _s0min - _math.sqrt(2)) / _math.sqrt(2) <= 0.10:
+                _frame_short_sides.add(_s0min)
         for _bn, _grp in _bn_groups.items():
             if len(_grp) < 3:
                 continue
@@ -1166,6 +1185,12 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             _s_max = max(_sample['width'], _sample['height'])
             if _s_min > 0 and abs(_s_max / _s_min - _math.sqrt(2)) / _math.sqrt(2) <= 0.10:
                 _a_series_protected.append(f"{_bn}({len(_grp)}个,{_sample['width']:.0f}x{_sample['height']:.0f},ratio{_s_max/_s_min:.3f})")
+                continue
+            # 同模板短边保护：短边与已保护图框块的短边一致（±1%）→ 视为同套
+            #   图框的另一版本（bbox 被块内外溢内容撑大），不剔除。
+            if _s_min > 0 and any(abs(_s_min - _fs) / _fs <= 0.01 for _fs in _frame_short_sides):
+                _a_series_protected.append(
+                    f"{_bn}({len(_grp)}个,{_sample['width']:.0f}x{_sample['height']:.0f},短边{_s_min:.0f}同图框族)")
                 continue
             _ctr = [((candidates[_i]['bbox'][0]+candidates[_i]['bbox'][2])/2,
                      (candidates[_i]['bbox'][1]+candidates[_i]['bbox'][3])/2) for _i in _grp]
@@ -1569,6 +1594,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             _at_least_sqrt2 = c['ratio'] >= _SQRT2 * 0.95
             # 条件A：面积占比达标
             if c['area_ratio'] >= 0.15:
+                c['_via'] = 'A'
                 return True
             # 条件 C：相对面积达标（跟单位无关，处理多图框同 layout 场景）
             #   必须在条件 B 之前：雅安类图纸短边超 2000 过不了B，但相对面积能过C。
@@ -1585,6 +1611,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     and c['ratio'] <= 2.5
                     and ((c['type'] == '直线矩形' and c['ratio'] >= LINE_RECT_C_RATIO_MIN)
                          or (c['type'] != '直线矩形' and _at_least_sqrt2))):
+                c['_via'] = 'C'
                 return True
             # 条件B：显式检测 + 短边在合理范围（绕过面积占比，适用于密集几何场景）
             #   + 尺寸规整：宽高都接近整数，过滤墙线交错产生的非整数闭合多段线轮廓
@@ -1602,6 +1629,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         abs(c['height'] - round(c['height'])) <= SIZE_ROUNDNESS_EPS and
                         _near_sqrt2 and
                         c['rel_area_ratio'] >= REL_AREA_THRESHOLD):
+                    c['_via'] = 'B'
                     return True
             # 条件D：同尺寸重复的 √2 直线矩形（套图小页框，绕过条件C 的 10% rel 门槛）
             #   直线矩形 + 长宽比接近 √2 + 同 layout 同尺寸 ≥2 份 + 相对面积 ≥1%
@@ -1612,6 +1640,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             if (c['type'] == '直线矩形' and c['short_side'] >= 500
                     and _near_sqrt2 and _rect_same_size >= 2
                     and c['rel_area_ratio'] >= 0.01):
+                c['_via'] = 'D'
                 return True
             # 条件E（A+ 通道）："块模板本身就是标准图幅" + 实例按常用制图比例等比缩放。
             #   场景：同一个标准图幅图框块被以多种比例重复插入（2.8米皮带线.DWG：块
@@ -1653,6 +1682,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                 _k_ok = True
                                 break
                         if _k_ok:
+                            c['_via'] = 'E'
                             return True
             return False
 
@@ -1865,6 +1895,149 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         safe_log(f"  [条件H·主导比例内容救援] 补入 {len(_h_added)} 个"
                                  f"同主导比例且框内内容丰富的矩形: {_sizes_h}")
 
+        # ---------- 条件I：表格内容页救援（2026-09-14） ----------
+        # 场景（香槟半岛 实际 27 / 检出 26）：「图纸目录」页画在图框条带下方——
+        #   闭合多段线外框 19945×15703，内部是一张规则表格（大量横线行 + 竖向
+        #   列分隔线 + 目录文字），ratio 1.2703 非 √2、非主导比例 1.418、rel 面
+        #   积小、无标题栏条纹 —— 条件A~H 全拒。
+        # 信号（通用）：图纸目录 / 材料表 / 设计说明这类"表格页"的共同结构是
+        #   外框内部存在**密集的水平表格行线 + 竖向列分隔线**。表格线常按单元格
+        #   分段绘制（目录框贯穿横线仅 3 条，但框内横线总数 59 / 竖线 13），
+        #   故按"框内横竖线总数"计数而非要求贯穿。立面图的楼层线数量远达不到
+        #   该密度；装饰性矩形内部不会有几十条正交线。
+        # 判据（全部满足才救）：
+        #   ① 宽、高 ≥ 5000mm（图框级，防家具/符号块）
+        #   ② ratio ∈ [FRAME_RATIO_MIN, FRAME_RATIO_MAX]（是"页"的形状）
+        #   ③ 未被任何已入选图框完全包住
+        #   ④ 框内水平 LINE ≥ 30 条（表格行）
+        #   ⑤ 框内竖直 LINE ≥ 6 条（列分隔）
+        _COND_I_ENABLED = os.environ.get('FRAME_PARSER_NO_COND_I') != '1'
+        if _COND_I_ENABLED and frame_like:
+            # 预收集各 layout 对象（表格线扫描用）
+            _lay_objs = {'模型空间': msp}
+            for _lname in {c['layout'] for c in all_candidates}:
+                if _lname != '模型空间' and _lname not in _lay_objs:
+                    try:
+                        _lay_objs[_lname] = doc.layouts.get(_lname.strip('"').strip('“”'))
+                    except Exception:
+                        pass
+
+            def _table_lines_in(_bb, _lay):
+                """统计完全落在 _bb 内部的水平/竖直 LINE 数（不分段长度）"""
+                _x1, _y1, _x2, _y2 = _bb
+                _tol = max(_x2 - _x1, _y2 - _y1) * 0.005   # 正交容差 0.5%
+                _nh = _nv = 0
+                _obj = _lay_objs.get(_lay)
+                if _obj is None:
+                    return 0, 0
+                for _e in _obj:
+                    if _e.dxftype() != 'LINE':
+                        continue
+                    try:
+                        _sx, _sy = _e.dxf.start.x, _e.dxf.start.y
+                        _ex, _ey = _e.dxf.end.x, _e.dxf.end.y
+                    except Exception:
+                        continue
+                    if not (_x1 <= _sx <= _x2 and _x1 <= _ex <= _x2 and
+                            _y1 <= _sy <= _y2 and _y1 <= _ey <= _y2):
+                        continue
+                    if abs(_sy - _ey) <= _tol:          # 水平线
+                        _nh += 1
+                    elif abs(_sx - _ex) <= _tol:        # 竖直线
+                        _nv += 1
+                return _nh, _nv
+
+            _in_fl_i = {id(c) for c in frame_like}
+            _i_added = []
+            for _c in all_candidates:
+                if id(_c) in _in_fl_i:
+                    continue
+                if _c['width'] < 5000 or _c['height'] < 5000:
+                    continue
+                if not (FRAME_RATIO_MIN <= _c['ratio'] <= FRAME_RATIO_MAX):
+                    continue
+                if any(_c['bbox'][0] >= _f['bbox'][0] - 1 and _c['bbox'][1] >= _f['bbox'][1] - 1 and
+                       _c['bbox'][2] <= _f['bbox'][2] + 1 and _c['bbox'][3] <= _f['bbox'][3] + 1
+                       for _f in frame_like):
+                    continue   # 被已入选框包住：是内部内容，不救
+                _nh, _nv = _table_lines_in(_c['bbox'], _c['layout'])
+                if _nh >= 30 and _nv >= 6:
+                    _c['rescued_by'] = 'table_page'
+                    frame_like.append(_c)
+                    _in_fl_i.add(id(_c))
+                    _i_added.append(_c)
+                    safe_log(f"   [条件I·表格内容页救援] {_c['type']} "
+                             f"{_c['width']:.0f}×{_c['height']:.0f}"
+                             f"（框内横线 {_nh} 条 / 竖线 {_nv} 条，判为表格页）")
+            if _i_added:
+                pass_feature_count = len(frame_like)
+
+        # ---------- 孤证复核（2026-09-14，一层.dwg 0 图框误检 4 个） ----------
+        # 场景：整张图没有任何图框（纯平面图 + 大样标注）。条件C 的 rel 分母是
+        # "layout 内最大候选"——当最大候选本身就是标注块（一层.dwg 电梯井道大样
+        # 外轮廓 12240×8770），其余 3 个标注块/矩形（7280×3440、3290×4775、
+        # 5160×2730）相对它都 ≥10%，全部经条件C 混入。
+        # 反向信号（通用）：真图框几乎从不"孤证"——同一张图里必能找到互证：
+        #   ① 同 layout 存在同尺寸副本（同模板拷贝，≥2 份）；
+        #   ② 存在同比例兄弟（±1%，同模板不同比例缩放，≥2 份）；
+        #   ③ 自带标题栏条纹（条件G 签名）；
+        #   ④ 内部完全包含带标题栏条纹的子候选（标题栏在框内 = 真页框。罗马都市
+        #     21121×14813 图框内含 174 个子候选、其中 2 个带条纹；一层.dwg 电梯
+        #     大样外轮廓内含候选 0 条纹）；
+        #   ⑤ 块名含"图框/frame"（设计者显式声明的图框块）。
+        # 而标注类轮廓（大样外框、图例框、说明框）通常尺寸比例各不相同、无条纹。
+        # 判据（全部满足才剔除）：
+        #   ① 仅经条件C 通过（_via == 'C'。A 是面积主导、B/D/E 本身就是强证据）；
+        #   ② area_ratio < 0.05（在 layout 里占比很小——大图框经 A 通道早走，
+        #     rel≥10% 但 area_ratio≥5% 的候选保留，避免误伤依赖纯 C 的真页框）；
+        #   ③ 无任何互证（同尺寸副本 / 同比例兄弟 / 标题栏条纹均无）。
+        _SOLO_RECHECK_ENABLED = os.environ.get('FRAME_PARSER_NO_SOLO_RECHECK') != '1'
+        if _SOLO_RECHECK_ENABLED and frame_like:
+            _solo_rm = []
+            for _c in frame_like:
+                if _c.get('_via') != 'C' or _c['area_ratio'] >= 0.05:
+                    continue
+                _corr = False
+                for _o in frame_like:
+                    if _o is _c or _o['layout'] != _c['layout']:
+                        continue
+                    # 互证①：同尺寸副本（取整后宽高一致）
+                    if (round(_o['width']) == round(_c['width'])
+                            and round(_o['height']) == round(_c['height'])):
+                        _corr = True
+                        break
+                    # 互证②：同比例兄弟（±1%）
+                    if abs(_o['ratio'] - _c['ratio']) / _c['ratio'] <= 0.01:
+                        _corr = True
+                        break
+                # 互证③：标题栏条纹（采集阶段已标记在直线矩形候选上）
+                if not _corr and _c.get('title_stripe'):
+                    _corr = True
+                # 互证④：内部完全包含带条纹的子候选（标题栏在框内）
+                if not _corr:
+                    for _o in all_candidates:
+                        if _o is _c or not _o.get('title_stripe'):
+                            continue
+                        _ob = _o['bbox']
+                        if (_ob[0] >= _c['bbox'][0] - 1 and _ob[1] >= _c['bbox'][1] - 1 and
+                                _ob[2] <= _c['bbox'][2] + 1 and _ob[3] <= _c['bbox'][3] + 1):
+                            _corr = True
+                            break
+                # 互证⑤：块名含"图框/frame"（设计者显式声明的图框块）
+                if not _corr:
+                    _bn5 = (_c.get('block_name') or '').lower()
+                    if '图框' in _bn5 or 'frame' in _bn5:
+                        _corr = True
+                if not _corr:
+                    _solo_rm.append(_c)
+            if _solo_rm:
+                _rm_desc = ', '.join('%.0fx%.0f' % (c['width'], c['height']) for c in _solo_rm)
+                _solo_ids = {id(c) for c in _solo_rm}
+                frame_like = [c for c in frame_like if id(c) not in _solo_ids]
+                all_candidates = [c for c in all_candidates if id(c) not in _solo_ids]
+                safe_log(f"  [孤证复核] 剔除 {len(_solo_rm)} 个仅凭相对面积混入、"
+                         f"无同尺寸/同比例/标题栏互证的候选: {_rm_desc}")
+
         # ---------- 外层包裹框识别（优化点1） ----------
         # 场景：几张图框外面又画了一个大框，把多个图框包在里面。这种大框会被当成图框，
         # 且去重时会把内部真图框当嵌套物剔掉（去重方向"留大剔小"正好反了）。
@@ -1921,10 +2094,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     continue
                 for i in indices:
                     big = cands[i]
-                    # INSERT 块参照是图框的常见画法（一张图就一个图框），不应被当包裹框——
-                    # 其内部的标题栏/家具/房间小矩形尺寸组数多，会被错判为"内含多个图框"。
-                    if big.get('type') == '块参照插入':
-                        continue
+                    # （块参照豁免见下方 groups 计算之后——需先统计内部尺寸组）
                     # 自身为 √2±10% 的显式矩形（闭合多段线/直线矩形）→ 是"纸张边框"而非拼版外框，
                     # 不做包裹剔除，其内部内容（表格/标题栏/内圈线）交给嵌套去重收掉。
                     #   场景：泛悦国际 图纸目录.dwg——真图框是 PUB_TITLE 图层双层框
@@ -1964,6 +2134,20 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                 break
                         if not placed:
                             groups.append([ic, 1])
+                    # 块参照豁免收紧（2026-09-14，1号2号楼柱平法施工图）：原先对
+                    # "块参照插入"一律豁免包裹剔除（当年理由：单页图框块内部常有
+                    # 标题栏/家具小矩形，会被错判）。但"底图参照外框"同样是块——
+                    # S-0-COLS 630801×2407287（占整图 76%）包住 11 个真图框，
+                    # 豁免导致包裹剔除失效 → 嵌套去重"留大剔小"把真图框全吃了。
+                    # 改为强证据豁免：块参照仅在"内部尺寸组弱"时豁免（组数 <3 且
+                    # 无同尺寸组 ≥3）——单页图框块内部至多 1~2 个小尺寸组；底图
+                    # 外框内部必有 ≥3 个同尺寸真图框（本例 126164×178350 ×5）或
+                    # ≥3 个独立尺寸组。
+                    if big.get('type') == '块参照插入':
+                        _grp_n = len(groups)
+                        _same_n = max((g[1] for g in groups), default=0)
+                        if _grp_n < 3 and _same_n < MIN_WRAPPED_SAME_SIZE:
+                            continue
                     # 主导比例内容区边界判定（2026-09-14，春风公寓2 16→21）：
                     #   虚线层 67627×31514 ratio 2.146 内容区边界包住 1 张 26000×18000
                     #   （ratio 1.4444 主导模板）真页框 + 其 25600×17600 内框（同一尺寸组），
@@ -2129,7 +2313,11 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                          f"网格排版图纸页 → 剔除模型空间候选 {_before - len(frame_like)} 个"
                          f"（模型空间仅为页面内容源，其大框不是图框）")
 
-        frame_count = len(frame_like) if frame_like else len(all_candidates)
+        # frame_count 只统计"像图框"的候选数。旧写法在 frame_like 为空时兜底成
+        # len(all_candidates)，导致真·无图框图纸（如 一层.dwg，全是家具/构件小矩形）
+        # 在 smart 模式报"未检测到图框"→ 前端自动 force_max 重试 → 页面显示
+        # frame_count=401（其实是全量候选数），严重误导。无图框就如实报 0。
+        frame_count = len(frame_like)
 
         # ---------- 按布局分组图框数 ----------
         # frame_count 是模型空间 + 所有布局空间的合计；此处按 layout 字段分开统计
@@ -2156,7 +2344,9 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 'height': round(height),
                 'frame_count': frame_count,
                 'frame_counts_by_layout': frame_counts_by_layout,
-                'candidates': build_payload(frame_like if frame_like else all_candidates),
+                # 与 frame_count 同源同量：frame_like 为空时明细也应为空，
+                # 避免"0 个图框 + 401 行明细"的自相矛盾展示。
+                'candidates': build_payload(frame_like),
                 'xref_warnings': xref_warnings,
             }
 
@@ -2239,11 +2429,16 @@ def index():
 
 @app.route('/<path:filename>')
 def static_files(filename):
-    """托管前端引用的 app.js、style.css 等静态文件。"""
-    allowed = {'app.js', 'style.css'}
-    if filename not in allowed:
-        return '', 404
-    return send_from_directory('.', filename)
+    """托管前端引用的静态文件。
+
+    白名单原本只有 app.js/style.css——vendor/xlsx-style.bundle.js（Excel 导出
+    组件，2026-09-11 引入 index.html）被 404 拦截，页面 XLSX 全局未定义，
+    导出全部 Excel 时弹"Excel 导出组件未加载"。vendor/ 下整体放行
+    （send_from_directory 自带路径穿越防护），其余仍拒绝。
+    """
+    if filename in {'app.js', 'style.css'} or filename.startswith('vendor/'):
+        return send_from_directory('.', filename)
+    return '', 404
 
 
 @app.route('/upload', methods=['POST'])

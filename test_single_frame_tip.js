@@ -194,5 +194,36 @@ check('单框锚点标题提示为「点击」', /点击查看图框来源空间
 check('再次点击同一锚点即关闭',
     /this === tipAnchorEl\)\s*\{\s*hideTip\(\);/.test(src), true);
 
+console.log('\n=== 8. frame_count=0 合法透传（一层.dwg 401 误报修复）===');
+// 与 app.js 上传路径等价：0 是合法结果，不能兜底成 1
+function resolveFrameCount(data, candidates) {
+    return (typeof data.frame_count === 'number' && data.frame_count >= 0)
+        ? data.frame_count
+        : (candidates.length || 1);
+}
+check('后端 frame_count=0 如实透传', resolveFrameCount({ frame_count: 0 }, []), 0);
+check('字段缺失时按 candidates 数兜底', resolveFrameCount({}, [{}, {}, {}]), 3);
+check('字段与候选都缺失时兜底 1', resolveFrameCount({}, []), 1);
+// 与 app.js addRecord 等价：仅 framesInfo 缺失才默认 1
+function addRecordFrameCount(framesInfo) {
+    return (framesInfo && typeof framesInfo.frameCount === 'number') ? framesInfo.frameCount : 1;
+}
+check('addRecord 保留 frameCount=0', addRecordFrameCount({ frameCount: 0 }), 0);
+check('addRecord 无 framesInfo 兜底 1', addRecordFrameCount(undefined), 1);
+// 与 app.js 渲染分支等价：0 显示数字，字段缺失显示 —
+function renderFrameCountCell(frameCount) {
+    const hasFrameCount = typeof frameCount === 'number' && frameCount >= 0;
+    return hasFrameCount ? String(frameCount) : '—';
+}
+check('渲染 frameCount=0 显示 "0"', renderFrameCountCell(0), '0');
+check('渲染字段缺失显示 "—"', renderFrameCountCell(undefined), '—');
+// 导出路径：0 也如实导出
+function exportFrameCount(rec) { return (typeof rec.frameCount === 'number') ? rec.frameCount : 1; }
+check('导出 frameCount=0 如实导出', exportFrameCount({ frameCount: 0 }), 0);
+// 源码级护栏：防止回退成 "|| 1" / "> 0" 旧写法
+check('上传路径已用 >= 0 判定', /data\.frame_count === 'number' && data\.frame_count >= 0/.test(src), true);
+check('addRecord 已用 typeof 判定', /framesInfo && typeof framesInfo\.frameCount === 'number'/.test(src), true);
+check('渲染分支已用 >= 0 判定', /typeof rec\.frameCount === 'number' && rec\.frameCount >= 0/.test(src), true);
+
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);

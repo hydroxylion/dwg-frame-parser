@@ -590,7 +590,10 @@ async function parseSingleFile(file) {
             const name = file.relativePath || file.name.replace(/\.[^.]+$/, '');
             // 多图框信息：后端返回本次检测到的全部图框候选 + 按布局分组的图框数
             const candidates = Array.isArray(data.candidates) ? data.candidates : [];
-            const frameCount = (typeof data.frame_count === 'number' && data.frame_count > 0)
+            // frame_count=0 是合法结果（真·无图框图纸，如 一层.dwg）：必须如实
+            // 透传，不能当无效值兜底成 1，否则气泡"共 0 个"与主界面"1 个"不同步。
+            // 兜底链：字段缺失（旧后端）→ 按 candidates 数 → 手动/异常场景 → 1。
+            const frameCount = (typeof data.frame_count === 'number' && data.frame_count >= 0)
                 ? data.frame_count
                 : (candidates.length || 1);
             const layoutCounts = (data.frame_counts_by_layout
@@ -869,7 +872,11 @@ function formatLayoutCountsText(layoutCounts) {
 function addRecord(w, h, result, name, path, framesInfo) {
     const framePct = result.confidenceFrame !== undefined ? (result.confidenceFrame * 100).toFixed(1) : '';
     const scalePct = result.confidenceScale !== undefined ? (result.confidenceScale * 100).toFixed(1) : '';
-    const frameCount = (framesInfo && framesInfo.frameCount) || 1;
+    // 0 是合法图框数（真·无图框），不能用 || 1 吞掉；仅 framesInfo 缺失
+    // （手动输入等场景，默认按 1 框处理）时才兜底为 1。
+    const frameCount = (framesInfo && typeof framesInfo.frameCount === 'number')
+        ? framesInfo.frameCount
+        : 1;
     const candidates = (framesInfo && framesInfo.candidates) || [];
     // 布局分布优先用后端 frame_counts_by_layout；字段缺失（旧后端/旧记录）时按
     // candidates 的 layout 自行聚合兜底，保证"模型空间几个/布局几个"始终可展示
@@ -1050,7 +1057,9 @@ function renderRecords() {
         // 注意：tipAttrs 只含 data-* 属性，class 由各分支自行拼装——绝不能把
         // class 写进来，否则与外层 class 重复生成两个 class 属性，浏览器只认
         // 第一个，tip-anchor 会被丢弃导致事件绑不上（气泡打不开）。
-        const hasFrameCount = rec.frameCount && rec.frameCount > 0;
+        // frameCount=0 也是有效检测结果（真·无图框），要显示 "0" 而非 "—"；
+        // "—" 只留给手动输入/失败记录（frameCount 字段缺失）。
+        const hasFrameCount = typeof rec.frameCount === 'number' && rec.frameCount >= 0;
         const tipAttrs = `data-frames="${escHtml(rec.framesText || '')}" data-all="${escHtml(rec.framesAll || rec.framesText || '')}" data-layouts="${escHtml(JSON.stringify(rec.layoutCounts || {}))}" data-primary-layout="${escHtml(rec.primaryLayout || '')}"`;
         let frameCountHtml = '—';
         if (hasFrameCount) {
@@ -1471,7 +1480,7 @@ function buildExportTable(data) {
     const rows = data.map((rec, idx) => [
         idx + 1,
         rec.name || '',
-        (rec.frameCount && rec.frameCount > 0) ? rec.frameCount : 1,
+        (typeof rec.frameCount === 'number') ? rec.frameCount : 1,
         buildFramesLayoutText(rec),
         buildFramesDimText(rec),
         (rec.w && rec.w > 0) ? rec.w : '',

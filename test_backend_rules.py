@@ -630,5 +630,116 @@ def _check_base_insert(r):
 check('INSERT基点: 非零 base_point 被正确扣除 (smart)',
       lambda: parse(data), _check_base_insert)
 
+# ---- 用例 38：条件I 表格内容页救援（香槟半岛：实际 27 / 检出 26） ----
+# 「图纸目录」页：闭合多段线外框 19945×15703（ratio 1.2703 非 √2、非主导、
+# rel 面积小、无标题栏）→ 条件A~H 全拒；内部是规则表格（密集横线行 +
+# 竖向列线）→ 条件I 依"框内横线 ≥30 且竖线 ≥6"救回。
+# 4 个同尺寸大图框 2×2 排列（过条件A），目录框画在旁边，fc 应为 5。
+doc = make_doc()
+msp = doc.modelspace()
+_bw, _bh = 40000, 28000
+for _i in range(2):
+    for _j in range(2):
+        add_line_rect(msp, _i * _bw, _j * _bh, _bw, _bh)
+# 目录框（外框闭合多段线 + 内部表格线）
+_cx, _cy = 90000, -30000
+add_closed_rect(msp, _cx, _cy, 19945, 15703)
+for _k in range(32):     # 32 条横线（表格行，完全在框内）
+    _yy = _cy + 200 + _k * 460
+    msp.add_line((_cx + 150, _yy), (_cx + 19945 - 150, _yy))
+for _k in range(7):      # 7 条竖线（列分隔）
+    _xx = _cx + 2400 + _k * 2400
+    msp.add_line((_xx, _cy + 150), (_xx, _cy + 15703 - 150))
+data = to_bytes(doc)
+check('条件I表格页: 图纸目录框被救回, fc=5 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 5
+      and any(abs(c['width'] - 19945) < 5 and abs(c['height'] - 15703) < 5
+              for c in r['candidates']))
+
+# ---- 用例 39：条件I 防护栏——表格框被已入选图框包住时不救援 ----
+# 内部表格框嵌在大图框里（是大图的插图内容）→ 条件I 不得救援，fc=1。
+doc = make_doc()
+msp = doc.modelspace()
+add_line_rect(msp, 0, 0, 40000, 28000)
+msp.add_line((45000, -1000), (46000, 1000))   # 框外小实体，撑开 layout 总 bbox
+add_closed_rect(msp, 5000, 3000, 8000, 6000)
+for _k in range(32):
+    _yy = 3200 + _k * 180
+    msp.add_line((5200, _yy), (12900, _yy))
+for _k in range(7):
+    _xx = 5600 + _k * 900
+    msp.add_line((_xx, 3200), (_xx, 8900))
+data = to_bytes(doc)
+check('条件I防护栏: 被包住的表格框不救援, fc=1 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1)
+
+# ---- 用例 40：包裹框剔除的块参照强证据（1号2号楼柱平法施工图） ----
+# 底图参照外框（INSERT 块 90000×180000）包住 4 个同尺寸直线矩形图框
+# （2×2 网格）。旧规则对"块参照插入"一律豁免包裹剔除 → 4 个真图框被嵌套
+# 去重"留大剔小"全吃掉，只剩底图外框（fc=1）。新规则：块参照在内部尺寸组
+# 强证据（同尺寸组 ≥3）时不再豁免 → 底图外框被剔，fc=4。
+doc = make_doc()
+msp = doc.modelspace()
+for _i in range(2):
+    for _j in range(2):
+        add_line_rect(msp, _i * 40000, _j * 86000, 39598, 28000)   # ratio≈√2
+_blk_w = doc.blocks.new(name='BASE_WRAP')
+add_closed_rect(_blk_w, 0, 0, 90000, 180000)
+msp.add_blockref('BASE_WRAP', (-1000, -1000))
+msp.add_line((100000, 0), (100500, 300))    # 框外小实体撑开 layout 总 bbox
+data = to_bytes(doc)
+check('包裹框强证据: 底图外框块被剔, 4 个真图框保留 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 4
+      and all(abs(c['width'] - 39598) < 5 for c in r['candidates']))
+
+# ---- 用例 41：孤证复核（一层.dwg：实际 0 图框，误检 4 个） ----
+# 无图框图纸（纯平面图+大样标注）：4 个尺寸比例各不相同的标注轮廓块
+# （12240×8770 / 7280×3440 / 3290×4775 / 5160×2730，ratio 两两相差 >1%，
+# 无同尺寸副本、无标题栏），靠条件C（rel≥10%，分母=最大候选 12240×8770
+# 本身也是标注块）全部混入。孤证复核：仅经 C 通过 + area_ratio<5% +
+# 无互证 → 全部剔除，fc=0。
+doc = make_doc()
+msp = doc.modelspace()
+_blk1 = doc.blocks.new(name='ANNO_BIG')
+add_closed_rect(_blk1, 0, 0, 12240, 8770)      # ratio 1.396
+msp.add_blockref('ANNO_BIG', (30000, 0))
+_blk2 = doc.blocks.new(name='ANNO_B2')
+add_closed_rect(_blk2, 0, 0, 7280, 3440)       # ratio 2.116
+msp.add_blockref('ANNO_B2', (50000, 0))
+_blk3 = doc.blocks.new(name='ANNO_B3')
+add_closed_rect(_blk3, 0, 0, 3290, 4775)       # ratio 1.451（竖向）
+msp.add_blockref('ANNO_B3', (62000, 0))
+add_line_rect(msp, 70000, 0, 75160, 2730)      # ratio 1.890 直线矩形
+msp.add_line((300000, 0), (300500, 300))       # 框外远端小实体撑大 layout bbox（压低 area_ratio）
+data = to_bytes(doc)
+check('孤证复核: 无图框图纸的标注轮廓全被剔, fc=0 (smart)',
+      lambda: expect_error_no_frame(data), lambda ok: ok)
+
+# ---- 用例 42：孤证复核防护栏——有同尺寸副本的候选不剔除 ----
+# 同用例 41 场景，但 12240×8770 画两份（同尺寸副本互证）→ 该对保留，
+# 其余 3 个孤证仍剔除，fc=2。
+doc = make_doc()
+msp = doc.modelspace()
+_blk1 = doc.blocks.new(name='ANNO_PAIR')
+add_closed_rect(_blk1, 0, 0, 12240, 8770)
+msp.add_blockref('ANNO_PAIR', (30000, 0))
+msp.add_blockref('ANNO_PAIR', (50000, 0))      # 同尺寸副本（间距拉开，避免嵌套/IoU 去重）
+_blk2 = doc.blocks.new(name='ANNO_B2x')
+add_closed_rect(_blk2, 0, 0, 7280, 3440)
+msp.add_blockref('ANNO_B2x', (70000, 0))
+_blk3 = doc.blocks.new(name='ANNO_B3x')
+add_closed_rect(_blk3, 0, 0, 3290, 4775)
+msp.add_blockref('ANNO_B3x', (82000, 0))
+add_line_rect(msp, 90000, 0, 95160, 2730)
+msp.add_line((300000, 0), (300500, 300))
+data = to_bytes(doc)
+check('孤证复核防护栏: 有同尺寸副本互证的候选保留, fc=2 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 2
+      and all(abs(c['width'] - 12240) < 5 for c in r['candidates']))
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)
