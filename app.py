@@ -2029,6 +2029,29 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     _bn5 = (_c.get('block_name') or '').lower()
                     if '图框' in _bn5 or 'frame' in _bn5:
                         _corr = True
+                # 互证⑥：内部完全包含另一个通过特征的不同尺寸候选（嵌套内外框）。
+                # 场景（四川自贡19）：封面是闭合多段线双线框（外 30443×20816 +
+                # 内 29243×19616，内占外面积 90.6%），非块、无条纹、唯一尺寸、
+                # ratio 1.4625 与主导 1.4082 不同——互证①~⑤全落空被误杀。
+                # 双线框是真封面/装订边框的典型结构；且二者面积接近（>50%），
+                # 不会被外层包裹框剔除接管，必须在此认定互证。
+                # 仅认"不同尺寸"的内含：同尺寸嵌套是同框重复画法，归互证①。
+                # 注意包装框剔除在本复核之后执行：内含 ≥2 个图框的大外包络
+                # 即便被⑥救下，随后仍会被 strip_wrapping_frames 正常剔除，
+                # 故⑥不会改变"外包络"类图纸的结果。
+                if not _corr:
+                    for _o in frame_like:
+                        if _o is _c or _o['layout'] != _c['layout']:
+                            continue
+                        if (round(_o['width']) == round(_c['width'])
+                                and round(_o['height']) == round(_c['height'])):
+                            continue  # 同尺寸副本是重复画法，不算嵌套互证
+                        _ob = _o['bbox']
+                        if (_ob[0] >= _c['bbox'][0] - 1 and _ob[1] >= _c['bbox'][1] - 1 and
+                                _ob[2] <= _c['bbox'][2] + 1 and _ob[3] <= _c['bbox'][3] + 1 and
+                                _o['area'] < _c['area']):
+                            _corr = True
+                            break
                 if not _corr:
                     _solo_rm.append(_c)
             if _solo_rm:

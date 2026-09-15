@@ -741,5 +741,29 @@ check('孤证复核防护栏: 有同尺寸副本互证的候选保留, fc=2 (sma
       lambda r: r['frame_count'] == 2
       and all(abs(c['width'] - 12240) < 5 for c in r['candidates']))
 
+# ---- 用例 43：孤证复核互证⑥——封面双线框（嵌套内外框）不剔除 ----
+# 四川自贡19 实证：封面是闭合多段线双线框（外 30443×20816 + 内 29243×19616，
+# 内占外面积 90.6%），非块、无条纹、唯一尺寸、ratio 1.4625 与图纸主导 1.4082
+# 不同——互证①~⑤全落空，外框被孤证复核误杀（fc 19→18）。
+# 构造：18 个 28331×20119 主导块（撑起主导比例与 C 的分母）+ 封面双线框。
+# 预期：外框经互证⑥（内含不同尺寸 frame_like 候选）保留，内框作为重复画法
+# 被剔，fc=19。
+doc = make_doc()
+msp = doc.modelspace()
+_blk_main = doc.blocks.new(name='SDSDFD')
+add_closed_rect(_blk_main, 0, 0, 28331, 20119)
+for _i in range(18):
+    msp.add_blockref('SDSDFD', (30000 + _i * 32000, 0))
+# 封面：外框 + 内框（双线，间距 ~600，面积比 90.6% 与实证一致）
+add_closed_rect(msp, 351791, -92918, 30443, 20816)   # 外框
+add_closed_rect(msp, 352391, -92318, 29243, 19616)   # 内框
+data = to_bytes(doc)
+check('孤证复核互证⑥: 封面双线框(嵌套内外框)保留, fc=19 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 19
+      and any(abs(c['width'] - 30443) < 5 and abs(c['height'] - 20816) < 5
+              for c in r['candidates'])
+      and not any(abs(c['width'] - 29243) < 5 for c in r['candidates']))
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)
