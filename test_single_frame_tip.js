@@ -225,5 +225,43 @@ check('上传路径已用 >= 0 判定', /data\.frame_count === 'number' && data\
 check('addRecord 已用 typeof 判定', /framesInfo && typeof framesInfo\.frameCount === 'number'/.test(src), true);
 check('渲染分支已用 >= 0 判定', /typeof rec\.frameCount === 'number' && rec\.frameCount >= 0/.test(src), true);
 
+// ---- 第 9 组：图框数筛选维度 + 解析后自动预勾选 ----
+console.log('\n—— 第 9 组：图框数筛选 + 自动预勾选 ——');
+
+// 与 app.js recordMatchesFilter 图框数维度等价：独立 AND 维度，无 frameCount 不匹配
+function matchFc(rec, fcActive) {
+    if (fcActive.length === 0) return true;
+    if (typeof rec.frameCount !== 'number') return false;
+    return fcActive.includes(rec.frameCount > 1 ? 'fcmany' : 'fc1');
+}
+check('未勾选图框数筛选 → 不做约束', matchFc({ frameCount: 3 }, []), true);
+check('仅勾单框 → fc=1 命中', matchFc({ frameCount: 1 }, ['fc1']), true);
+check('仅勾单框 → fc=3 不命中', matchFc({ frameCount: 3 }, ['fc1']), false);
+check('仅勾多框 → fc=3 命中', matchFc({ frameCount: 3 }, ['fcmany']), true);
+check('仅勾多框 → fc=1 不命中', matchFc({ frameCount: 1 }, ['fcmany']), false);
+check('两类都勾 → fc=0 也命中(fc1)', matchFc({ frameCount: 0 }, ['fc1', 'fcmany']), true);
+check('无 frameCount 的失败记录不命中任何图框数筛选', matchFc({ frameCount: undefined }, ['fc1', 'fcmany']), false);
+
+// 与 app.js maybeAutoPrecheck 等价：标准+单框+非混合 才预勾选
+function autoPrecheck(rec, toggleOn) {
+    if (!toggleOn || !rec) return false;
+    if (rec.type !== 'standard') return false;
+    if (rec.frameCount !== 1) return false;
+    if (rec.mixed) return false;
+    return true;
+}
+check('标准+单框 → 预勾选', autoPrecheck({ type: 'standard', frameCount: 1, mixed: false }, true), true);
+check('非标+单框 → 不勾', autoPrecheck({ type: 'nonstandard', frameCount: 1, mixed: false }, true), false);
+check('标准+多框 → 不勾', autoPrecheck({ type: 'standard', frameCount: 5, mixed: false }, true), false);
+check('标准+单框+混合 → 不勾', autoPrecheck({ type: 'standard', frameCount: 1, mixed: true }, true), false);
+check('开关关闭 → 不勾', autoPrecheck({ type: 'standard', frameCount: 1, mixed: false }, false), false);
+check('标准+0框 → 不勾', autoPrecheck({ type: 'standard', frameCount: 0, mixed: false }, true), false);
+
+// 源码级护栏：防止实现漂移
+check('app.js 存在 maybeAutoPrecheck 且上传路径调用', /const rec = addRecord\(w, h, result, name, filePath, \{ frameCount, candidates, layoutCounts \}\);\s*\n\s*maybeAutoPrecheck\(rec\);/.test(src), true);
+check('maybeAutoPrecheck 判定混合记录', /if \(isMixedRecord\(rec\)\) return;/.test(src), true);
+check('index.html 存在图框数筛选组', /id="fcFilterCheckboxes"/.test(fs.readFileSync(path.join(__dirname, 'index.html'), 'utf-8')), true);
+check('index.html 预勾选开关默认开启', /id="autoPrecheck" checked/.test(fs.readFileSync(path.join(__dirname, 'index.html'), 'utf-8')), true);
+
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);

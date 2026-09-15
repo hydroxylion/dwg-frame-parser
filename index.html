@@ -163,6 +163,20 @@
                     <input type="checkbox" value="mixed" checked data-page-node-id="Dtk5Dc987nOH6MG1ZFTqyO" /> ⚠️ 混合（多类型/多标准并存）
                 </label>
             </div>
+            <span class="filter-bar-sep" style="color:#cbd5e1;">|</span>
+            <label data-page-node-id="fcFilterGroupLabel">🖼 图框数：</label>
+            <div class="filter-checkboxes" id="fcFilterCheckboxes">
+                <label class="filter-option" title="按图框数筛选，可与类型筛选组合">
+                    <input type="checkbox" value="fc1" /> 单图框 (=1)
+                </label>
+                <label class="filter-option" title="按图框数筛选，可与类型筛选组合">
+                    <input type="checkbox" value="fcmany" /> 多图框 (&gt;1)
+                </label>
+            </div>
+            <span class="filter-bar-sep" style="color:#cbd5e1;">|</span>
+            <label class="filter-option" title="解析完成后，自动勾选本次新增记录中「类型=标准 且 图框数=1 且 非混合」的行，便于直接批量删除">
+                <input type="checkbox" id="autoPrecheck" checked /> ⚡ 解析后自动预勾选（标准+单框）
+            </label>
             <span class="filter-count" id="filterCount" data-page-node-id="NXGUx5VlLQAG3s4ERwl0Od">共 0 条</span>
         </div>
         <input type="file" id="importFileInput" accept=".csv" style="display:none;" data-page-node-id="RC4YkukeHExdPQ4TpZGerT" />

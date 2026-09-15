@@ -601,7 +601,8 @@ async function parseSingleFile(file) {
                 && Object.keys(data.frame_counts_by_layout).length > 0)
                 ? data.frame_counts_by_layout
                 : null;
-            addRecord(w, h, result, name, filePath, { frameCount, candidates, layoutCounts });
+            const rec = addRecord(w, h, result, name, filePath, { frameCount, candidates, layoutCounts });
+            maybeAutoPrecheck(rec);
             return true;
         } catch (err) {
             addFailedRecord(file.relativePath || file.name, err.message || '未知错误', filePath);
@@ -926,6 +927,7 @@ function addRecord(w, h, result, name, path, framesInfo) {
     records.push(record);
     saveRecords();
     renderRecords();
+    return record;
 }
 
 function deleteRecord(id) {
@@ -937,6 +939,18 @@ function deleteRecord(id) {
 
 // 批量勾选：被勾选记录的 id 集合（行勾选 / 表头全选共用）
 let selectedIds = new Set();
+
+// 解析完成后自动预勾选：本次新增记录中「类型=标准 且 图框数=1 且 非混合」的行
+// 直接加入勾选集，便于一键批量删除后对剩余数据单独分析。仅由上传成功路径调用
+// （手动输入 / CSV 导入 / 解析失败路径不触发），开关 #autoPrecheck 可随时关闭。
+function maybeAutoPrecheck(rec) {
+    const toggle = document.getElementById('autoPrecheck');
+    if (!toggle || !toggle.checked || !rec) return;
+    if (rec.type !== 'standard') return;
+    if (rec.frameCount !== 1) return;
+    if (isMixedRecord(rec)) return;
+    selectedIds.add(rec.id);
+}
 
 // 更新表头全选框与批量删除按钮状态
 function updateBatchUI() {
@@ -978,16 +992,39 @@ function getActiveFilters() {
     return active;
 }
 
+// 获取当前选中的图框数筛选列表（fc1=单图框 / fcmany=多图框，独立于类型筛选的维度）
+function getActiveFcFilters() {
+    const active = [];
+    document.querySelectorAll('#fcFilterCheckboxes input[type="checkbox"]').forEach(cb => {
+        if (cb.checked) active.push(cb.value);
+    });
+    return active;
+}
+
 // 判断记录是否匹配当前筛选
 function recordMatchesFilter(rec) {
     const activeFilters = getActiveFilters();
-    if (activeFilters.length === 0) return true; // 无选中则显示全部
-    // "混合"是附加维度：勾选时混合记录直接命中（其主导类型可能仍是 standard 等）。
-    // 未勾选"混合"时，混合记录仍按主导类型参与原 4 类过滤，不破坏现有分类视图。
-    if (activeFilters.includes('mixed') && isMixedRecord(rec)) return true;
-    const recType = getRecordType(rec);
-    return activeFilters.includes(recType);
+    if (activeFilters.length > 0) {
+        // "混合"是附加维度：勾选时混合记录直接命中（其主导类型可能仍是 standard 等）。
+        // 未勾选"混合"时，混合记录仍按主导类型参与原 4 类过滤，不破坏现有分类视图。
+        if (activeFilters.includes('mixed') && isMixedRecord(rec)) return true;
+        const recType = getRecordType(rec);
+        if (!activeFilters.includes(recType)) return false;
+    }
+    // 图框数维度：独立于类型筛选（AND 交集）。未勾选任何图框数项时不做约束。
+    // 无 frameCount 的记录（手动输入/解析失败/旧记录导入）不匹配任何图框数筛选。
+    const fcActive = getActiveFcFilters();
+    if (fcActive.length > 0) {
+        if (typeof rec.frameCount !== 'number') return false;
+        if (!fcActive.includes(rec.frameCount > 1 ? 'fcmany' : 'fc1')) return false;
+    }
+    return true;
 }
+
+// 图框数筛选复选框变化时重新渲染
+document.querySelectorAll('#fcFilterCheckboxes input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener('change', renderRecords);
+});
 
 function getFilteredRecords() {
     return records.filter(r => recordMatchesFilter(r));
