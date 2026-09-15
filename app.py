@@ -2501,6 +2501,10 @@ def assert_port_free(port: int, host: str = '0.0.0.0'):
 if __name__ == '__main__':
     # 端口可通过环境变量 FLASK_PORT 配置（默认 5000），避免与其他本地项目冲突
     _port = int(os.environ.get('FLASK_PORT', '5000'))
-    assert_port_free(_port)
+    # debug=True 时 Werkzeug reloader 会 fork 子进程重跑本文件：此时父进程已
+    # 监听端口，子进程预检必然误报"端口被占用"。WERKZEUG_RUN_MAIN 仅在
+    # reloader 子进程中为 'true'——只在父进程（真正首次 bind 前）做预检。
+    if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
+        assert_port_free(_port)
     print(f' * 图框解析服务: http://127.0.0.1:{_port}  (换端口: set FLASK_PORT=端口号)')
     app.run(host='0.0.0.0', port=_port, debug=True)
