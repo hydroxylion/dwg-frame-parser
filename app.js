@@ -481,11 +481,13 @@ async function parseFiles(files) {
     if (isProcessing) return;
     if (!files || files.length === 0) return;
 
-    // 记录本批次全部文件的相对路径（供生成删除脚本时计算待删除清单）
+    // 记录本批次全部文件的相对路径（供生成删除脚本时计算待删除清单），并持久化，
+    // 刷新页面后无需重新拖入解析即可直接生成删除脚本
     for (const f of files) {
         const rel = (f.relativePath || f.name || '').split('/').join('\\');
         if (rel) scannedFiles.add(rel);
     }
+    saveScannedFiles();
 
     isProcessing = true;
     stopRequested = false;
@@ -708,11 +710,39 @@ btnRemoveFile.addEventListener('click', () => {
 // 5. 测试记录管理（含筛选、导入导出、生成删除脚本）
 // ================================================================
 const STORAGE_KEY = 'dwg_test_records';
+// 原始文件清单持久化键：scannedFiles 与记录分开存（清单是"扫描全集"，记录是"已解析子集"，
+// 批量停止/失败时两者不等，不能用记录反推全集）
+const SCANNED_FILES_KEY = 'dwg_scanned_files';
 let records = [];
 let recordIdCounter = 0;
 // 会话级"原始文件全集"：记录每次拖入/选择文件夹时扫描到的全部 DWG/DXF 相对路径（\ 分隔）。
 // 生成删除脚本时，用它减去"保留记录"得到精确的待删除清单。
+// 现已持久化到 localStorage——刷新页面后仍可直接生成删除脚本，无需重新拖入解析。
 const scannedFiles = new Set();
+let scannedFilesSavedAt = null; // 清单最近一次更新的时间（ISO 字符串），供提示展示
+
+function loadScannedFiles() {
+    try {
+        const stored = localStorage.getItem(SCANNED_FILES_KEY);
+        if (stored) {
+            const parsed = JSON.parse(stored);
+            if (parsed && Array.isArray(parsed.files)) {
+                parsed.files.forEach(f => { if (f) scannedFiles.add(String(f)); });
+                scannedFilesSavedAt = parsed.savedAt || null;
+            }
+        }
+    } catch (e) { console.warn('读取文件清单失败', e); }
+}
+
+function saveScannedFiles() {
+    try {
+        scannedFilesSavedAt = new Date().toISOString();
+        localStorage.setItem(SCANNED_FILES_KEY, JSON.stringify({
+            savedAt: scannedFilesSavedAt,
+            files: [...scannedFiles],
+        }));
+    } catch (e) { console.warn('保存文件清单失败', e); }
+}
 
 function loadRecords() {
     try {
@@ -1778,10 +1808,13 @@ document.getElementById('importFileInput').addEventListener('change', function(e
 
 document.getElementById('clearRecordsBtn').addEventListener('click', function() {
     if (records.length === 0) return;
-    if (confirm('确定清空所有测试记录吗？（本地存储中的数据也将被删除）')) {
+    if (confirm('确定清空所有测试记录吗？（本地存储中的数据也将被删除，\n同时会清空「原始文件清单」——之后生成删除脚本需重新拖入文件夹解析）')) {
         records = [];
         recordIdCounter = 0;
         selectedIds.clear();
+        scannedFiles.clear();
+        scannedFilesSavedAt = null;
+        try { localStorage.removeItem(SCANNED_FILES_KEY); } catch (_) {}
         saveRecords();
         renderRecords();
     }
@@ -1857,11 +1890,16 @@ document.getElementById('genScriptBtn').addEventListener('click', function() {
     const placeHint = topDirs.length === 1
         ? `请把两个文件放到「${topDirs[0]}」的上级目录（与「${topDirs[0]}」同级）后运行`
         : '请把两个文件放到包含以上所有路径的公共目录下运行';
+    // 清单来源提示：本次会话扫描的 or 从上次会话恢复的（含更新时间），提醒注意目录是否已变动
+    const listAgeHint = scannedFilesSavedAt
+        ? `（清单共 ${scannedFiles.size} 个文件，更新于 ${new Date(scannedFilesSavedAt).toLocaleString()}；若图纸目录此后有增删，请重新拖入文件夹解析一次以刷新清单）`
+        : `（清单共 ${scannedFiles.size} 个文件）`;
     const confirmed = confirm(
         `⚠️ 生成删除脚本前请确认\n\n` +
         `当前筛选结果（保留）：${filtered.length} 条记录\n` +
         `将删除 ${deleteList.length} 个文件（不在保留范围内）：\n\n` +
         previewLines.join('\n') + `\n\n` +
+        `${listAgeHint}\n` +
         `运行脚本后这些文件将被永久删除（不进回收站）！\n是否继续生成？`
     );
     if (!confirmed) {
@@ -1967,6 +2005,7 @@ pause
 // 6. 初始化
 // ================================================================
 loadRecords();
+loadScannedFiles();
 renderRecords();
 renderEmpty(manualResult, '请输入宽高后点击「判断」');
 renderEmpty(dwgResult, '上传文件后自动批量解析');

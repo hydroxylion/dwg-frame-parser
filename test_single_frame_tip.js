@@ -263,5 +263,30 @@ check('maybeAutoPrecheck 判定混合记录', /if \(isMixedRecord\(rec\)\) retur
 check('index.html 存在图框数筛选组', /id="fcFilterCheckboxes"/.test(fs.readFileSync(path.join(__dirname, 'index.html'), 'utf-8')), true);
 check('index.html 预勾选开关默认开启', /id="autoPrecheck" checked/.test(fs.readFileSync(path.join(__dirname, 'index.html'), 'utf-8')), true);
 
+// ---- 第 10 组：原始文件清单持久化（刷新后可直接生成删除脚本） ----
+console.log('\n—— 第 10 组：文件清单持久化 ——');
+
+// 与 app.js loadScannedFiles / saveScannedFiles 等价
+function restoreScanned(stored) {
+    const set = new Set();
+    if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed && Array.isArray(parsed.files)) {
+            parsed.files.forEach(f => { if (f) set.add(String(f)); });
+        }
+    }
+    return set;
+}
+const saved = JSON.stringify({ savedAt: '2026-09-15T09:00:00.000Z', files: ['a\\b.dwg', 'a\\c.dxf', ''] });
+check('恢复清单：包含全部有效路径', [...restoreScanned(saved)], ['a\\b.dwg', 'a\\c.dxf']);
+check('恢复清单：空存储得空集', restoreScanned(null).size, 0);
+check('恢复清单：损坏结构得空集', restoreScanned('{"files":"x"}').size, 0);
+
+// 源码级护栏
+check('parseFiles 扫描后调用 saveScannedFiles', /if \(rel\) scannedFiles\.add\(rel\);\s*\}\s*saveScannedFiles\(\);/.test(src), true);
+check('初始化调用 loadScannedFiles', /loadRecords\(\);\s*\n\s*loadScannedFiles\(\);/.test(src), true);
+check('清空记录时清除清单存储', /scannedFiles\.clear\(\);[\s\S]{0,120}localStorage\.removeItem\(SCANNED_FILES_KEY\)/.test(src), true);
+check('生成脚本确认框展示清单更新时间', /listAgeHint/.test(src) && /toLocaleString/.test(src), true);
+
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);
