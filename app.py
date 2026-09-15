@@ -1,4 +1,5 @@
 import os
+import socket
 import tempfile
 import logging
 import traceback
@@ -2475,5 +2476,31 @@ def upload_file():
         logger.error('解析异常 [%s]: %s\n%s', filename, e, traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
+def assert_port_free(port: int, host: str = '0.0.0.0'):
+    """启动前端口占用预检。
+
+    背景：Windows 下 Flask dev server 默认 SO_REUSEADDR，同端口两个进程可以
+    同时 bind 成功（历史事故：5000 端口新旧两个服务并存，上传 POST 连接随机
+    被重置 HTTP 000，页面行为时对时错极难排查）。预检占用即报错退出，
+    提示排查命令，杜绝双进程抢端口。
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind((host, port))
+    except OSError:
+        raise SystemExit(
+            f'[启动失败] 端口 {port} 已被占用（可能存在旧进程/其他项目占用）。\n'
+            f'  排查: netstat -ano | findstr :{port}\n'
+            f'  结束: taskkill /F /PID <PID>\n'
+            f'  或换端口启动: set FLASK_PORT={port + 1} && python app.py'
+        )
+    finally:
+        probe.close()
+
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # 端口可通过环境变量 FLASK_PORT 配置（默认 5000），避免与其他本地项目冲突
+    _port = int(os.environ.get('FLASK_PORT', '5000'))
+    assert_port_free(_port)
+    print(f' * 图框解析服务: http://127.0.0.1:{_port}  (换端口: set FLASK_PORT=端口号)')
+    app.run(host='0.0.0.0', port=_port, debug=True)

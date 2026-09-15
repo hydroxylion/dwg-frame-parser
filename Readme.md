@@ -449,6 +449,12 @@ python app.py
 
 启动后访问 `http://127.0.0.1:5000`。`.dwg` 解析依赖 [ODA File Converter](https://www.opendesign.com/guestfiles/oda_file_converter)，需本机安装并保持默认路径；`.dxf` 可直接解析。
 
+**端口配置与冲突防护**（2026-09-15）：
+
+- 端口默认 5000，可用环境变量 `FLASK_PORT` 更改：`set FLASK_PORT=5001 && python app.py`；或直接双击 `start-dwg.bat`（固定 5001，与其他本地项目隔离）。
+- 启动前有**端口占用预检**（`assert_port_free`）：端口被占即报错退出并给出排查命令，不再容忍 Windows 下同端口双进程静默绑定（Flask dev server SO_REUSEADDR 行为，曾致新旧两服务抢 5000、上传连接随机重置）。
+- 排查命令：`netstat -ano | findstr :端口` → `tasklist | findstr PID` → `taskkill /F /PID PID`。
+
 ---
 
 ## 六、日志
