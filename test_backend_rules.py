@@ -765,5 +765,83 @@ check('孤证复核互证⑥: 封面双线框(嵌套内外框)保留, fc=19 (sma
               for c in r['candidates'])
       and not any(abs(c['width'] - 29243) < 5 for c in r['candidates']))
 
+
+# =====================================================================
+# 第23轮：图签附栏外扩合并（105100口径）
+# =====================================================================
+from app import _expand_frames_with_title_strips, _cluster_title_boxes, _filter_title_strips
+
+# ---- 用例：纯函数——图签条聚类与尺寸筛选 ----
+_boxes = [(0, 0, 7000, 18200), (72000, 0, 79000, 18200)]   # 两个独立图签条
+_strips = _filter_title_strips(_cluster_title_boxes(_boxes))
+check('附栏外扩: 图签条聚类识别 2 条', lambda: _strips,
+      lambda s: len(s) == 2)
+
+# ---- 用例：纯函数——主框+左侧邻位图签条 → 外扩 21000 ----
+def _cand(x1, y1, x2, y2, layout='模型空间'):
+    return {'type': '直线矩形', 'bbox': (x1, y1, x2, y2),
+            'width': x2 - x1, 'height': y2 - y1, 'area': (x2 - x1) * (y2 - y1),
+            'layout': layout, 'ratio': max(x2 - x1, y2 - y1) / min(x2 - x1, y2 - y1)}
+
+# 模拟错排双行：行1主框A(-100000,0)~(-15858,59400) 右内侧图签条；行2主框B在其右侧、y错开
+cands = [_cand(-100000, 0, -15858, 59400),          # 主框A 84100x59400
+         _cand(-88000, -2679, -3800, 56721)]        # 主框B 84200x59400 (近似)
+strips = [(-21600, 300, -14600, 18500)]             # A 的右内侧图签条 7000x18200
+# B 左边 -88000，图签条中心 -18100：距 B 左边 69900 太远 → B 不扩
+# A 右边 -15858，图签条中心 -18100：距 A 右边 2242 → 在 A 右侧带内，但宿主是 A 自身 → 不扩
+_out, _n = _expand_frames_with_title_strips([_cand(-100000, 0, -15858, 59400),
+                                             _cand(-88000, -2679, -3800, 56721)], strips)
+check('附栏外扩: 自身图签条不作为自身外扩依据', lambda: _n, lambda n: n == 0)
+
+# 错排：B 在 A 右侧（不重叠，B 左边距 A 右边 13788）且 y 错开 2679，
+# A 的右内侧图签条（中心 -18100）落在 B 左边 -2070 外侧 16030 → B 外扩 21000
+cands2 = [_cand(-100000, 0, -15858, 59400),
+          _cand(-2070, -2679, 82030, 56721)]
+_out2, _n2 = _expand_frames_with_title_strips([dict(c) for c in cands2], strips)
+check('附栏外扩: 错排邻位图签条 → 左侧外扩 21000',
+      lambda: (_n2, _out2[1]['width'], _out2[1]['height']),
+      lambda t: t[0] == 1 and abs(t[1] - 105100) < 1 and abs(t[2] - 59400) < 1)
+
+# ---- 用例：守卫 a——竖版/小页/已含附栏口径的框不外扩 ----
+cands3 = [_cand(-100000, 0, -15858, 59400),
+          _cand(-2070, -2679, 82030, 108379)]       # B 竖版
+_out3, _n3 = _expand_frames_with_title_strips([dict(c) for c in cands3], strips)
+check('附栏外扩: 竖版主图框不外扩', lambda: _n3, lambda n: n == 0)
+
+cands4 = [_cand(-100000, 0, -15858, 40000),          # B 高 40000 < 50000 小页
+          _cand(-2070, -2679, 82030, 36721)]
+_out4, _n4 = _expand_frames_with_title_strips([dict(c) for c in cands4], strips)
+check('附栏外扩: 小页(短边<50000)不外扩', lambda: _n4, lambda n: n == 0)
+
+cands5 = [_cand(-100000, 0, 5100, 59400),            # A 已 105100 宽
+          _cand(23000, -2679, 107100, 56721)]
+strips5 = [(-21600, 300, -14600, 18500), (32000, 300, 39000, 18500)]
+_out5, _n5 = _expand_frames_with_title_strips([dict(c) for c in cands5], strips5)
+check('附栏外扩: 宽度≥95000 已含附栏口径不重复外扩', lambda: _n5, lambda n: n == 0)
+
+# ---- 用例：守卫 d——宿主是不同规格小页(42000高)不外扩 ----
+cands6 = [_cand(-100000, 0, -15858, 59400),          # 主框 59400 高
+          _cand(-2070, -2679, 82030, 36721)]         # 宿主 B 高 39400 < 0.85*59400
+_out6, _n6 = _expand_frames_with_title_strips([dict(c) for c in cands6], strips)
+check('附栏外扩: 宿主非同排同规格(42000小页)不外扩', lambda: _n6, lambda n: n == 0)
+
+# ---- 用例：端到端——双行错排直线图框 + J-图框层图签条 → 105100 + 84100 (smart) ----
+doc = make_doc()
+msp = doc.modelspace()
+# 行1 主框A (-100000,0) 84100x59400（4条LINE）
+add_line_rect(msp, -100000, 0, 84100, 59400)
+# A 右内侧图签条（J-图框层 LWPOLYLINE 7000x18200）
+msp.add_lwpolyline([(-21600, 300), (-14600, 300), (-14600, 18500), (-21600, 18500)],
+                   close=True, dxfattribs={'layer': 'J-图框'})
+# 行2 主框B 错排 (-2070,-2679) 84100x59400（B 左边距 A 图签条中心 16030）
+add_line_rect(msp, -2070, -2679, 84100, 59400)
+data = to_bytes(doc)
+check('附栏外扩: 端到端错排双框 → 105100 + 84100 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 2
+      and any(abs(c['width'] - 105100) < 2 for c in r['candidates'])
+      and any(abs(c['width'] - 84100) < 2 for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)
