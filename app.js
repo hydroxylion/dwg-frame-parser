@@ -1035,9 +1035,14 @@ function getActiveFcFilters() {
 function recordMatchesFilter(rec) {
     const activeFilters = getActiveFilters();
     if (activeFilters.length > 0) {
-        // "混合"是附加维度：勾选时混合记录直接命中（其主导类型可能仍是 standard 等）。
-        // 未勾选"混合"时，混合记录仍按主导类型参与原 4 类过滤，不破坏现有分类视图。
-        if (activeFilters.includes('mixed') && isMixedRecord(rec)) return true;
+        // "混合"拆成两档附加维度（2026-09-15 用户需求，两档意义不同需分开筛选）：
+        //   mixed_strong = 强化档 ⚠️（标准+任意非标并存 / 多种非标并存）
+        //   mixed_weak   = 弱化档 🌀（多图框且全部为标准，仅提示"多张标准页"）
+        // 勾选对应档时该类混合记录直接命中（其主导类型可能仍是 standard 等）；
+        // 未勾选时混合记录仍按主导类型参与类型过滤，不破坏现有分类视图。
+        const _lvl = mixedLevel(rec);
+        if (_lvl === 'strong' && activeFilters.includes('mixed_strong')) return true;
+        if (_lvl === 'weak' && activeFilters.includes('mixed_weak')) return true;
         const recType = getRecordType(rec);
         if (!activeFilters.includes(recType)) return false;
     }
@@ -1571,9 +1576,10 @@ function buildExportSuffix() {
         fallback: '近似匹配',
         nonstandard: '非标准',
         failed: '解析失败',
-        mixed: '混合',
+        mixed_strong: '混合强',
+        mixed_weak: '混合弱',
     };
-    const allTypes = ['standard', 'extended', 'fallback', 'nonstandard', 'failed', 'mixed'];
+    const allTypes = ['standard', 'extended', 'fallback', 'nonstandard', 'failed', 'mixed_strong', 'mixed_weak'];
     const active = getActiveFilters();
     return (active.length === allTypes.length || active.length === 0)
         ? '全部'

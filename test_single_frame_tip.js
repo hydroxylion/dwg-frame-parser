@@ -288,5 +288,44 @@ check('初始化调用 loadScannedFiles', /loadRecords\(\);\s*\n\s*loadScannedFi
 check('清空记录时清除清单存储', /scannedFiles\.clear\(\);[\s\S]{0,120}localStorage\.removeItem\(SCANNED_FILES_KEY\)/.test(src), true);
 check('生成脚本确认框展示清单更新时间', /listAgeHint/.test(src) && /toLocaleString/.test(src), true);
 
+// ---- 第 11 组：混合筛选拆两档（strong ⚠️ / weak 🌀） ----
+console.log('\n—— 第 11 组：混合两档分开筛选 ——');
+
+// 与 app.js mixedLevel 等价（按 2026-09-07 细化规则）
+function mixedLevelOf(groups) {
+    if (!groups) return '';
+    const types = Object.keys(groups);
+    const total = Object.values(groups).reduce((s, n) => s + n, 0);
+    if (total < 2) return '';
+    if (types.length === 1) return types[0] === 'standard' ? 'weak' : '';
+    return 'strong';
+}
+// 与 app.js recordMatchesFilter 混合维度等价
+function matchMixed(rec, active) {
+    const lvl = mixedLevelOf(rec.groups);
+    if (lvl === 'strong' && active.includes('mixed_strong')) return true;
+    if (lvl === 'weak' && active.includes('mixed_weak')) return true;
+    return active.includes(rec.type);
+}
+const strongRec = { type: 'standard', groups: { standard: 16, nonstandard: 1 } };
+const weakRec = { type: 'standard', groups: { standard: 5 } };
+const plainRec = { type: 'standard', groups: null };
+check('混合强：标准+非标并存 → strong', mixedLevelOf(strongRec.groups), 'strong');
+check('混合弱：多框全标准 → weak', mixedLevelOf(weakRec.groups), 'weak');
+check('单图框 → 不标', mixedLevelOf({ standard: 1 }), '');
+check('多框全同一非标类型 → 不标', mixedLevelOf({ fallback: 17 }), '');
+check('勾混合强 → strong 命中', matchMixed(strongRec, ['mixed_strong', 'standard']), true);
+check('勾混合强 → weak 不经混合维度命中', matchMixed(weakRec, ['mixed_strong', 'standard']), true);
+check('只勾混合强+去掉标准 → weak 不命中', matchMixed(weakRec, ['mixed_strong']), false);
+check('勾混合弱 → weak 命中', matchMixed(weakRec, ['mixed_weak', 'standard']), true);
+check('只勾混合弱+去掉标准 → strong 不命中(两档互不覆盖)', matchMixed(strongRec, ['mixed_weak']), false);
+check('两档都不勾 → 按主导类型过滤', matchMixed(strongRec, ['standard']) && !matchMixed(plainRec, ['nonstandard']), true);
+check('非混合记录不受混合筛选项影响', matchMixed(plainRec, ['standard']), true);
+
+// 源码级护栏
+check('recordMatchesFilter 已按两档判定', /_lvl === 'strong' && activeFilters\.includes\('mixed_strong'\)/.test(src) && /_lvl === 'weak' && activeFilters\.includes\('mixed_weak'\)/.test(src), true);
+check('导出后缀已含两档标签', /mixed_strong: '混合强'/.test(src) && /mixed_weak: '混合弱'/.test(src), true);
+check('index.html 已拆两档复选框', /value="mixed_strong"/.test(fs.readFileSync(path.join(__dirname, 'index.html'), 'utf-8')) && /value="mixed_weak"/.test(fs.readFileSync(path.join(__dirname, 'index.html'), 'utf-8')), true);
+
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);
