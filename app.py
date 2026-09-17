@@ -506,6 +506,12 @@ def detect_rectangles_from_lines(entity_list, rot=None):
     PAIR_RATIO_BOUND = 8.0
     v_by_xa = sorted(v_pairs, key=lambda p: p[0])
     v_xas = [p[0] for p in v_by_xa]
+    # 竖线对公共覆盖总长预计算：覆盖总长 < 矩形高的竖对必然纵跨不住 [ya,yb]，
+    # 是必要条件剪枝（地下室电力t3：横/竖长边聚类 8164/4931 个 → 长边全配
+    # 产生 109 万×51 万线对，84100×59400 图框的线对虽排覆盖降序 #569，
+    # 但此前 570 万次无效检查把 200 万组合预算耗尽在 ~#200 → 16 张 LINE
+    # 图框全漏。该剪枝把目标前的检查量从 572 万降到 41.5 万，零召回损失）
+    v_covs = [sum(hi - lo for lo, hi in p[2]) for p in v_by_xa]
     for (ya, yb, h_common) in h_pairs:
         _H = yb - ya
         if _H < MIN_LINE_RECT_SIDE:
@@ -527,6 +533,11 @@ def detect_rectangles_from_lines(entity_list, rot=None):
                     continue
                 if xb > xHi + LINE_CLUSTER_EPS:
                     continue  # 竖对右界超出本覆盖段：横线盖不住，必非矩形
+                if v_covs[_vi] < _H - 2.0:
+                    continue  # 竖对公共覆盖总长 < 矩形高(留2mm浮点/聚类容差)：必然纵跨不住，
+                              # 不计预算直接跳过。容差不可省——横对高度与竖对覆盖在端点
+                              # 重合时仅有 ~1e-8 级浮点尾差，严格比较会把真图框误杀
+                              # （地下室电力t3 TB 层 126100×59400 即因此消失）
                 examined += 1
                 if examined > MAX_EXAMINED:
                     rects.sort(key=lambda r: (r[2] - r[0]) * (r[3] - r[1]), reverse=True)
