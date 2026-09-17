@@ -1,4 +1,6 @@
 import os
+import sys
+import contextlib
 import socket
 import tempfile
 import logging
@@ -84,6 +86,50 @@ def safe_log(msg):
         print(msg)
     except Exception:
         pass
+
+
+# 日志分级开关：FRAME_PARSER_LOG_LEVEL=DEBUG 恢复逐候选明细（排查期用），
+# 默认 INFO——逐候选明细不写文件也不刷控制台，parser.log 体积降约 80%
+#   背景：统计 2026-09-11~17 的 parser.log，53361 行里约 80% 是"逐候选明细"
+#   （每个候选一行尺寸/长宽比/面积占比 + 每次去重剔除一行），排查期临时加的，
+#   日常运行价值低但把日志撑到 8MB+/6天。
+LOG_LEVEL = os.environ.get('FRAME_PARSER_LOG_LEVEL', 'INFO').upper()
+
+
+def log_debug(msg):
+    """逐候选明细日志：DEBUG 级写文件；仅 DEBUG 模式下同时打印控制台"""
+    logger.debug(msg)
+    if LOG_LEVEL == 'DEBUG':
+        try:
+            print(msg)
+        except Exception:
+            pass
+
+
+# ---------- ezdxf 内部告警路由 ----------
+# 背景：'ezdxf' logger 默认无 handler，WARNING 级消息走 logging.lastResort
+# 直接刷到控制台（sys.stderr）。典型如 DIMASSOC 关联标注：解析含关联标注的
+# 图纸时，ezdxf 字典复制（dictionary.py 的 copy_linked_entities）对每个无法
+# 复制的 DIMASSOC 对象发一条
+#   "copy process ignored DIMASSOC(#xxxx) - this may cause problems in AutoCAD"
+# 一张图刷 4~8 条，PyCharm 控制台被淹没。
+#   实质：DIMASSOC 只是"标注与图形的关联关系"元数据，标注几何本身完整，
+#   ezdxf 图框解析完全不用它——告警无害。
+# 修法：把 'ezdxf' logger 挂上同一个文件 handler 并降级为 DEBUG——默认不写
+# 文件、不刷控制台；FRAME_PARSER_LOG_LEVEL=DEBUG 时可入文件供排查。
+class _EzdxfDemoteToDebugFilter(logging.Filter):
+    """把 ezdxf logger 发来的记录降级为 DEBUG（不影响本项目自身日志）"""
+    def filter(self, record):
+        if record.name == 'ezdxf':
+            record.levelno = logging.DEBUG
+            record.levelname = 'DEBUG'
+        return True
+
+
+_file_handler.addFilter(_EzdxfDemoteToDebugFilter())
+_ezdxf_logger = logging.getLogger('ezdxf')
+_ezdxf_logger.addHandler(_file_handler)
+_ezdxf_logger.propagate = False  # 不再传给 root → lastResort 不再刷控制台
 
 
 def load_document(path):
@@ -798,7 +844,7 @@ def _expand_frames_with_title_strips(frame_like, strips, layout_name='模型空�
                 c['area'] = w * h
                 c['ratio'] = normalized_ratio(w, h)
                 expanded += 1
-                safe_log(f"  [附栏外扩] {side} 侧 +{TITLE_STRIP_MERGE_WIDTH:.0f} → "
+                log_debug(f"  [附栏外扩] {side} 侧 +{TITLE_STRIP_MERGE_WIDTH:.0f} → "
                           f"{w:.0f}x{h:.0f}（图签条中心@({scx:.0f},{scy:.0f})，宿主高 {gh:.0f}）")
                 break  # 每框只外扩一侧
     return frame_like, expanded
@@ -2450,7 +2496,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                 hit_outer = outer
                                 break
                     if should_remove:
-                        safe_log(f"    [去重剔除] {c['width']:.0f}x{c['height']:.0f}@{c['layout']} 被 {hit_outer['width']:.0f}x{hit_outer['height']:.0f}@{hit_outer['layout']} (bbox {tuple(round(v) for v in c['bbox'])} ⊂/≈ {tuple(round(v) for v in hit_outer['bbox'])})")
+                        log_debug(f"    [去重剔除] {c['width']:.0f}x{c['height']:.0f}@{c['layout']} 被 {hit_outer['width']:.0f}x{hit_outer['height']:.0f}@{hit_outer['layout']} (bbox {tuple(round(v) for v in c['bbox'])} ⊂/≈ {tuple(round(v) for v in hit_outer['bbox'])})")
                     if not should_remove:
                         result.append(c)
             return result
@@ -2566,8 +2612,8 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             safe_log("⚠️ 未检测到图框：所有候选矩形均不符合图框特征")
             safe_log("   - 候选矩形列表：")
             for i, c in enumerate(all_candidates, 1):
-                safe_log(f"     {i}. {c['type']} | 布局: {c['layout']} | 尺寸: {c['width']:.2f} x {c['height']:.2f} | "
-                         f"归一化长宽比: {c['ratio']:.4f} | 面积占比: {c['area_ratio']:.2%}")
+                log_debug(f"     {i}. {c['type']} | 布局: {c['layout']} | 尺寸: {c['width']:.2f} x {c['height']:.2f} | "
+                          f"归一化长宽比: {c['ratio']:.4f} | 面积占比: {c['area_ratio']:.2%}")
             # 注意：此错误信息前缀被前端用于触发自动重试，勿随意修改
             raise ValueError("未检测到图框（图纸可能没有标准图框）")
 
@@ -2589,9 +2635,9 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             extra = ''
             if c['type'] == '块参照插入':
                 extra = f" | 块名: {c.get('block_name', '?')} | 图层: {c.get('insert_layer', '?')}"
-            safe_log(f"  {i}. {c['type']} | 布局: {c['layout']} | 尺寸: {c['width']:.2f} x {c['height']:.2f} | "
-                     f"归一化长宽比: {c['ratio']:.4f} | 面积占比: {c['area_ratio']:.2%} | "
-                     f"bbox=({bx1:.0f},{by1:.0f},{bx2:.0f},{by2:.0f}){extra}")
+            log_debug(f"  {i}. {c['type']} | 布局: {c['layout']} | 尺寸: {c['width']:.2f} x {c['height']:.2f} | "
+                      f"归一化长宽比: {c['ratio']:.4f} | 面积占比: {c['area_ratio']:.2%} | "
+                      f"bbox=({bx1:.0f},{by1:.0f},{bx2:.0f},{by2:.0f}){extra}")
         safe_log("============================")
 
         best = valid_candidates[0]

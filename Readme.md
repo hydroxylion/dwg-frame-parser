@@ -10,10 +10,10 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 回归基准 | 30 张校验图纸，后端无改动（第十七轮已验证：一致 29 / 变化 1，唯一变化 = 四川自贡施工图.-19.dwg，fc 18→19） |
-| 后端测试 | `test_backend_rules.py` **43 通过 / 0 失败** |
-| 前端测试 | 7 个用例文件合计 **211 项全绿**（+14：混合两档筛选用例组） |
-| 本轮交付 | **混合筛选拆两档**：⚠️ 混合·强 / 🌀 混合·弱 分开筛选，两档互不覆盖；导出文件名后缀同步两档标签 |
+| 回归基准 | 31 张校验图纸（含目标图），本轮改动后**一致 30 / 变化 1**（唯一变化 = 目标地下室电力t3.dwg：84100×14 → 105100×11 + 84100×6，fc 32 不变） |
+| 后端测试 | `test_backend_rules.py` **51 通过 / 0 失败**（+8：附栏外扩纯函数 6 + 端到端 2） |
+| 前端测试 | 7 个用例文件合计 **222 项全绿**（+11：名称双行结构化用例组） |
+| 本轮交付 | **图框口径切换：主图框+图签附栏整体输出（105100口径）**——地下室电力t3.dwg 检出尺寸组变为 105100×59400×11，与用户实测完全一致 |
 
 **算法环境变量开关**（仅用于回归 A/B 对照，生产不设置）：
 
@@ -28,6 +28,12 @@
 | `FRAME_PARSER_NO_SOLO_RECHECK=1` | 关闭孤证复核（无互证的纯相对面积候选剔除） |
 | `FRAME_PARSER_NO_WRAP_DOM=1` | 关闭包裹框主导比例剔除 |
 | `FRAME_PARSER_NO_TITLE_STRIP=1` | 关闭图签附栏外扩合并（105100口径） |
+
+**日志工具开关**：
+
+| 开关 | 作用 |
+| --- | --- |
+| `FRAME_PARSER_LOG_LEVEL=DEBUG` | 排查模式：逐候选明细 + ezdxf 内部告警写入 parser.log 并刷控制台 |
 
 ---
 
@@ -119,6 +125,26 @@ ezdxf 默认不加载 XREF 外部文件，引用块会漏识别图框。检测�
 ---
 
 ## 三、优化记录
+
+### 2026-09-17（第二十四轮 —— 工程化三项：回归基线入库 / DIMASSOC 刷屏抑制 / 日志分级）
+
+**1. 回归基线快照入库**（regress_check.py + regression_baseline.json）
+- 痛点：此前每轮回归要导出 HEAD 副本 + 当前版**双跑** 31 张（ODA 转换占大头），耗时长、操作繁琐。
+- 修法：基线（fc + best + 尺寸分布）存 `regression_baseline.json` 入仓库；`regress_check.py` 单跑当前版本自动逐图 diff（SAME/DIFF + 差异明细），一致退出码 0。`--update` 显式重建基线（须先人工确认 DIFF 符合预期），`--files a.dwg,b.dwg` 支持冒烟子集。回归时间**减半**，HEAD 副本导出操作取消。
+
+**2. DIMASSOC 控制台刷屏抑制**
+- 现象：解析含关联标注的图纸时，PyCharm 控制台反复出现 `copy process ignored DIMASSOC(#xxxx) - this may cause problems in AutoCAD`。
+- 根因（两轮排查定位）：消息**不是 ODA File Converter 发的**，而是 ezdxf 自己——`ezdxf/entities/dictionary.py` 的字典深拷贝对无法复制的 DIMASSOC 实体发 `logger.warning`（'ezdxf' logger 无 handler → `logging.lastResort` 直写 `sys.stderr` → 控制台）。实测证据：ODA 子进程 stdout/stderr 管道均为 0 字节、dup2(fd2→DEVNULL) 也拦不住（Python 层输出不走 fd2）。
+- 实质：DIMASSOC 只是"标注与图形的关联关系"元数据，标注几何完整、图框解析不用它——**无害告警**。
+- 修法：app.py 把 'ezdxf' logger 挂上同一 RotatingFileHandler，`_EzdxfDemoteToDebugFilter` 将其记录降级为 DEBUG，`propagate=False` 切断 lastResort。默认文件和控制台都不再出现；排查期设 `FRAME_PARSER_LOG_LEVEL=DEBUG` 可在文件中查看。
+- 验证：连续 3 次解析 1号2号楼柱平法施工图 stderr 0 行、fc=11 稳定；51 项后端单测通过。
+
+**3. 日志分级（parser.log 体积降约 80%）**
+- 痛点：统计 parser.log 53361 行中约 80% 为逐候选明细（候选列表、去重剔除明细等排查期临时日志），6 天撑到 8.4MB。
+- 修法：新增 `log_debug()`——逐候选明细（最终候选列表、未检测到图框时的全量候选列表、去重剔除明细、附栏外扩逐框明细）降为 DEBUG：默认不写文件不刷控制台；`FRAME_PARSER_LOG_LEVEL=DEBUG` 时恢复写文件+刷控制台。过程摘要（检测结果头尾、✅选中、XREF/未检出告警、各救援条件摘要）保持 INFO。
+- 附带：删除旧 parser.log.1（10MB，含 1.4 万条历史 DIMASSOC 重复行）。
+
+**验证**：后端 51/0；解析结果与第 23 轮完全一致（日志/日志级别不影响任何检测逻辑）；31 张基线快照生成后 `regress_check.py` 对比全绿。
 
 ### 2026-09-17（第二十三轮 —— 图框口径切换：主图框+图签附栏整体输出（105100口径））
 
