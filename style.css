@@ -695,6 +695,26 @@
             text-overflow: ellipsis;
             max-width: 200px;
         }
+        /* 图纸名称双行结构：主行文件名（可编辑），副行所在目录（灰色小字，
+           超长省略，悬停 title 显示完整路径）；所有行统一两行高度保持和谐 */
+        .record-table td.col-name {
+            min-width: 150px;
+        }
+        .name-main {
+            font-weight: 600;
+        }
+        .name-dir {
+            font-size: 11px;
+            color: #6b7d94;
+            line-height: 1.35;
+            margin-top: 1px;
+            padding: 0 6px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 200px;
+            cursor: default;
+        }
         /* 单图框数：气泡锚点，点击弹出（虚线底提示可点击），空间来源在气泡内展示 */
         .frame-count-single {
             cursor: pointer;

@@ -327,5 +327,35 @@ check('recordMatchesFilter 已按两档判定', /_lvl === 'strong' && activeFilt
 check('导出后缀已含两档标签', /mixed_strong: '混合强'/.test(src) && /mixed_weak: '混合弱'/.test(src), true);
 check('index.html 已拆两档复选框', /value="mixed_strong"/.test(fs.readFileSync(path.join(__dirname, 'index.html'), 'utf-8')) && /value="mixed_weak"/.test(fs.readFileSync(path.join(__dirname, 'index.html'), 'utf-8')), true);
 
+// ---- 第 12 组：图纸名称双行结构化（文件名主行 + 目录副行） ----
+console.log('\n—— 第 12 组：名称双行结构化 ——');
+
+// 与 app.js splitNamePath 等价
+function splitNamePath(name) {
+    const s = String(name || '');
+    const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+    if (i < 0) return { dir: '', file: s };
+    return { dir: s.slice(0, i + 1), file: s.slice(i + 1) };
+}
+check('正斜杠路径拆分', splitNamePath('泛悦国际/建筑/05.06/6_1.dwg'), { dir: '泛悦国际/建筑/05.06/', file: '6_1.dwg' });
+check('反斜杠路径拆分', splitNamePath('subdir\\立面.dwg'), { dir: 'subdir\\', file: '立面.dwg' });
+check('无分隔符 → 整段为文件名', splitNamePath('建筑-A0-01'), { dir: '', file: '建筑-A0-01' });
+check('空名 → 空对象', splitNamePath(''), { dir: '', file: '' });
+check('仅目录无文件名', splitNamePath('泛悦国际/'), { dir: '泛悦国际/', file: '' });
+
+// 与改名拼接逻辑等价：输入含分隔符视为完整路径，否则拼回原目录
+function rebuildName(dir, v) {
+    const isFullPath = !dir || v.includes('/') || v.includes('\\');
+    return isFullPath ? v : dir + v;
+}
+check('仅改文件名 → 拼回原目录', rebuildName('泛悦国际/建筑/05.06/', '6_2.dwg'), '泛悦国际/建筑/05.06/6_2.dwg');
+check('输入完整路径 → 原样保存', rebuildName('泛悦国际/建筑/', '其他/新图.dwg'), '其他/新图.dwg');
+check('无目录记录改名 → 原样保存', rebuildName('', '新名字'), '新名字');
+
+// 源码级护栏
+check('app.js 存在 splitNamePath 且渲染双行', /function splitNamePath\(/.test(src) && /class="name-dir" title="/.test(src), true);
+check('改名事件按目录拼接', /isFullPath \? v : dir \+ v/.test(src), true);
+check('CSS 存在 name-dir 副行样式', /\.name-dir \{/.test(fs.readFileSync(path.join(__dirname, 'style.css'), 'utf-8')), true);
+
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);

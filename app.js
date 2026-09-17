@@ -900,6 +900,15 @@ function formatLayoutCountsText(layoutCounts) {
         .join('、');
 }
 
+// 拆分完整路径为「目录 + 文件名」：仅最后一个 / 或 \ 前的部分视为目录
+// （保留结尾分隔符），无分隔符则整段为文件名。供名称列双行展示与改名拼接。
+function splitNamePath(name) {
+    const s = String(name || '');
+    const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+    if (i < 0) return { dir: '', file: s };
+    return { dir: s.slice(0, i + 1), file: s.slice(i + 1) };
+}
+
 function addRecord(w, h, result, name, path, framesInfo) {
     const framePct = result.confidenceFrame !== undefined ? (result.confidenceFrame * 100).toFixed(1) : '';
     const scalePct = result.confidenceScale !== undefined ? (result.confidenceScale * 100).toFixed(1) : '';
@@ -1148,10 +1157,17 @@ function renderRecords() {
             frameCountHtml = `<span class="frame-count-single tip-anchor" ${tipAttrs}>—</span>`;
         }
 
+        // 图纸名称双行结构化（2026-09-15 用户需求）：主行=文件名（可编辑，仅改
+        // 文件名段），副行=所在目录（灰色小字，超长省略，悬停 title 显示完整路径）。
+        // rec.name 内部始终存完整路径（删除脚本 keepSet 匹配依赖），展示时才拆分。
+        const _np = splitNamePath(rec.name);
+        const nameDirHtml = _np.dir
+            ? `<div class="name-dir" title="${escHtml(rec.name)}">${escHtml(_np.dir)}</div>`
+            : '';
         html += `<tr class="${rowClass}">
             <td class="col-check"><input type="checkbox" class="row-check" data-id="${rec.id}" ${selectedIds.has(rec.id) ? 'checked' : ''} /></td>
             <td>${index + 1}</td>
-            <td><input class="editable" type="text" data-id="${rec.id}" data-field="name" value="${escHtml(rec.name)}" placeholder="图纸名称" style="min-width:100px;" /></td>
+            <td class="col-name"><input class="editable name-main" type="text" data-id="${rec.id}" data-field="name" data-dir="${escHtml(_np.dir)}" value="${escHtml(_np.file)}" placeholder="图纸名称" />${nameDirHtml}</td>
             <td>${wDisplay}</td>
             <td>${hDisplay}</td>
             <td>${frameCountHtml}</td>
@@ -1182,6 +1198,15 @@ function renderRecords() {
         inp.addEventListener('change', function() {
             const id = parseInt(this.dataset.id);
             const field = this.dataset.field;
+            // 名称列只展示文件名段：改名时拼回原目录（输入含路径分隔符则视为
+            // 用户输入了完整路径，原样保存），保证 rec.name 始终是完整路径
+            if (field === 'name') {
+                const v = this.value.trim();
+                const dir = this.dataset.dir || '';
+                const isFullPath = !dir || v.includes('/') || v.includes('\\');
+                updateRecordField(id, 'name', isFullPath ? v : dir + v);
+                return;
+            }
             updateRecordField(id, field, this.value);
         });
     });
