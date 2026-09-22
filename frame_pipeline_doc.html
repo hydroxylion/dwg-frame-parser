@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="JUDNkHLLJ1oQxdaDLebZss">
+<head data-page-node-id="BPliJT1WhvnQEfJuAm5JyZ">
+<meta charset="UTF-8" data-page-node-id="K8gri1h56rQCeWYjnmxwNg">
+<title>dwg-frame-parser 图框识别技术文档</title>
+<style>
+  body { font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; color: #1f2430;
+         max-width: 960px; margin: 24px auto; padding: 0 20px; background: #fafbfc; line-height: 1.55; }
+  h1 { font-size: 22px; border-bottom: 2px solid #2f6fdb; padding-bottom: 8px; }
+  h2 { font-size: 17px; color: #2f6fdb; margin-top: 28px; }
+  .meta { color: #5a6472; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0; }
+  th, td { border: 1px solid #d8dee8; padding: 5px 9px; text-align: left; vertical-align: top; }
+  th { background: #eef3fb; }
+  code { background: #eef1f6; padding: 1px 5px; border-radius: 3px; font-size: 12.5px; }
+  .fig { background: #fff; border: 1px solid #d8dee8; border-radius: 8px; padding: 12px; margin: 10px 0; }
+  .figcap { text-align: center; color: #5a6472; font-size: 12.5px; margin-top: 6px; }
+</style>
+</head>
+<body data-page-node-id="QPRruMwxwsem0FBYg5BMRi">
+
+<h1 data-page-node-id="zo0jeFqOeEKT7wRMJT4x9E">dwg-frame-parser 图框识别技术文档</h1>
+<p class="meta" data-page-node-id="noOoT8JN99XBEryHwxb6ZF">技术栈：Python / Flask · ezdxf 1.4 · ODA File Converter（DWG→DXF）· matplotlib（渲染核对）｜文档对应版本：第二十六轮（R26）</p>
+
+<p data-page-node-id="VsDfLiaYatN7EhyRj616p4"><b data-page-node-id="VI1p4i0tMqo7JQCBLQrBwH">一句话概述</b>：对 DWG/DXF 施工图逐布局收集图框候选（闭合多段线 / INSERT 块参照 / 直线组合 / 包围盒降级），经特征筛选（条件 A~I + 救援通道）与三级后处理（包裹剔除 → 去重 → 附栏外扩）输出图框清单（<code data-page-node-id="MayR8wlYpw3J0V7AuQskfj">frame_count</code> / <code data-page-node-id="6Qzz4X940c6GQ4Adxb1CJC">best</code> / <code data-page-node-id="OqEUgYSvoz5NEDRAoo9spf">candidates</code>）；配套「规则单测 → 回归基线 → 渲染叠加核对」三层校验闭环。</p>
+
+<h2 data-page-node-id="ho7AQv7lGMG1fkgOD25Ek6">一、识别主流程</h2>
+<div class="fig" data-page-node-id="zNIVSan0KQA3Frhkh2bZGu">
+<svg viewBox="0 0 900 830" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei, sans-serif" data-page-node-id="y3QtErCijZPViwzGN5EdCR">
+  <defs data-page-node-id="ZG9YvwWuOtfsgkiKC9eyj0">
+    <marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" data-page-node-id="gppTWR0IapvKLRStl7NuCp">
+      <path d="M0,0 L8,4 L0,8 z" fill="#4a5568" data-page-node-id="dWxj575avm3KBQkmrDMYmk"/>
+    </marker>
+  </defs>
+  <style>
+    .n { fill: #eef3fb; stroke: #2f6fdb; stroke-width: 1.3; rx: 7; }
+    .t { font-size: 13.5px; fill: #1f2430; font-weight: bold; }
+    .d { font-size: 11.5px; fill: #5a6472; }
+    .f { font-size: 11px; fill: #b3541e; }
+    .l { stroke: #4a5568; stroke-width: 1.2; fill: none; marker-end: url(#a); }
+    .s { fill: #fdf6ec; stroke: #c08a3e; stroke-width: 1.2; rx: 6; }
+    .st { font-size: 12px; fill: #7a5a20; font-weight: bold; }
+  </style>
+
+  <rect class="n" x="330" y="8" width="240" height="34" rx="7" data-page-node-id="RhtUgGnzZ3av2760YXf3DW"/>
+  <text class="t" x="450" y="30" text-anchor="middle" data-page-node-id="Q3KoR9hByOL1a5hlHnGuGM">输入 DWG / DXF 字节流</text>
+
+  <line class="l" x1="450" y1="42" x2="450" y2="66" data-page-node-id="DD3X3jqonC38NfrvkEz1lC"/>
+  <rect class="n" x="270" y="68" width="360" height="34" rx="7" data-page-node-id="LiTpTHszMRcVd9oaQizazR"/>
+  <text class="t" x="450" y="90" text-anchor="middle" data-page-node-id="oEVU7lcshysBDS1BdFTiLr">格式适配：DXF 直读（失败 recover 重试）｜DWG→ODA→DXF</text>
+
+  <line class="l" x1="450" y1="102" x2="450" y2="126" data-page-node-id="Om94gBKvAcagoY6gGrS7pV"/>
+  <rect class="n" x="270" y="128" width="360" height="34" rx="7" data-page-node-id="cfkDLURzusi8z9SR6mkzqQ"/>
+  <text class="t" x="450" y="150" text-anchor="middle" data-page-node-id="Al7udAxNFu22tLNqcFAym0">逐布局遍历（模型空间 + 各图纸空间）</text>
+  <text class="d" x="450" y="178" text-anchor="middle" data-page-node-id="fm84j31rOd11RysgGXLlyE">预筛：跳过冻结/隐藏层实体；对齐排列剔除装饰块（同块名≥3 成线）</text>
+
+  <line class="l" x1="450" y1="184" x2="450" y2="206" data-page-node-id="PvYtuWvwoFn3cH9u48IQ2n"/>
+  <rect class="n" x="120" y="208" width="660" height="36" rx="7" data-page-node-id="iNo9eFfKZQNF6uNGmcmTl8"/>
+  <text class="t" x="450" y="231" text-anchor="middle" data-page-node-id="Fq1NsSwJmuSDwR2ECAKKGD">候选收集（三路并行 + 兜底）</text>
+
+  <!-- 三路分支 -->
+  <line class="l" x1="270" y1="244" x2="170" y2="272" data-page-node-id="zXtSq3RafhblMDxwiB4dHx"/>
+  <line class="l" x1="450" y1="244" x2="450" y2="272" data-page-node-id="3UYEAa5LuOTsbBOzGAiAaf"/>
+  <line class="l" x1="630" y1="244" x2="730" y2="272" data-page-node-id="NlHEJbW7P3SyGlru5N9aCx"/>
+
+  <rect class="s" x="60" y="274" width="220" height="66" rx="6" data-page-node-id="Wh0q8rpN5Z0QLJOwqZX0aN"/>
+  <text class="st" x="170" y="293" text-anchor="middle" data-page-node-id="MFUiuaW5qZqBFDCBjASTh0">① 闭合多段线</text>
+  <text class="d" x="170" y="311" text-anchor="middle" data-page-node-id="EonrxwL44hgPn8LHwd7mtJ">LWPOLYLINE / POLYLINE</text>
+  <text class="d" x="170" y="327" text-anchor="middle" data-page-node-id="gx8rrVZ6SDLwcFCxp2VwiZ">closed 且尺寸图框级</text>
+
+  <rect class="s" x="340" y="274" width="220" height="94" rx="6" data-page-node-id="qAKQ36kPeTVlChqFU9Ehw2"/>
+  <text class="st" x="450" y="293" text-anchor="middle" data-page-node-id="wv7Ha3gOXtQJGIfXvA4YHS">② INSERT 块参照</text>
+  <text class="d" x="450" y="311" text-anchor="middle" data-page-node-id="XpDNl7YZoCXUNYBTQKMFpR">块 bbox 递归（含嵌套/基点/旋转）</text>
+  <text class="f" x="450" y="327" text-anchor="middle" data-page-node-id="op6bE1P7wvx9zuxj7MlDfX">R26 边框证据校验：最长直边构件</text>
+  <text class="f" x="450" y="342" text-anchor="middle" data-page-node-id="rHQ95Ul8vqqNWcrRDTw1qc">&lt; 块长边×30% → 内容块剔除</text>
+  <text class="f" x="450" y="358" text-anchor="middle" data-page-node-id="LgUWcXAuNjZ62XFoCBhs7e">R25 斜放块（rot%90≠0）去旋转口径</text>
+
+  <rect class="s" x="620" y="274" width="220" height="66" rx="6" data-page-node-id="YZJAPAMEPl4xSuaEMxr5Vq"/>
+  <text class="st" x="730" y="293" text-anchor="middle" data-page-node-id="2dWmMlZeY6zlYAIwBRH9LT">③ 直线组合矩形</text>
+  <text class="d" x="730" y="311" text-anchor="middle" data-page-node-id="91N1WqIgve86XJfMiH9bD7">横/纵长边聚类配对</text>
+  <text class="f" x="730" y="327" text-anchor="middle" data-page-node-id="vPfhOWQJvWNijidZOU3xKj">R22 组合预算 + 必要条件剪枝</text>
+
+  <line class="l" x1="170" y1="340" x2="170" y2="378" data-page-node-id="H5dOat2oHbZEbA0wg2AMk2"/>
+  <line class="l" x1="450" y1="368" x2="450" y2="378" data-page-node-id="BCt5b85l9XpyHQxMGvJbdt"/>
+  <line class="l" x1="730" y1="340" x2="730" y2="378" data-page-node-id="7jj1yAs67NKEZ8C5gC8yJx"/>
+  <rect class="s" x="60" y="380" width="780" height="34" rx="6" data-page-node-id="V7CKLxYT1FfOcEjha5MDAz"/>
+  <text class="d" x="450" y="401" text-anchor="middle" data-page-node-id="3N3WduSFbDjvTNqFKRMDO2">兜底：无任何候选的布局 → 全实体包围盒降级（空布局/纯视口跳过）｜同 bbox 去重后入库</text>
+
+  <line class="l" x1="450" y1="414" x2="450" y2="436" data-page-node-id="PS5rGyT4BJFDxXeJSpkHLS"/>
+  <rect class="n" x="150" y="438" width="600" height="36" rx="7" data-page-node-id="uNftCKOLDPGBzfM8A7iUyt"/>
+  <text class="t" x="450" y="461" text-anchor="middle" data-page-node-id="1A3zElYVaC75pRuJ1PMrw5">特征筛选：条件 A~I 判定 + 救援通道 + 孤证复核</text>
+
+  <!-- 条件速注 -->
+  <text class="d" x="450" y="492" text-anchor="middle" data-page-node-id="aAFJVPORUaE67xpuLoa0aa">A 面积占比≥15% ｜ B 显式矩形+短边合理 ｜ C 相对面积 rel≥10% 且 ratio≥1.343 ｜ D 同尺寸套图≥2</text>
+  <text class="d" x="450" y="509" text-anchor="middle" data-page-node-id="Z6EIlb2Pl4WQI6aRqL5IqD">E 块模板=标准图幅×制图倍率 ｜ G 同模板缩放套图 ｜ H 主导比例+内容丰富 ｜ I 表格内容页</text>
+  <text class="f" x="450" y="526" text-anchor="middle" data-page-node-id="A0AnvGn8CuNDyZXIwKgB6i">防失效：rel 分母排除判据（超大框占版→rel 置 0 只留 A/B）；同块名族传播；A 系列保护</text>
+
+  <line class="l" x1="450" y1="534" x2="450" y2="556" data-page-node-id="MMhvyC6FuJCPuIz9TYDi0N"/>
+  <rect class="n" x="150" y="558" width="600" height="34" rx="7" data-page-node-id="eb63czNefphFo92F6MRYre"/>
+  <text class="t" x="450" y="580" text-anchor="middle" data-page-node-id="7JCNrG4pcR14it2samB521">后处理 ① 包裹框剔除（外框内含 ≥N 个独立图框）</text>
+
+  <line class="l" x1="450" y1="592" x2="450" y2="614" data-page-node-id="Sz8rwruaB7rMdGa6x5URbU"/>
+  <rect class="n" x="120" y="616" width="660" height="44" rx="7" data-page-node-id="ht3l8nRGiCC3F99cqEbIyQ"/>
+  <text class="t" x="450" y="634" text-anchor="middle" data-page-node-id="6pPKt6x1KCLN1MrCzffwCA">后处理 ② 去重：规则1 嵌套（面积&lt;95%）｜规则2 IoU&gt;50%</text>
+  <text class="f" x="450" y="651" text-anchor="middle" data-page-node-id="YVLcxGu2Uhnyf39jIeGygY">R25 豁免：同尺寸错排（中心偏移≥5%）不剔；斜放块(tilted)不作嵌套 outer</text>
+
+  <line class="l" x1="450" y1="660" x2="450" y2="682" data-page-node-id="PQEOHsXYe27OIOcVzkKiMR"/>
+  <rect class="n" x="150" y="684" width="600" height="34" rx="7" data-page-node-id="SGOgG6sE2jJXeO5LiNypVe"/>
+  <text class="t" x="450" y="706" text-anchor="middle" data-page-node-id="KeIDXQQwwNGSYmiVC5AqpU">后处理 ③ 图签附栏外扩（主框+邻位图签条 → 105100 口径）</text>
+
+  <line class="l" x1="450" y1="718" x2="450" y2="740" data-page-node-id="beQtaWVWTqE2A3CcODABkD"/>
+  <rect class="n" x="270" y="742" width="360" height="34" rx="7" data-page-node-id="BiCE9br0xn8fhSyyyMRWrS"/>
+  <text class="t" x="450" y="764" text-anchor="middle" data-page-node-id="v0kLbjZDfi9AdbtDiFNugo">输出：frame_count + best + candidates</text>
+
+  <text class="d" x="450" y="810" text-anchor="middle" data-page-node-id="I1Py0Aq5Zb6IvgbgzErd4g">排查开关：FRAME_PARSER_LOG_LEVEL=DEBUG 恢复逐候选明细｜开关前缀 FRAME_PARSER_NO_* 可单独关闭各救援通道</text>
+</svg>
+<div class="figcap" data-page-node-id="bKAylqOUFTBFfcqlh8hRbm">图 1 ｜ 图框识别管线（app.py · get_bounding_box_from_bytes）</div>
+</div>
+
+<h2 data-page-node-id="rFb2aAdu3g3jJbaRsGjIVC">二、校验闭环（改动必经）</h2>
+<div class="fig" data-page-node-id="AnnANRIWQQCxvCGVHmdyJj">
+<svg viewBox="0 0 900 300" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei, sans-serif" data-page-node-id="3wsZA3fUBwYpx76pmMyfkg">
+  <defs data-page-node-id="kEhQwdgs3uKOM6VUR6Cdqz">
+    <marker id="b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" data-page-node-id="9C35BHjRrIHvnBQsNFvBCn">
+      <path d="M0,0 L8,4 L0,8 z" fill="#4a5568" data-page-node-id="EXAVpoY5oIfYtySPAz3flO"/>
+    </marker>
+  </defs>
+  <style>
+    .n2 { fill: #eef3fb; stroke: #2f6fdb; stroke-width: 1.3; }
+    .v  { fill: #edf7ee; stroke: #3a8a46; stroke-width: 1.3; }
+    .t2 { font-size: 13px; fill: #1f2430; font-weight: bold; }
+    .d2 { font-size: 11px; fill: #5a6472; }
+    .l2 { stroke: #4a5568; stroke-width: 1.2; fill: none; marker-end: url(#b); }
+    .r  { font-size: 11px; fill: #b3541e; }
+  </style>
+
+  <rect class="n2" x="8" y="40" width="150" height="52" rx="7" data-page-node-id="3poout69CkQln3fsgLIaCQ"/>
+  <text class="t2" x="83" y="62" text-anchor="middle" data-page-node-id="hBFW4pDUwfCpWPk0tv4jwR">代码改动</text>
+  <text class="d2" x="83" y="79" text-anchor="middle" data-page-node-id="piI1Ld0VUmHg9YuQiVk12r">app.py 规则/口径</text>
+
+  <line class="l2" x1="158" y1="66" x2="192" y2="66" data-page-node-id="iTOSJ72mFoNqCiU62ECzZ9"/>
+
+  <rect class="v" x="194" y="40" width="170" height="52" rx="7" data-page-node-id="R3VviOz47IbmsRUHLfJGA5"/>
+  <text class="t2" x="279" y="62" text-anchor="middle" data-page-node-id="xxad1UGifcoGQOqIkVWbAw">51 项规则单测</text>
+  <text class="d2" x="279" y="79" text-anchor="middle" data-page-node-id="boZQZhTycheKMcrLZnDmqh">test_backend_rules.py</text>
+
+  <line class="l2" x1="364" y1="66" x2="398" y2="66" data-page-node-id="vizpmUVjb9ZtDxkDmIl611"/>
+
+  <rect class="v" x="400" y="24" width="200" height="84" rx="7" data-page-node-id="9xwVWKivoJKuBivpSjnwvk"/>
+  <text class="t2" x="500" y="46" text-anchor="middle" data-page-node-id="a3qm7iDadRrp3Ce1TPF89Z">31+ 张回归基线对比</text>
+  <text class="d2" x="500" y="63" text-anchor="middle" data-page-node-id="Oi2txhRGvEmbCXRQdPMFwF">regress_check.py（fc+best+尺寸分布）</text>
+  <text class="d2" x="500" y="79" text-anchor="middle" data-page-node-id="TjU05vnIWQJgS5BQhaPGRV">--files 冒烟 ｜ --update 基线入库</text>
+  <text class="d2" x="500" y="95" text-anchor="middle" data-page-node-id="GeZiFAJzdU4VHlTjyrMcHd">--update --files 单图增量补录</text>
+
+  <line class="l2" x1="500" y1="108" x2="500" y2="140" data-page-node-id="HH89NpWpvAu0I21Xm9BoWY"/>
+  <text class="r" x="512" y="128" data-page-node-id="Iv7IQWW1kEmDeWKQRCj6kL">DIFF → 逐条人工确认</text>
+  <rect class="n2" x="400" y="142" width="200" height="52" rx="7" data-page-node-id="7wjWCFQ5DQlQqQ0IrBEHnI"/>
+  <text class="t2" x="500" y="163" text-anchor="middle" data-page-node-id="EPvNyndASzgUZGCLDl5pou">预期效果 → 更新基线</text>
+  <text class="d2" x="500" y="180" text-anchor="middle" data-page-node-id="xrgPpeuOBumqDPDNhjGL9x">非预期 → 回查根因（禁止直接刷新基线）</text>
+
+  <line class="l2" x1="600" y1="168" x2="640" y2="168" data-page-node-id="gBjlJ5vKUpcbxiuSNWkWm5"/>
+
+  <rect class="v" x="642" y="142" width="180" height="52" rx="7" data-page-node-id="moFkazOJhLqCMc9siE8MOV"/>
+  <text class="t2" x="732" y="163" text-anchor="middle" data-page-node-id="1Gqzyi9QFdB0fXP7WgJuIo">渲染叠加核对</text>
+  <text class="d2" x="732" y="180" text-anchor="middle" data-page-node-id="4tJOt71DyZZ1AN3fcyCDsZ">检出框红线叠加原图</text>
+
+  <line class="l2" x1="732" y1="142" x2="732" y2="112" data-page-node-id="cPmRfcKOLGUZP2NpF2eAFG"/>
+
+  <rect class="n2" x="642" y="40" width="180" height="70" rx="7" data-page-node-id="dE8XRoiIlH18Cj4BjxXsul"/>
+  <text class="t2" x="732" y="62" text-anchor="middle" data-page-node-id="7BsMEeZQuzSCAMB0pWULHK">commit + push</text>
+  <text class="d2" x="732" y="79" text-anchor="middle" data-page-node-id="BBBpw8vpWPDogzyvPRyb4O">每轮修改一次 commit</text>
+  <text class="d2" x="732" y="95" text-anchor="middle" data-page-node-id="Uax3XjlTPbn3CuQqAL9u1v">Readme 记录该轮根因/修法</text>
+
+  <line class="l2" x1="642" y1="75" x2="610" y2="75" data-page-node-id="aZPO2YFDzWEJRp6cHAJKzb"/>
+  <text class="r" x="450" y="240" data-page-node-id="9wa7ihrzaG9PW1Dakq9gM1">渲染要点：ezdxf MatplotlibBackend.finalize 会改画布尺寸并重开 autoscale ——</text>
+  <text class="r" x="450" y="257" data-page-node-id="ALKYIN7YbpuSbGjYxLG8y4">draw_layout 后需 set_size_inches 夺回 + set_autoscale_on(False)，再叠红框与编号</text>
+  <text class="d2" x="450" y="282" text-anchor="middle" data-page-node-id="DEmM3s3mRtV1Y3pXx9SGLB">排查链路：fc 异常 → DEBUG 日志（候选/剔除明细）→ 临时诊断脚本（实体级 bbox 测量）→ 渲染定位</text>
+</svg>
+<div class="figcap" data-page-node-id="QUazzVzglVDPordFakL71a">图 2 ｜ 校验闭环：单测 → 回归 → 渲染核对 → 提交</div>
+</div>
+
+<h2 data-page-node-id="XtfnBFgYec5hlfGYBuo8LL">三、关键设计规则速查</h2>
+<table data-page-node-id="95Bj0AL40loFShmt7zrNN1">
+  <tr data-page-node-id="UfGKTdnLHYgU1f4gzeCr2D"><th style="width:90px" data-page-node-id="s4KUGddv9yPqHRygrczC4q">规则（轮次）</th><th data-page-node-id="P87kBGEw9lAWxBlkoFl3Ii">场景与判据</th></tr>
+  <tr data-page-node-id="XjzjdULUSShEqJFm6pDFSP"><td data-page-node-id="aVvCfql6h8SoX0je4jzl0i">组合预算剪枝（R22）</td><td data-page-node-id="EHgmk5cPYjOIKLs7GSPV8M">直线矩形通道组合数爆炸（百万级线对）耗尽预算 → 长边全配降级 + 竖对覆盖必要条件剪枝，真实框线对进入可达范围</td></tr>
+  <tr data-page-node-id="eU9BnlUjnk8h6YYBge278s"><td data-page-node-id="ZyFp6DwpUAn41WFAMr9SfH">斜放块去旋转口径（R25）</td><td data-page-node-id="37uc0ZcxsllmxhdzdEY3II">INSERT 旋转非 90° 倍数：bbox 是旋转外接矩形（面积/ratio 失真）→ 尺寸改用「块定义×缩放」真实图幅，bbox 保留作空间关系；打 <code data-page-node-id="DmUb82rQ1EoZ3zD69FoKrf">tilted</code> 标记</td></tr>
+  <tr data-page-node-id="fEIyaVRO3Yvo0g74fBimq7"><td data-page-node-id="lXmgIRWWgWwU0iA0LGN33J">同尺寸错排豁免（R25）</td><td data-page-node-id="17ioMqRqxGVJ7OKvYdY52x">去重规则2：宽高一致（2% 容差、含互换）且中心偏移 ≥5% → 两张独立错排图，IoU&gt;50% 也不剔</td></tr>
+  <tr data-page-node-id="Lwi52x9RWAkVUpBcOgt77E"><td data-page-node-id="Qhcn8Oniyktf4eFJLy7FPO">tilted 不作嵌套 outer（R25）</td><td data-page-node-id="umLLqtRScAzcIEei1GeJGD">斜放块 bbox「包含」≠真实包含（真实足迹是斜带），防止误剔 bbox 角落的邻位真框</td></tr>
+  <tr data-page-node-id="8X5aVlgna7EFdvjSrq61TR"><td data-page-node-id="U0iyccDB4wytEOwoMrH1q5"><b data-page-node-id="gSJiRirQ5JXIABx7DLaCaa">内容块剔除（R26）</b></td><td data-page-node-id="WFyTatgbBk6kLTCRtEDF0j">块定义内最长直边构件（LINE/LWPOLYLINE 边段/闭合 bbox/嵌套子块，递归含缩放）&lt; 块长边×30% → bbox 系稀疏散件撑出的「假图框」，不入候选库（典型：天正代理实体 + 辅助小方块，最长边仅块长边 0.19%）</td></tr>
+  <tr data-page-node-id="26jr2gVao3a4JOrYDJHEVg"><td data-page-node-id="e4yHWgKZHIMowMwIJogEG0">附栏外扩（R23）</td><td data-page-node-id="n5ZdBxmFw0V4aTP7kJu2Pe">横版主框（短边≥50000 且宽&lt;95000）左/右 2000~22000 邻位存在同排同规格图纸的图签条 → 外扩 21000 合并输出（105100 口径）</td></tr>
+</table>
+
+<h2 data-page-node-id="HDCmGOsFbdibTOZGl1q5g6">四、工具速查</h2>
+<table data-page-node-id="PH3pBWjRu72NZVdeByJAGU">
+  <tr data-page-node-id="81x7fys2DBDuYaKclAVi4a"><th style="width:280px" data-page-node-id="UctkV25kB826HEiCQL0mj8">命令 / 开关</th><th data-page-node-id="EwZMaTpSuSP4Y51O9DHOtk">用途</th></tr>
+  <tr data-page-node-id="gP6NwkVV15NluAr7g0ZewT"><td data-page-node-id="ouMBmPAgB4rKIHq11o8zQG"><code data-page-node-id="HDwTv8vtAHQyBi2QkEoGKL">python test_backend_rules.py</code></td><td data-page-node-id="qYDsasxW7QyHXNdYCC1dog">51 项后端规则单测（几何构造用例，秒级）</td></tr>
+  <tr data-page-node-id="ZkdFBOxnOKuA5saHZoOdWZ"><td data-page-node-id="U1aRujOe3AdvFqHQtEEGAo"><code data-page-node-id="fCi91sPAePd9cFmHUYmDcd">python regress_check.py</code></td><td data-page-node-id="RdEuRKmIEOQyXUOXZw4WIq">31+ 张全量回归对比基线（约 17 min，ODA 转换占大头）</td></tr>
+  <tr data-page-node-id="42NH7crsxEvlWGass7QyyC"><td data-page-node-id="yhzhvWk2WhunatwTFIdWrZ"><code data-page-node-id="VQlTzzI3KOnndPnWNXzXSa">python regress_check.py --files a.dwg</code></td><td data-page-node-id="7cBaB4lBrxqOU074IiY9yp">冒烟：只跑指定图（秒~分钟级）</td></tr>
+  <tr data-page-node-id="V6655DLKc1knkzvtsvzpfk"><td data-page-node-id="UcmNeSPjPEV4RGOGA3BL5I"><code data-page-node-id="Lvg1NORodt53iHjAW8LSZB">python regress_check.py --update [--files x.dwg]</code></td><td data-page-node-id="AfRRnFHrzzoTpGpUyj8Vr8">重建/增量补录基线（须先人工确认 DIFF 均为预期）</td></tr>
+  <tr data-page-node-id="WHCrV87o80bnD2q33PfcXt"><td data-page-node-id="RD1NEcCBLzQfuRNhhPDHUR"><code data-page-node-id="KAdaPFYoETDx8EbGXlsihU">FRAME_PARSER_LOG_LEVEL=DEBUG</code></td><td data-page-node-id="YSe8AS2s1g1wtokXswUeCO">恢复逐候选明细日志（候选/剔除/救援过程）</td></tr>
+  <tr data-page-node-id="hiXHD0W8FRBZFuh1wmjXpe"><td data-page-node-id="LHsBNP1dc2KfEjPxgskGOO"><code data-page-node-id="rBWddocq1GFxexBl6fOR9y">FRAME_PARSER_NO_WRAP_DOM / NO_TITLE_STRIP / NO_GRID_RESCUE=1</code></td><td data-page-node-id="5d7dE9qTUd3zYdljVYFiNy">单独关闭包裹主导剔除 / 附栏外扩 / 网格救援（定位回归归属）</td></tr>
+</table>
+
+</body>
+</html>
