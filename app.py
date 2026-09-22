@@ -1127,6 +1127,59 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         _block_bbox_cache[_name] = _bb_ret
         return _bb_ret
 
+    # ---------- R26：图框块「边框证据」校验 ----------
+    # 场景：6、10号楼住宅户型.dwg —— 块 -1fxhs0421 定义 bbox 143285×105800（图框级、
+    #   ratio 1.354），3 个实例曾被当图框（R25 还为它做了斜放块去旋转口径）。渲染+实体
+    #   级诊断证实它根本不是图框：块内 56 条多段线全是 200~279mm 的 S-辅助层小方块
+    #   散件，最长单条直边仅 200mm（块长边的 0.14%）——bbox 被稀疏散布的小构件撑大，
+    #   覆盖区基本空白。这类「内容块」霸占 rel 分母（面积 1.5e10），把同图真框的
+    #   rel 压到阈值之下（42000 上框 8.2%、26760 小框 3.0% <10% 被拒，fc 构成出错）。
+    # 判据：真图框块内部必有接近块尺寸的边框线（长边框线 ≥ 块长边的 80~100%），
+    #   内容块的最大构件远小于块尺寸。块内「最长直边构件」< 块 bbox 长边 × 30% →
+    #   判为内容块，不入候选库。构件含：LINE 长度、LWPOLYLINE 边段/闭合 bbox 长边、
+    #   嵌套 INSERT 子块 bbox 长边（图框边线可能在子块里，递归收集）。
+    _BLOCK_EVIDENCE_RATIO = 0.30
+    _block_evidence_cache = {}
+
+    def _block_max_member_len(_name, _visited=None):
+        """块定义内「最长直边构件」的长度（块定义内坐标，未应用 INSERT 缩放）"""
+        if _name in _block_evidence_cache:
+            return _block_evidence_cache[_name]
+        if _visited is None:
+            _visited = set()
+        if _name in _visited or _name not in doc.blocks:
+            return 0.0
+        _visited.add(_name)
+        _mx = 0.0
+        for _ent in doc.blocks[_name]:
+            try:
+                _t = _ent.dxftype()
+                if _t == 'LINE':
+                    _s, _e = _ent.dxf.start, _ent.dxf.end
+                    _mx = max(_mx, _math.hypot(_e.x - _s.x, _e.y - _s.y))
+                elif _t == 'LWPOLYLINE':
+                    _ps = _ent.get_points('xy')
+                    if len(_ps) >= 2:
+                        for _a, _b in zip(_ps, _ps[1:]):
+                            _mx = max(_mx, _math.hypot(_b[0] - _a[0], _b[1] - _a[1]))
+                        if _ent.closed:
+                            _a, _b = _ps[-1], _ps[0]
+                            _mx = max(_mx, _math.hypot(_b[0] - _a[0], _b[1] - _a[1]))
+                        _xs2 = [p[0] for p in _ps]; _ys2 = [p[1] for p in _ps]
+                        _mx = max(_mx, max(max(_xs2) - min(_xs2), max(_ys2) - min(_ys2)))
+                elif _t == 'INSERT':
+                    _sub_bb = _get_block_world_bbox(_ent.dxf.name)
+                    if _sub_bb is not None:
+                        _sx = getattr(_ent.dxf, 'xscale', 1) or 1
+                        _sy = getattr(_ent.dxf, 'yscale', 1) or 1
+                        _sub_len = max(_sub_bb[2] - _sub_bb[0], _sub_bb[3] - _sub_bb[1]) * max(abs(_sx), abs(_sy))
+                        _mx = max(_mx, _sub_len)
+                        _mx = max(_mx, _block_max_member_len(_ent.dxf.name, _visited))
+            except Exception:
+                continue
+        _block_evidence_cache[_name] = _mx
+        return _mx
+
     _rescued_keys = set()  # 布局空间网格图框救援命中的 bbox key（修法A，见下）
 
     # ---------- 修法A：布局空间「网格排版图框」救援（2026-09-11） ----------
@@ -1336,6 +1389,15 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                     and not _is_grid_rescued) or
                     not (FRAME_RATIO_MIN <= _w_ratio <= FRAME_RATIO_MAX)):
                 _insert_filtered += 1
+                continue
+            # R26 图框块「边框证据」校验：块内无接近块尺寸的边框构件 → 内容块
+            #   （bbox 被稀疏散件撑大，如 -1fxhs0421：最长直边 200mm vs 块长边 143285mm）
+            _bb_len = max(_bb_def[2] - _bb_def[0], _bb_def[3] - _bb_def[1])
+            if _bb_len > 0 and _block_max_member_len(_bn) < _bb_len * _BLOCK_EVIDENCE_RATIO:
+                _insert_filtered += 1
+                safe_log(f"  [内容块剔除] 块 {_bn}（{_w:.0f}×{_h:.0f}）内最长直边构件 "
+                         f"{_block_max_member_len(_bn):.0f}mm < 块长边 {_bb_len:.0f}mm × "
+                         f"{_BLOCK_EVIDENCE_RATIO:.0%}，判为非图框内容块")
                 continue
             if _key in seen_bbox:
                 continue
