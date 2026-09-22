@@ -1180,6 +1180,120 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         _block_evidence_cache[_name] = _mx
         return _mx
 
+    # ---------- R27：图框块「闭合边框证据」通道（升级 R26 边框证据校验） ----------
+    # 场景：拼接图.dwg —— 页内平面图内容块 9ZZZW（块定义 71846×50889，108 条 LINE +
+    #   6 条 LWPOLYLINE + proxy 散件），最长直边构件 45317mm = 块长边的 63%，R26 的
+    #   「最长构件 ≥30%」判据拦不住 → 5 个实例全部混入候选库。后果双重：
+    #   ① rel 11.8% 恰过条件C 门槛直接误检（5 个假图框）；② 上/下页框内部恰各含
+    #   2 个同尺寸 9ZZZW 实例，触发包裹框剔除（MIN_WRAPPED_SAME_SIZE=2）把真页框剔掉
+    #   （fc 5 = 3 真 + 2 假，真页框反而失踪）。
+    # 判据：真图框块内部必有「闭合矩形边框」——闭合 LWPOLYLINE 的 bbox、LINE 横竖
+    #   线配对成环（两横簇 + 两竖簇互相覆盖 ≥80% 成矩形）、或嵌套子块内的闭合框
+    #   （递归×缩放）。内容块（平面图）的轮廓线是开放散线，单条再长也凑不成闭合
+    #   矩形 → 闭合证据长边 < 块长边 × 50% → 判为内容块（主判）。
+    #   R26 的构件判据降为辅判（主判通过、但最长直边 <30% 的碎线拼框）。
+    _BLOCK_CLOSED_RATIO = 0.50
+    _block_closed_cache = {}
+
+    def _block_closed_frame_len(_name, _bb_len, _visited=None):
+        """块定义内「闭合矩形边框」的长边（块定义内坐标，未应用 INSERT 缩放）。
+        证据 = max(闭合 LWPOLYLINE bbox 长边, LINE 横竖簇配对矩形长边, 嵌套子块证据×缩放)。
+        无闭合框返回 0。"""
+        if _name in _block_closed_cache:
+            return _block_closed_cache[_name]
+        if _visited is None:
+            _visited = set()
+        if _name in _visited or _name not in doc.blocks or _bb_len <= 0:
+            return 0.0
+        _visited.add(_name)
+        _ev = 0.0
+        _tol_p = max(1.0, _bb_len * 0.002)      # 平行线/端点重合容差
+        _min_seg = _bb_len * 0.30               # 参与成框的边线最短长度
+        _h_lines = []                           # (y, x1, x2) 近似水平线
+        _v_lines = []                           # (x, y1, y2) 近似竖直线
+        for _ent in doc.blocks[_name]:
+            try:
+                _t = _ent.dxftype()
+                if _t == 'LINE':
+                    _s, _e = _ent.dxf.start, _ent.dxf.end
+                    _dx, _dy = _e.x - _s.x, _e.y - _s.y
+                    if _math.hypot(_dx, _dy) < _min_seg:
+                        continue
+                    if abs(_dy) <= _tol_p:
+                        _h_lines.append((min(_s.y, _e.y), min(_s.x, _e.x), max(_s.x, _e.x)))
+                    elif abs(_dx) <= _tol_p:
+                        _v_lines.append((min(_s.x, _e.x), min(_s.y, _e.y), max(_s.y, _e.y)))
+                elif _t == 'LWPOLYLINE':
+                    _ps = _ent.get_points('xy')
+                    if len(_ps) < 3:
+                        continue
+                    _xs2 = [p[0] for p in _ps]; _ys2 = [p[1] for p in _ps]
+                    # closed 标志，或首尾点重合（画框忘设 closed 标志的常见画法）
+                    _is_loop = bool(_ent.closed) or _math.hypot(
+                        _ps[-1][0] - _ps[0][0], _ps[-1][1] - _ps[0][1]) <= _tol_p * 2
+                    if _is_loop:
+                        _ev = max(_ev, max(max(_xs2) - min(_xs2), max(_ys2) - min(_ys2)))
+                elif _t == 'INSERT':
+                    _sub_bb = _get_block_world_bbox(_ent.dxf.name)
+                    if _sub_bb is not None:
+                        _sub_bblen = max(_sub_bb[2] - _sub_bb[0], _sub_bb[3] - _sub_bb[1])
+                        if _sub_bblen > 0:
+                            _sx = getattr(_ent.dxf, 'xscale', 1) or 1
+                            _sy = getattr(_ent.dxf, 'yscale', 1) or 1
+                            _ev = max(_ev, _block_closed_frame_len(
+                                _ent.dxf.name, _sub_bblen, _visited) * max(abs(_sx), abs(_sy)))
+            except Exception:
+                continue
+        # LINE 横竖簇配对成矩形：横线按 y 聚类、竖线按 x 聚类；两横簇
+        # （y 距 ≥_min_seg、x 重叠 ≥_min_seg 且覆盖短者 80%）+ 竖簇支撑
+        # （x 落在重叠带内、y 覆盖矩形高度 ≥80%）→ 判定存在闭合矩形。
+        _h_lines.sort()
+        _v_lines.sort()
+        _h_cl = []
+        for _y, _x1, _x2 in _h_lines:
+            if _h_cl and _y - _h_cl[-1][0] <= _tol_p:
+                _py, _px1, _px2 = _h_cl[-1]
+                _h_cl[-1] = (_py, min(_px1, _x1), max(_px2, _x2))
+            else:
+                _h_cl.append((_y, _x1, _x2))
+        _v_cl = []
+        for _x, _y1, _y2 in _v_lines:
+            if _v_cl and _x - _v_cl[-1][0] <= _tol_p:
+                _px, _py1, _py2 = _v_cl[-1]
+                _v_cl[-1] = (_px, min(_py1, _y1), max(_py2, _y2))
+            else:
+                _v_cl.append((_x, _y1, _y2))
+        for _i in range(len(_h_cl)):
+            _y1, _ha1, _ha2 = _h_cl[_i]
+            for _j in range(_i + 1, len(_h_cl)):
+                _y2, _hb1, _hb2 = _h_cl[_j]
+                _hh = _y2 - _y1
+                if _hh < _min_seg:
+                    continue
+                _ox1 = max(_ha1, _hb1); _ox2 = min(_ha2, _hb2)
+                if _ox2 - _ox1 < _min_seg:
+                    continue
+                if _ox2 - _ox1 < 0.80 * min(_ha2 - _ha1, _hb2 - _hb1):
+                    continue
+                _left = None; _right = None
+                for _vx, _vy1, _vy2 in _v_cl:
+                    if _vx > _ox2 + _tol_p:
+                        break           # _v_cl 已按 x 升序，后面只会更靠右
+                    if _vx < _ox1 - _tol_p:
+                        continue
+                    if min(_vy2, _y2) - max(_vy1, _y1) < 0.80 * _hh:
+                        continue
+                    if _left is None or _vx < _left:
+                        _left = _vx
+                    if _right is None or _vx > _right:
+                        _right = _vx
+                if _left is not None and _right is not None:
+                    _ww = min(_right, _ox2) - max(_left, _ox1)
+                    if _ww >= _min_seg:
+                        _ev = max(_ev, _ww, _hh)
+        _block_closed_cache[_name] = _ev
+        return _ev
+
     _rescued_keys = set()  # 布局空间网格图框救援命中的 bbox key（修法A，见下）
 
     # ---------- 修法A：布局空间「网格排版图框」救援（2026-09-11） ----------
@@ -1315,6 +1429,7 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     _insert_total = 0
     _insert_kept = 0
     _insert_filtered = 0  # 预筛剔除数（非图框级尺寸）
+    _r27_rej_max = 0.0    # R27 闭合通道拒绝、但构件证据合格的内容块最大面积（rel 分母计回用）
     for _entity in visible_entities:
         if _entity.dxftype() != 'INSERT':
             continue
@@ -1390,14 +1505,42 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                     not (FRAME_RATIO_MIN <= _w_ratio <= FRAME_RATIO_MAX)):
                 _insert_filtered += 1
                 continue
-            # R26 图框块「边框证据」校验：块内无接近块尺寸的边框构件 → 内容块
-            #   （bbox 被稀疏散件撑大，如 -1fxhs0421：最长直边 200mm vs 块长边 143285mm）
+            # R26/R27 图框块「边框证据」校验（双通道）：
+            #   主判（R27 闭合边框证据）：真图框块必有闭合矩形边框；内容块
+            #     （如 拼接图.dwg 的 9ZZZW：最长构件 63% 块长但无闭合矩形）剔除。
+            #   辅判（R26 构件证据）：最长直边构件 < 块长边×30% → bbox 被稀疏散件
+            #     撑大（如 -1fxhs0421：最长直边 200mm vs 块长边 143285mm）。
             _bb_len = max(_bb_def[2] - _bb_def[0], _bb_def[3] - _bb_def[1])
-            if _bb_len > 0 and _block_max_member_len(_bn) < _bb_len * _BLOCK_EVIDENCE_RATIO:
+            _reject_reason = None
+            if _bb_len > 0:
+                _closed_len = _block_closed_frame_len(_bn, _bb_len)
+                if _closed_len < _bb_len * _BLOCK_CLOSED_RATIO:
+                    _reject_reason = (f"无闭合边框证据（闭合框长边 {_closed_len:.0f}mm < 块长边 "
+                                      f"{_bb_len:.0f}mm × {_BLOCK_CLOSED_RATIO:.0%}）")
+                else:
+                    _member_len = _block_max_member_len(_bn)
+                    if _member_len < _bb_len * _BLOCK_EVIDENCE_RATIO:
+                        _reject_reason = (f"最长直边构件 {_member_len:.0f}mm < 块长边 {_bb_len:.0f}mm × "
+                                          f"{_BLOCK_EVIDENCE_RATIO:.0%}（闭合框疑为碎线拼成）")
+            if _reject_reason:
                 _insert_filtered += 1
-                safe_log(f"  [内容块剔除] 块 {_bn}（{_w:.0f}×{_h:.0f}）内最长直边构件 "
-                         f"{_block_max_member_len(_bn):.0f}mm < 块长边 {_bb_len:.0f}mm × "
-                         f"{_BLOCK_EVIDENCE_RATIO:.0%}，判为非图框内容块")
+                safe_log(f"  [内容块剔除] 块 {_bn}（{_w:.0f}×{_h:.0f}）{_reject_reason}，判为非图框内容块")
+                # R27 回归修复（一层.dwg fc 0→11）：闭合通道拒掉的块若构件证据合格
+                #   （最长直边构件 ≥ 块长边×30%，即"若非闭合拦截本可通过 R26 入库"），
+                #   其面积按 layout 记账，供 rel 分母计回。
+                #   根因：R26 时代这类块（如一层.dwg 标注内容块 A$C04810A0A
+                #   12240×8770）会入库成为 rel 分母；R27 拒掉后分母塌缩到家具级
+                #   候选（1.07e8→2.06e7），原本被条件C 10% 门槛压住的家具矩形
+                #   （957~5160mm）全部涌入并靠互证链逃生。计回 = 恢复 R26 分母。
+                #   不计回的：构件证据也不合格的块（S-0-COLS 26.2%、-1fxhs0421
+                #   0.19%）——R26 时代它们同样被拒、从未进过分母（1号2号楼
+                #   S-0-COLS 1.5e12 / 6、10号楼 -1fxhs0421 1.5e10 若计回会把
+                #   真框 rel 全部压死，fc 崩）。
+                if _bb_len > 0:
+                    _member_len_r27 = _block_max_member_len(_bn)
+                    if _member_len_r27 >= _bb_len * _BLOCK_EVIDENCE_RATIO:
+                        if _w * _h > _r27_rej_max:
+                            _r27_rej_max = _w * _h
                 continue
             if _key in seen_bbox:
                 continue
@@ -1633,7 +1776,7 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             })
         elif any(e.dxftype() == 'VIEWPORT' for e in visible_entities):
             safe_log(f"  [{layout_name}] 空布局（仅含视口，无绘图实体），跳过全实体包围盒降级")
-    return candidates
+    return candidates, _r27_rej_max
 
 # ---------- 主解析函数 ----------
 def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit='mm', mode='smart'):
@@ -1664,10 +1807,15 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
 
         # ---------- 逐 layout 收集候选，并计算同源的分母（该 layout 总包围盒面积） ----------
         all_candidates = []
+        # R27 回归修复：各 layout 被 R27 闭合通道拒绝、但构件证据合格的内容块最大面积，
+        # 计回条件C 的 rel 分母（恢复 R26 时代分母状态，防止塌缩后家具级候选涌入）
+        _r27_rejected_max_area = {}
 
         msp = doc.modelspace()
         msp_total = calculate_layout_total_bbox(msp, doc)
-        for c in collect_candidates_from_layout(msp, doc, '模型空间'):
+        _msp_cands, _msp_rej = collect_candidates_from_layout(msp, doc, '模型空间')
+        _r27_rejected_max_area['模型空间'] = _msp_rej
+        for c in _msp_cands:
             c['area_ratio'] = (c['area'] / msp_total) if msp_total > 0 else 1.0
             all_candidates.append(c)
 
@@ -1675,7 +1823,10 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             if layout.name == 'Model':
                 continue
             layout_total = calculate_layout_total_bbox(layout, doc)
-            for c in collect_candidates_from_layout(layout, doc, f'布局 "{layout.name}"'):
+            _lay_name = f'布局 "{layout.name}"'
+            _lay_cands, _lay_rej = collect_candidates_from_layout(layout, doc, _lay_name)
+            _r27_rejected_max_area[_lay_name] = _lay_rej
+            for c in _lay_cands:
                 c['area_ratio'] = (c['area'] / layout_total) if layout_total > 0 else 1.0
                 all_candidates.append(c)
 
@@ -1841,6 +1992,14 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 c['rel_area_ratio'] = 0.0
                 continue
             ma = layout_max_area.get(c['layout'], 0)
+            # R27 回归修复（一层.dwg fc 0→11）：入库阶段被 R27 闭合通道拒绝、但构件
+            # 证据合格的内容块面积计回分母。R26 时代这类块（一层.dwg A$C04810A0A
+            # 12240×8770）会入库成为分母；R27 拒掉后分母塌缩到家具级（1.07e8→2.06e7），
+            # 原本被 10% 门槛压住的家具矩形（rel 1.9~9.7%）全部涌入条件C 并靠互证链
+            # 逃生 → fc 0→11。取 max 计回天然自限：只修"塌缩"，无塌缩的图零影响。
+            _rej_ma = _r27_rejected_max_area.get(c['layout'], 0)
+            if _rej_ma > ma:
+                ma = _rej_ma
             c['rel_area_ratio'] = (c['area'] / ma) if ma > 0 else 0.0
 
         # 同 layout 同尺寸「直线矩形」计数（条件D：套图小页框重复排版判定）

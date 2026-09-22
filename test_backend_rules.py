@@ -843,5 +843,104 @@ check('附栏外扩: 端到端错排双框 → 105100 + 84100 (smart)',
       and any(abs(c['width'] - 84100) < 2 for c in r['candidates']))
 
 
+# =====================================================================
+# 第27轮：闭合边框证据通道（INSERT 内容块校验升级：闭合矩形成环判据）
+# =====================================================================
+
+# ---- 用例 44：LINE 横竖线配对成闭合矩形的块放行 ----
+# 块内边框由 4 条独立 LINE 画成（无闭合多段线）→ 闭合证据通道应识别成环放行。
+# 块内另散布 6 条 1000mm 小线段（< 30% 块长，不参与成框），fc=1。
+doc = make_doc()
+msp = doc.modelspace()
+_blk = doc.blocks.new(name='LINE_FRAME')
+add_line_rect(_blk, 0, 0, 71846, 50889)          # 4 条 LINE 闭合矩形（复刻 9ZZZW 尺寸）
+for _k in range(6):
+    _blk.add_line((1000 + _k * 3000, 20000), (2000 + _k * 3000, 20000))
+msp.add_blockref('LINE_FRAME', (0, 0))
+data = to_bytes(doc)
+check('闭合证据: LINE横竖线成环的图框块放行, fc=1 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and abs(r['candidates'][0]['width'] - 71846) < 5)
+
+# ---- 用例 45：长散线无闭合矩形 → 块剔除（9ZZZW 场景复刻） ----
+# 块内最长线 71846（100% 块长，远超 R26 的 30% 构件判据——R26 拦不住），
+# 但横竖线凑不成闭合矩形：唯一横线对的竖向支撑覆盖 68.8% < 80% → 主判剔除。
+# 注：入库即剔 → 0 候选 → app 走「全实体包围盒」降级兜底（区别于入库后被
+# 孤证复核剔掉才抛"未检测到图框"），故断言 = 无『块参照插入』类型候选。
+def _no_block_candidate(data):
+    try:
+        r = parse(data)
+    except RuntimeError as e:
+        return '未检测到图框' in str(e)
+    return not any(c.get('type') == '块参照插入' for c in r.get('candidates', []))
+
+
+doc = make_doc()
+msp = doc.modelspace()
+_blk = doc.blocks.new(name='PLAN_CONTENT')
+_blk.add_line((0, 0), (71846, 0))                # 横线 100% 块长
+_blk.add_line((0, 50889), (45317, 50889))        # 横线 63% 块长
+_blk.add_line((0, 0), (0, 35000))                # 竖线 y 覆盖 35000/50889=68.8% <80%
+_blk.add_line((60000, 10000), (60000, 45000))    # 竖线在横线对重叠带外(45317)
+msp.add_blockref('PLAN_CONTENT', (0, 0))
+data = to_bytes(doc)
+check('闭合证据: 长散线无闭合矩形的平面图块被剔 (smart)',
+      lambda: _no_block_candidate(data), lambda ok: ok)
+
+# ---- 用例 46：首尾重合的开放 LWPOLYLINE（忘设 closed 标志）放行 ----
+# CAD 常见画法：矩形多段线首尾点重合但未设 closed 标志 → 视同闭合，fc=1。
+doc = make_doc()
+msp = doc.modelspace()
+_blk = doc.blocks.new(name='OPEN_LOOP')
+_blk.add_lwpolyline([(0, 0), (40000, 0), (40000, 28000), (0, 28000), (0, 0)])
+msp.add_blockref('OPEN_LOOP', (0, 0))
+data = to_bytes(doc)
+check('闭合证据: 首尾重合的开放多段线视同闭合, fc=1 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and abs(r['candidates'][0]['height'] - 28000) < 5)
+
+# ---- 用例 47：R26 稀疏散件场景回归（-1fxhs0421 场景）仍被剔 ----
+# 块内 56 个 200mm 小闭合方块散布成 124800×78200 大 bbox：闭合证据 200mm
+# << 50% 块长（主判剔），最长构件同样不足（辅判兜底）。断言同用例 45。
+doc = make_doc()
+msp = doc.modelspace()
+_blk = doc.blocks.new(name='SCATTER')
+for _k in range(56):
+    _sx = (_k % 8) * 17800
+    _sy = (_k // 8) * 13000
+    _blk.add_lwpolyline([(_sx, _sy), (_sx + 200, _sy), (_sx + 200, _sy + 200), (_sx, _sy + 200)],
+                        close=True)
+msp.add_blockref('SCATTER', (0, 0))
+data = to_bytes(doc)
+check('闭合证据: 稀疏散件撑大bbox的块仍被剔 (smart)',
+      lambda: _no_block_candidate(data), lambda ok: ok)
+
+
+# ---- 用例 48：孤证互证——同尺寸副本对保留（R27 回归期间曾设想"资格下限"拦尘埃副本，
+#      被全量插桩数据证伪后改为正路径断言） ----
+# 两个 960×2400 门窗级小框（area_ratio ~0.03%，离群实体把 layout 撑到 300 万 mm 宽）
+# 靠互证①保留。原设想给互证①②⑥加 area_ratio/尺寸/类型资格下限拦掉此类"尘埃副本"，
+# 但 32 张基线图 413 条救援样本证明所有单维特征全部重叠：
+#   尺寸（420mm A3 真框 < 尘埃 957mm）、type（尘埃有闭合多段线、真框有直线矩形副本对
+#   滨江 11093×8535×15 / 地下室电力 73600×57400×11）、ar（DS4 真框 0.004% < 尘埃
+#   0.033%）、rel（全部 10~100% 交叉）——互证资格路线整体不可行。
+# 一层.dwg 的正确修法是 rel 分母计回（R27 拒块中构件合格者），本用例改测互证正路径；
+# "微型无框图纸两副本误检 2 框"为已知局限（真实基线 32 张无此场景）。
+doc = make_doc()
+msp = doc.modelspace()
+_blk = doc.blocks.new(name='DOOR_SYM')
+add_line_rect(_blk, 0, 0, 960, 2400)
+msp.add_blockref('DOOR_SYM', (30000, 0))
+msp.add_blockref('DOOR_SYM', (50000, 0))
+msp.add_line((3000000, 0), (3000500, 800))   # 离群实体撑爆 layout 总 bbox
+data = to_bytes(doc)
+check('孤证互证: 同尺寸副本对经互证①保留 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 2
+      and all(abs(c['width'] - 960) < 5 for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)
