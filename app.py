@@ -1302,6 +1302,24 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             _xm = min(p[0] for p in _wpts); _ym = min(p[1] for p in _wpts)
             _xM = max(p[0] for p in _wpts); _yM = max(p[1] for p in _wpts)
             _w = _xM - _xm; _h = _yM - _ym
+            # 斜放块（旋转非 90° 倍数）的 bbox 是「旋转后外接矩形」，面积/比例双双失真：
+            #   6、10号楼住宅户型.dwg：图框块 -1fxhs0421 定义 143285×105800（ratio 1.354），
+            #   某实例旋转 125° → bbox 168851×178056（面积膨胀 1.98 倍、ratio 1.055）。
+            #   失真后果：① 膨胀面积虚增 rel 分母，同图 12 个 59450×42050 真框的
+            #   rel 被压到 8.31%（<10%）→ 条件C 全拒，fc 20→5；② ratio 1.055 <
+            #   1.343 被条件C 的 _at_least_sqrt2 拒，斜放图框本体漏检。
+            #   修法：width/height/area 改用「去旋转真实图幅」（块定义×缩放，旋转不改
+            #   面积），bbox 保留膨胀框用于空间关系（去重/包裹/嵌套判断）。
+            #   并打 tilted 标记：bbox 是「旋转外接矩形」，不代表真实足迹（真实足迹
+            #   只是框内斜带），去重规则1 不得以其 bbox 为包含区域剔内部候选——
+            #   否则斜放框 bbox 角落处的邻位真框（74300/59450）被误剔（fc 20→18）。
+            _tilted = 1e-6 < (_ins_rot % 90.0) < 90.0 - 1e-6
+            if _tilted:
+                _sw = abs(_xs) * (_bx2 - _bx1)
+                _sh = abs(_ys) * (_by2 - _by1)
+                if _sw > 0 and _sh > 0:
+                    _w = max(_sw, _sh)
+                    _h = min(_sw, _sh)
             if _w <= 0 or _h <= 0:
                 continue
             _bbox = (_xm, _ym, _xM, _yM)
@@ -1337,6 +1355,9 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 # 即 297×210=A4，12 个实例以 ×1/×2/×4/×10/×20 插入）。
                 'block_def_w': abs(_bb_def[2] - _bb_def[0]),
                 'block_def_h': abs(_bb_def[3] - _bb_def[1]),
+                # 斜放块标记（旋转非 90° 倍数）：bbox 是旋转外接矩形（膨胀框），
+                # 去重规则1 不得以其 bbox 为包含区域剔除内部候选
+                'tilted': _tilted,
             })
             _insert_kept += 1
         except Exception:
@@ -2455,6 +2476,30 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 return 0.0
             return inter / union
 
+        def _same_size_offset_dup(c, outer):
+            """同尺寸错排豁免：宽高一致（含互换）但中心错位 ≥5% 边长 → 两张独立错排图。
+
+            场景（6、10号楼住宅户型.dwg）：同列上下两张 105800×143285 图框纯 y 向
+            错位 19781mm（13.8%），IoU=75.7% > 50% 被规则2 误剔（fc 20→19）。
+            真重复画法（同框画两遍/双检测路径）中心偏移 ≈0，不受影响；
+            内外框（74300/72550 差 2.4%、59450/57700 差 2.9%）尺寸超 2% 容差
+            不算"同尺寸"，照旧按嵌套/IoU 剔除。
+            """
+            cw, ch = c['width'], c['height']
+            ow, oh = outer['width'], outer['height']
+            if min(cw, ch) <= 0 or min(ow, oh) <= 0:
+                return False
+            _same = ((abs(cw - ow) <= 0.02 * max(cw, ow) and
+                      abs(ch - oh) <= 0.02 * max(ch, oh)) or
+                     (abs(cw - oh) <= 0.02 * max(cw, oh) and
+                      abs(ch - ow) <= 0.02 * max(ch, ow)))
+            if not _same:
+                return False
+            _mx = max(ow, oh)
+            _off_x = abs((c['bbox'][0] + c['bbox'][2]) - (outer['bbox'][0] + outer['bbox'][2])) / 2.0
+            _off_y = abs((c['bbox'][1] + c['bbox'][3]) - (outer['bbox'][1] + outer['bbox'][3])) / 2.0
+            return max(_off_x, _off_y) / _mx >= 0.05
+
         def deduplicate_candidates(cands):
             """按 layout 分组，组内去除嵌套候选和高度重叠候选，保留面积最大者"""
             if len(cands) <= 1:
@@ -2479,9 +2524,14 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                             continue
                         ox1, oy1, ox2, oy2 = outer['bbox']
                         # 规则1：嵌套——c 的 bbox 完全包含在 outer 内，且面积明显更小
-                        if (cx1 >= ox1 - NESTED_EPS and cy1 >= oy1 - NESTED_EPS and
-                            cx2 <= ox2 + NESTED_EPS and cy2 <= oy2 + NESTED_EPS and
-                            c['area'] < outer['area'] * NESTED_AREA_RATIO):
+                        #   outer 为斜放块（tilted，旋转非 90° 倍数）时跳过：其 bbox 是
+                        #   旋转外接矩形（膨胀框），真实足迹只是框内斜带，bbox「包含」
+                        #   ≠真实包含（6、10号楼住宅户型：斜放框 bbox 误剔了其 bbox
+                        #   角落处的邻位真框 74300×42050 与 59450×42050，fc 20→18）
+                        if (not outer.get('tilted') and
+                                cx1 >= ox1 - NESTED_EPS and cy1 >= oy1 - NESTED_EPS and
+                                cx2 <= ox2 + NESTED_EPS and cy2 <= oy2 + NESTED_EPS and
+                                c['area'] < outer['area'] * NESTED_AREA_RATIO):
                             should_remove = True
                             hit_outer = outer
                             break
@@ -2491,7 +2541,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         #   处理"图框边线+内部标注线围出的部分区域假矩形"
                         if c['area'] <= outer['area']:
                             iou = bbox_iou(c['bbox'], outer['bbox'])
-                            if iou > IOU_THRESHOLD:
+                            if iou > IOU_THRESHOLD and not _same_size_offset_dup(c, outer):
                                 should_remove = True
                                 hit_outer = outer
                                 break

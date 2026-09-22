@@ -78,7 +78,13 @@ def main():
 
     if args.update:
         appmod = load_app()
-        baseline = {}
+        # 增量补录语义：--update --files 指定图时保留其余基线条目（目录新增图纸
+        # 补录基线不必全量重跑 17 分钟）；全量 --update（不带 --files）重建基线
+        if only and os.path.exists(BASELINE_PATH):
+            with open(BASELINE_PATH, encoding='utf-8') as f:
+                baseline = json.load(f)
+        else:
+            baseline = {}
         for fp in files:
             fn = os.path.basename(fp)
             baseline[fn] = parse_one(appmod, fp)
