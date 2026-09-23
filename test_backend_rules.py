@@ -680,11 +680,18 @@ check('条件I防护栏: 被包住的表格框不救援, fc=1 (smart)',
 # （2×2 网格）。旧规则对"块参照插入"一律豁免包裹剔除 → 4 个真图框被嵌套
 # 去重"留大剔小"全吃掉，只剩底图外框（fc=1）。新规则：块参照在内部尺寸组
 # 强证据（同尺寸组 ≥3）时不再豁免 → 底图外框被剔，fc=4。
+# R30：4 个页框走条件 D（rel 6.8%<10%、同尺寸≥2），D 新增内容证据后
+# 每框补 4 个内部小矩形（16 实体 ≥12）——真实柱网图页框内本就有内容。
 doc = make_doc()
 msp = doc.modelspace()
 for _i in range(2):
     for _j in range(2):
-        add_line_rect(msp, _i * 40000, _j * 86000, 39598, 28000)   # ratio≈√2
+        _fx, _fy = _i * 40000, _j * 86000
+        add_line_rect(msp, _fx, _fy, 39598, 28000)   # ratio≈√2
+        for _m in range(2):                           # 框内内容（R30 条件D 内容证据）
+            for _n in range(2):
+                add_line_rect(msp, _fx + 2000 + _m * 18000, _fy + 2000 + _n * 12000,
+                              1000, 800)
 _blk_w = doc.blocks.new(name='BASE_WRAP')
 add_closed_rect(_blk_w, 0, 0, 90000, 180000)
 msp.add_blockref('BASE_WRAP', (-1000, -1000))
@@ -973,6 +980,44 @@ msp.add_line((3000000, 0), (3000500, 800))   # 离群实体撑爆 layout 总 bbo
 data = to_bytes(doc)
 check('孤证互证⑤扩词防误伤: 匿名块名 a6 无词边界仍剔除 (smart)',
       lambda: expect_error_no_frame(data), lambda ok: ok)
+
+
+# ---- 用例 51：条件D 内容证据——同尺寸重复的空轮廓框不救援（坡道大样6月） ----
+# 真实场景：坡道大样6月 三个同尺寸 4700×6000"机动车库"房间轮廓（ratio 1.2766
+# 恰在 √2±10% 容差内擦线 9.73%、rel 2.26%≥1%、同尺寸≥2）全过条件 D 误检
+# fc 12→13。真页框内必有图纸内容（电子称 14894×10531×2 实测 517/485 个实体），
+# 重复内容轮廓内部近乎空白（实测 0/0/1）——条件 D 要求框内严格内部实体
+# ≥12 才判页框。大框 40000×30000 撑 rel 分母（其自身 rel=100% 走条件 C，
+# 随后被孤证复核剔除：无任何互证）。
+doc = make_doc()
+msp = doc.modelspace()
+add_line_rect(msp, 0, 0, 40000, 30000)
+add_line_rect(msp, 60000, 0, 4700, 6000)
+add_line_rect(msp, 80000, 0, 4700, 6000)
+msp.add_line((3000000, 0), (3000500, 800))   # 离群实体撑爆 layout 总 bbox
+data = to_bytes(doc)
+check('条件D内容证据: 同尺寸空轮廓框不救援, fc=0 (smart)',
+      lambda: expect_error_no_frame(data), lambda ok: ok)
+
+
+# ---- 用例 52：条件D 内容证据正路径——框内有内容的同尺寸页框保留 ----
+# 与用例 51 同构，但两个 4700×6000 框内各有 13 条横线（≥12）→ 条件 D 放行
+# → 大框被孤证复核剔除 → fc=2。
+doc = make_doc()
+msp = doc.modelspace()
+add_line_rect(msp, 0, 0, 40000, 30000)
+add_line_rect(msp, 60000, 0, 4700, 6000)
+for _k in range(13):
+    msp.add_line((60100, 100 + _k * 400), (64000, 100 + _k * 400))
+add_line_rect(msp, 80000, 0, 4700, 6000)
+for _k in range(13):
+    msp.add_line((80100, 100 + _k * 400), (84000, 100 + _k * 400))
+msp.add_line((3000000, 0), (3000500, 800))   # 离群实体撑爆 layout 总 bbox
+data = to_bytes(doc)
+check('条件D内容证据: 框内有内容的同尺寸页框保留 fc=2 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 2
+      and all(abs(c['width'] - 4700) < 5 for c in r['candidates']))
 
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

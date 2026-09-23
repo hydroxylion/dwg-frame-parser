@@ -2010,6 +2010,58 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 _rk = (_c['layout'], round(_c['width']), round(_c['height']))
                 _rect_size_count[_rk] = _rect_size_count.get(_rk, 0) + 1
 
+        # R30 条件D 内容证据：框内**严格内部**完全包含的实体数（惰性缓存 per layout）。
+        # 口径与条件 H 的实体收集一致（同实体类型白名单），但判定窗口为边界内缩
+        # COND_D_INNER_TOL——排除候选自身 4 条边线（边线 bbox 落在候选边界上，
+        # ±1 容差会误收，导致"空框也有 4 个实体"）。惰性缓存：D 候选通常极少，
+        # 无 D 候选的图零开销。
+        COND_D_MIN_ENTITIES = 12   # 框内实体数下限（电子称真页框 517/485 vs 坡道大样内容框 ≤1）
+        COND_D_INNER_TOL = 1.0     # 严格内缩容差（mm）
+        _cond_d_ent_bbs = {}
+
+        def _cond_d_entity_count(c):
+            _ln = c['layout']
+            if _ln not in _cond_d_ent_bbs:
+                if _ln == '模型空间':
+                    _lay = msp
+                else:
+                    try:
+                        _lay = doc.layouts.get(_ln[3:-1] if _ln.startswith('布局 "') else _ln)
+                    except Exception:
+                        _lay = None
+                _bbs = []
+                if _lay is not None:
+                    for ent in _lay:
+                        _t = ent.dxftype()
+                        if _t not in ('LINE', 'LWPOLYLINE', 'POLYLINE', 'ARC', 'CIRCLE',
+                                      'INSERT', 'ELLIPSE', 'SPLINE', 'HATCH', 'SOLID',
+                                      'TEXT', 'MTEXT', 'DIMENSION'):
+                            continue
+                        try:
+                            if _t == 'LINE':
+                                _bb = (min(ent.dxf.start.x, ent.dxf.end.x),
+                                       min(ent.dxf.start.y, ent.dxf.end.y),
+                                       max(ent.dxf.start.x, ent.dxf.end.x),
+                                       max(ent.dxf.start.y, ent.dxf.end.y))
+                            else:
+                                _bb4 = get_entity_bbox(ent, doc)
+                                _bb = None if _bb4 is None else tuple(_bb4[:4])
+                        except Exception:
+                            continue
+                        if _bb is not None:
+                            _bbs.append(_bb)
+                _cond_d_ent_bbs[_ln] = _bbs
+            _x1, _y1, _x2, _y2 = c['bbox']
+            _tol = COND_D_INNER_TOL
+            _n = 0
+            for _bx1, _by1, _bx2, _by2 in _cond_d_ent_bbs[_ln]:
+                if (_bx1 >= _x1 + _tol and _by1 >= _y1 + _tol and
+                        _bx2 <= _x2 - _tol and _by2 <= _y2 - _tol):
+                    _n += 1
+                    if _n >= COND_D_MIN_ENTITIES:
+                        break
+            return _n
+
         def is_frame_like(c):
             if not (FRAME_RATIO_MIN <= c['ratio'] <= FRAME_RATIO_MAX):
                 return False
@@ -2102,9 +2154,17 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #   14894×10531 页框 ×2，rel=2.9% 过不了 C 但确为真页框）。
             #   rel≥1% 排除重复表格/阵列矩形（如 1300×2000×12 rel=0.05%、1575×1100），
             #   它们不是图框却同尺寸成批出现。
+            #   R30 内容证据：以上判据不再充分——坡道大样6月 三个同尺寸 4700×6000
+            #   "机动车库"房间轮廓（ratio 1.2766 恰在 √2±10% 内擦线 9.73%、
+            #   rel 2.26%≥1%）全过 D 误检 1 个（fc 12→13）。真页框内必有图纸内容
+            #   （电子称 14894×10531×2 实测框内 517/485 个实体），重复内容轮廓内部
+            #   近乎空白（实测 0/0/1 个）——框内**严格内部**（边界内缩 1mm，排除候选
+            #   自身 4 条边线）完全包含实体 ≥ COND_D_MIN_ENTITIES 才判页框。
+            #   阈值与条件 H 对齐；分离度极端（517 vs ≤1），12 留足余量。
             if (c['type'] == '直线矩形' and c['short_side'] >= 500
                     and _near_sqrt2 and _rect_same_size >= 2
-                    and c['rel_area_ratio'] >= 0.01):
+                    and c['rel_area_ratio'] >= 0.01
+                    and _cond_d_entity_count(c) >= COND_D_MIN_ENTITIES):
                 c['_via'] = 'D'
                 return True
             # 条件E（A+ 通道）："块模板本身就是标准图幅" + 实例按常用制图比例等比缩放。
