@@ -1020,5 +1020,38 @@ check('条件D内容证据: 框内有内容的同尺寸页框保留 fc=2 (smart)
       and all(abs(c['width'] - 4700) < 5 for c in r['candidates']))
 
 
+# ---- 用例 53：S015——非标比例双线图框被"分母塌缩+包裹剔除"连环误杀 ----
+# 真实场景复现：外框 66900×42050（ratio 1.591，偏离√2 12.5%）+ 内框
+# 65150×41050（嵌套双线画法，面积比 95.07%）+ 图签块 TUQIAN2（3500×8802
+# 竖长 ratio 2.51）+ 框内 4 个内容矩形（4941×2582×2 水箱等轴测轮廓 +
+# 1350×3100×2 坑井轮廓）+ 框外小实体撑大 layout。
+# 旧逻辑链条：两大框命中分母排除判据①（area_ratio≥0.5 且 ratio 偏离√2>10%）
+# 被踢出 rel 分母 → 分母塌缩到图签块（30.8e6，占 layout ~1.1% 恰好躲过
+# 1% 塌缩防护）→ 4 个内容矩形 rel 被放大 91 倍（0.45%/0.15% → 41%/14%）
+# 全部越过条件 C 且同尺寸互证通过孤证复核 → 两大框反因"各含 2 个独立
+# 尺寸组"被包裹剔除 → fc=4（内容冒充图框）。
+# 修复：判据① 加"近√2 页面级候选存在性"前提——layout 内不存在近√2 且
+# area_ratio≥2% 的候选时，非标比例大框不踢出分母（无稀释对象、踢出只会
+# 塌缩）。分母恢复 2.813e9 → 内容矩形 rel 回真实值全拒 → 无包裹剔除 →
+# 内框（IoU 95.07%）被去重收掉 → fc=1（外框 66900×42050）。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, -20200, -5500, 66900, 42050)   # 外框（闭合多段线，ratio 1.591）
+add_closed_rect(msp, -18950, -5000, 65150, 41050)   # 内框（双线画法）
+add_line_rect(msp, -15614, 18693, 4941, 2582)       # 水箱等轴测轮廓 #1
+add_line_rect(msp, -13187, 20094, 4941, 2582)       # 水箱等轴测轮廓 #2（部分重叠）
+add_line_rect(msp, 14850, -200, 1350, 3100)         # 坑井轮廓 #1
+add_line_rect(msp, 17800, -200, 1350, 3100)         # 坑井轮廓 #2
+_blk_tq = doc.blocks.new(name='TUQIAN2')            # 图签块（竖长表格，ratio 2.51）
+add_closed_rect(_blk_tq, 0, 0, 3500, 8802)
+msp.add_blockref('TUQIAN2', (42700, -5000))
+msp.add_line((50000, -6000), (50500, -5700))        # 框外小实体撑大 layout bbox
+data = to_bytes(doc)
+check('S015: 非标比例双线图框保留, 内容矩形不冒充, fc=1 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and abs(r['width'] - 66900) < 5 and abs(r['height'] - 42050) < 5)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)

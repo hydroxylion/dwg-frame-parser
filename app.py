@@ -1928,6 +1928,33 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         # 被排除的大框（命中判据①② 的内容级底图/排版外框）单独记一份：它们不能作分母，
         # 但当 layout 里别无图框级候选时，需要它们来判定"这个 layout 压根没有参照系"。
         layout_excluded_big = {}
+        # 判据① 豁免预扫描（2026-09-23，S015.dwg fc=1→4）：
+        #   统计每个 layout 是否存在「近√2（±10%）且 area_ratio≥2%」的页面级候选。
+        #   判据① 踢"面积占比≥50% 且比例偏离√2>10%"的大框，本意是踢"整图排版底框"
+        #   （一楼大厅及展厅：261665×214254 ratio 1.22、area_ratio 92% 包住 10 张
+        #   真页面块——若留作分母，页面 rel 被稀释到 1.3~4.2% 全拒）。但 S015 证明
+        #   该假设有反例：66900×42050 ratio 1.591、area_ratio 99.9% 的**非标比例
+        #   真图框**（含标题栏与 65150×41050 内框双线画法）同样命中判据① 被踢出
+        #   分母 → 分母塌缩到图签块 TUQIAN2（3500×8802，占 layout 1.09%，恰好
+        #   躲过 1% 塌缩防护门槛）→ 框内 4 个内容矩形（水箱等轴测轮廓 4941×2582×2 +
+        #   坑井轮廓 1350×3100×2）rel 被放大 91.4 倍（真实 0.45%/0.15% → 41%/14%）
+        #   全部越过条件 C → 两大框反因"各含 2 个独立尺寸组"被包裹剔除 → fc=4。
+        #   两类场景的区分关键：layout 里**有没有近√2 的页面级候选**——
+        #     一楼大厅：有（真页面 ratio 1.4143、area_ratio 最大 3.9%）→ 非标大框
+        #       是"排版底框"且有稀释对象，踢出分母是对的；
+        #     S015/运煤胶带机：没有 → 非标大框没有稀释对象（即便有页面也因
+        #       area_ratio<2% 而必然过不了条件 C 的 10% 门槛），踢出只会造成分母
+        #       塌缩（S015 fc=4 误检 / 运煤胶带机需塌缩防护兜底），豁免保留其
+        #       分母资格——分母恢复后内容矩形 rel 回真实值，S015 fc=4→1。
+        #   阈值 2% 依据实测分离度：一楼大厅页面块 area_ratio 1.2~3.9%（最大者
+        #   须计入"存在"才能维持保护）vs S015 唯一近√2 内容块 3200×4500
+        #   area_ratio 0.51%（若计入会维持误踢）——2% 居中留余量。
+        _sqrt2_page_exists = {}
+        for c in all_candidates:
+            if c['area_ratio'] > 1.0:
+                continue  # 异常候选与分母排除段同口径，不参与"存在性"判定
+            if abs(c['ratio'] / (2 ** 0.5) - 1) <= 0.10 and c['area_ratio'] >= 0.02:
+                _sqrt2_page_exists[c['layout']] = True
         for c in all_candidates:
             if c['area_ratio'] > 1.0:
                 continue  # 异常候选不作为相对面积参考
@@ -1945,7 +1972,12 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #  真整页图框即使 area_ratio≈100%（图纸目录 42000×29700）也近 √2 且 ratio≤2.5，
             #  两种判据都不命中，仍作分母无害（单图框 layout 中即 rel=1）。
             #  这类大底框自身仍可被条件 A 收入候选，最终由包裹剔除收掉（内含 ≥2 独立尺寸组）。
-            if (c['area_ratio'] >= 0.5 and abs(c['ratio'] / (2 ** 0.5) - 1) > 0.10) or \
+            #  判据① 豁免（2026-09-23，S015.dwg）：layout 内**不存在**近√2 页面级候选时
+            #  （_sqrt2_page_exists=False），非标比例大框不踢出分母——没有稀释对象，
+            #  踢出只会导致分母塌缩（见上方预扫描注释）。
+            if (_sqrt2_page_exists.get(c['layout'])
+                    and c['area_ratio'] >= 0.5
+                    and abs(c['ratio'] / (2 ** 0.5) - 1) > 0.10) or \
                (c['area_ratio'] >= 0.15 and c['ratio'] > 2.5):
                 _ln = c['layout']
                 if _ln not in layout_excluded_big or c['area'] > layout_excluded_big[_ln]['area']:
