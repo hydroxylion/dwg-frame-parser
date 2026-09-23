@@ -1431,6 +1431,12 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     _insert_kept = 0
     _insert_filtered = 0  # 预筛剔除数（非图框级尺寸）
     _r27_rej_max = 0.0    # R27 闭合通道拒绝、但构件证据合格的内容块最大面积（rel 分母计回用）
+    # R30：计回尺寸上限。真图框长边物理上限 ≈ A0 纸 1189mm × 1:1000 出图 ≈ 1.19e6mm，
+    # 取 2.5e6 留两倍余量。超限的巨型底图/xref 外包络（S010 北区商业街底图
+    # 6345273×1806446，块内含超长道路线使构件证据"合格"）不得计回——否则 rel
+    # 分母被污染 1833 倍，真图框（105100×59400）rel 仅 0.054%，条件 C 永远
+    # 拒之门外 → fc=0 漏检（前端 force_max 降级显示"尺寸对但图框数 0"）。
+    _R27_CREDIT_MAX_SIDE = 2_500_000
     for _entity in visible_entities:
         if _entity.dxftype() != 'INSERT':
             continue
@@ -1539,7 +1545,8 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 #   真框 rel 全部压死，fc 崩）。
                 if _bb_len > 0:
                     _member_len_r27 = _block_max_member_len(_bn)
-                    if _member_len_r27 >= _bb_len * _BLOCK_EVIDENCE_RATIO:
+                    if (_member_len_r27 >= _bb_len * _BLOCK_EVIDENCE_RATIO
+                            and max(_w, _h) <= _R27_CREDIT_MAX_SIDE):
                         if _w * _h > _r27_rej_max:
                             _r27_rej_max = _w * _h
                 continue
