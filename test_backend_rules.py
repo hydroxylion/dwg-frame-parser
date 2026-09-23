@@ -1053,5 +1053,59 @@ check('S015: 非标比例双线图框保留, 内容矩形不冒充, fc=1 (smart)
       and abs(r['width'] - 66900) < 5 and abs(r['height'] - 42050) < 5)
 
 
+# ---- 用例 54：D011_t3——45° 斜向内容主导 + 轴对齐图框：旋转矫正不得误转 ----
+# 真实场景复现：两个 A2 图框（59400×42000 外框 + 55900×40000 内框，闭合多段线
+# 双线画法，轴对齐，孤立摆在 x≈1e6 处）+ 大量 45° 方向长线（斜向轴网，线长占比
+# 65.5% ≥ 主体共旋门限 65%）。旧逻辑：主峰 45.5° 偏离水平/垂直超阈值且族占比
+# 达标 → 整图旋转 45.5° → 轴对齐图框被转成 45° 斜 → LWPOLYLINE bbox 变
+# 71592×71808 近正方形（ratio 1.003 < 1.05）被比例过滤拒 → fc=0。
+# 修复：旋转触发前探测「轴对齐图框级闭合矩形」（4 顶点、x/y 各≤2 个不同值、
+# ratio∈[1.34,2.5]、短边≥2000）——存在则豁免不旋转（检测目标本来就是正的）。
+# 修复后：不旋转 → 图框正常识别，内框被嵌套去重剔（面积比 89.6%<95%）→ fc=2。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 1084256, -110661, 59400, 42000)   # 图框 #1 外框（A2×100）
+add_closed_rect(msp, 1086756, -109661, 55900, 40000)   # 图框 #1 内框
+add_closed_rect(msp, 993782, -169274, 59400, 42000)    # 图框 #2 外框
+add_closed_rect(msp, 996282, -168274, 55900, 40000)    # 图框 #2 内框
+for _i in range(20):                                    # 45° 斜向轴网线（长 74965×20）
+    _x0 = _i * 3000
+    msp.add_line((_x0, 0), (_x0 + 53000, 53000))
+data = to_bytes(doc)
+check('D011: 45度斜向内容不误触发旋转, 轴对齐图框 fc=2 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 2
+      and all(abs(c['width'] - 59400) < 5 and abs(c['height'] - 42000) < 5
+              for c in r['candidates']))
+
+
+# ---- 用例 55：UCS 真斜图框——豁免不得误触发，矫正仍生效 ----
+# 总图-排水场景：图框整体斜存（顶点 x/y 各 4 个不同值，非轴对齐矩形）
+# → 豁免不触发 → 旋转矫正照常把图框转正 → fc=1。锁定豁免只拦"图框本来是正的"
+# 的场景，不误伤真斜图。
+# 注：角度取 3.5°（1° 直方图桶中心）——旋转矫正按峰值桶中心转正，若真实角度
+# 在桶内偏移（如 3.3°）会残留 ≤0.5° 量化误差使 bbox 膨胀 ~500mm（固有行为，
+# 与本修复无关）；取桶中心使转正后尺寸精确、断言可用严格容差。
+import math as _math
+doc = make_doc()
+msp = doc.modelspace()
+_ang = _math.radians(3.5)
+_cos, _sin = _math.cos(_ang), _math.sin(_ang)
+
+
+def _rot_pts(x, y, w, h):
+    return [(x + dx * _cos - dy * _sin, y + dx * _sin + dy * _cos)
+            for dx, dy in ((0, 0), (w, 0), (w, h), (0, h))]
+
+
+msp.add_lwpolyline(_rot_pts(0, 0, 59400, 42000), close=True)      # 外框（斜 3.3°）
+msp.add_lwpolyline(_rot_pts(1750, 1000, 55900, 40000), close=True)  # 内框
+data = to_bytes(doc)
+check('UCS 斜图框: 豁免不误触发, 矫正转正 fc=1 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and abs(r['width'] - 59400) < 2 and abs(r['height'] - 42000) < 2)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)

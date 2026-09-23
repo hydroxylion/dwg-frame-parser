@@ -233,6 +233,20 @@ ROT_BIN_COUNT = 180            # 角度直方图分桶（1°/桶），量化误�
 ROT_TRIGGER_DEG = 1.5          # 主方向偏离最近 90° 倍数超过该角度才触发旋转矫正
 ROT_MIN_SAMPLES = 6            # 参与角度统计的最少线段数（太少不可信，不旋转）
 ROT_DOMINANT_RATIO = 0.65      # 主方向族(+正交 90°)合计长度占比 ≥ 此值才视为整图共旋
+# 豁免探测（2026-09-23，D011_t3.dwg fc=0）：
+#   D011 两个 A2 图框（59400×42000 闭合多段线双线画法）**轴对齐**摆在图纸一角，
+#   而斜向轴网类线条占全图线长 70.6%（45°+44° 两桶 15.3M mm）——主峰 45.5° 且
+#   族占比 ≥65% 使旋转矫正触发，整图转 45.5° 后**轴对齐图框被转成 45° 斜**，
+#   bbox 变 71592×71808 近正方形（ratio 1.003 < 1.05）被比例过滤拒 → 候选 0 →
+#   fc=0。"主体共旋 ≥65%"门限防的是美立方（图框正+56% 内容斜 3.5°），挡不住
+#   斜向内容占比更高的图。本质：矫正决策只看线条方向统计、不看检测目标（图框）
+#   是否已经轴对齐——图框本来就是正的时候，旋转无收益、纯毁目标。
+#   豁免：旋转触发条件满足后，若图中存在「轴对齐图框级闭合矩形」（closed
+#   LWPOLYLINE、4 顶点、x/y 各 ≤2 个不同值、比例与短边图框级）则不旋转。
+#   真斜图（总图-排水 UCS 3.3°）图框顶点多 x/y 值 → 豁免不触发、照常矫正。
+ROT_EXEMPT_RATIO_MIN = 1.34   # 轴对齐矩形长宽比下限（与闭合多段线条件C 下限一致）
+ROT_EXEMPT_RATIO_MAX = 2.5    # 上限（与条件C 一致）
+ROT_EXEMPT_MIN_SHORT = 2000   # 短边下限：图框级（低于此视为内容小框，不豁免）
 
 
 def _estimate_global_rotation(entities):
@@ -248,6 +262,7 @@ def _estimate_global_rotation(entities):
     _hist = [0.0] * ROT_BIN_COUNT
     _total_len = 0.0
     _seg_cnt = 0
+    _axis_frame_seen = False   # 豁免探测：图中存在轴对齐图框级闭合矩形
     for _ent in entities:
         try:
             _t = _ent.dxftype()
@@ -258,6 +273,26 @@ def _estimate_global_rotation(entities):
                 _pts = list(_ent.get_points('xy'))
                 _segs = [((a[0], a[1]), (b[0], b[1]))
                          for a, b in zip(_pts, _pts[1:] + _pts[:1])]
+                # 豁免探测：closed（或首尾重合）LWPOLYLINE，去重端点后恰 4 顶点、
+                # x/y 各 ≤2 个不同值（1mm 容差）→ 轴对齐矩形；比例与短边图框级
+                # 才计"存在"（内容小矩形不豁免）。
+                if not _axis_frame_seen and len(_pts) >= 4 and (
+                        _ent.closed or _m.hypot(_pts[0][0] - _pts[-1][0],
+                                                _pts[0][1] - _pts[-1][1]) <= 1.0):
+                    _pp = _pts[:-1] if (not _ent.closed and len(_pts) == 5) else _pts
+                    if len(_pp) == 4:
+                        _xs = sorted(p[0] for p in _pp)
+                        _ys = sorted(p[1] for p in _pp)
+                        _nx = 1 + sum(1 for _a, _b in zip(_xs, _xs[1:]) if _b - _a > 1.0)
+                        _ny = 1 + sum(1 for _a, _b in zip(_ys, _ys[1:]) if _b - _a > 1.0)
+                        if _nx <= 2 and _ny <= 2:
+                            _w = _xs[-1] - _xs[0]
+                            _h = _ys[-1] - _ys[0]
+                            if _w > 0 and _h > 0:
+                                _rr = max(_w, _h) / min(_w, _h)
+                                if (ROT_EXEMPT_RATIO_MIN <= _rr <= ROT_EXEMPT_RATIO_MAX
+                                        and min(_w, _h) >= ROT_EXEMPT_MIN_SHORT):
+                                    _axis_frame_seen = True
             else:
                 continue
             for (_x1, _y1), (_x2, _y2) in _segs:
@@ -291,6 +326,14 @@ def _estimate_global_rotation(entities):
     # 主方向偏离最近 90° 倍数（水平/垂直）的角度
     _nearest = round(_theta / (_m.pi / 2)) * (_m.pi / 2)
     if abs(_theta - _nearest) <= _m.radians(ROT_TRIGGER_DEG):
+        return None
+    if _axis_frame_seen:
+        # 豁免（D011_t3）：图中已存在轴对齐的图框级闭合矩形——检测目标本来就
+        # 是正的，旋转只会把正图框转斜（斜向内容主导的图纸族占比门限挡不住）。
+        safe_log(f"  [旋转矫正豁免] 主方向 {_theta / _m.pi * 180:.1f}° 虽触发旋转条件，"
+                 f"但图中存在轴对齐的图框级闭合矩形（短边≥{ROT_EXEMPT_MIN_SHORT}、"
+                 f"比例 {ROT_EXEMPT_RATIO_MIN}~{ROT_EXEMPT_RATIO_MAX}）——图框本已轴对齐，"
+                 f"跳过旋转（避免把正图框转斜，D011_t3 场景）")
         return None
     return (_m.cos(_theta), _m.sin(_theta))  # 旋转矩阵参数，使主方向转回 0°
 
