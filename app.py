@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import contextlib
 import socket
@@ -2448,7 +2449,10 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         #   ④ 内部完全包含带标题栏条纹的子候选（标题栏在框内 = 真页框。罗马都市
         #     21121×14813 图框内含 174 个子候选、其中 2 个带条纹；一层.dwg 电梯
         #     大样外轮廓内含候选 0 条纹）；
-        #   ⑤ 块名含"图框/frame"（设计者显式声明的图框块）。
+        #   ⑤ 块名含"图框/frame"（设计者显式声明的图框块）；R29 扩词：图幅代号
+        #     A0~A9 同为图幅命名证据（13013-11-AW-FP.dwg 独立图纸块名 A1+0.25，
+        #     A1 加长 1/4 图幅——全图唯一无副本、ratio 无兄弟、图签条纹未检出，
+        #     六通道 score=0 被误杀。词边界防 A$C... 匿名块名与 A31005 类编号）。
         # 而标注类轮廓（大样外框、图例框、说明框）通常尺寸比例各不相同、无条纹。
         # 判据（全部满足才剔除）：
         #   ① 仅经条件C 通过（_via == 'C'。A 是面积主导、B/D/E 本身就是强证据）；
@@ -2475,9 +2479,12 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             'same_ratio_sibling': 1.0,  # ② 同 layout 同比例兄弟（±1%）
             'title_stripe':       1.0,  # ③ 自带标题栏条纹
             'stripe_inside':      1.0,  # ④ 内含带条纹子候选（标题栏在框内）
-            'name_declared':      1.0,  # ⑤ 块名含 图框/frame
+            'name_declared':      1.0,  # ⑤ 块名含 图框/frame/图幅代号(A0~A9)
             'nested_frame':       1.0,  # ⑥ 内含不同尺寸通过候选（嵌套内外框）
         }
+        # ⑤ 图幅代号：A0~A9 独立词。(?<![a-z0-9]) 防匿名块名 A$C6A6C4DA6
+        # （其 a6 前是字母数字无词边界）；(?![0-9]) 防 A31005 类图纸编号误伤。
+        _SHEET_SIZE_NAME_RE = re.compile(r'(?<![a-z0-9])a[0-9](?![0-9])')
         _SOLO_DEBUG = os.environ.get('FRAME_PARSER_SOLO_DEBUG') == '1'
 
         def _solo_evidence_score(_c):
@@ -2514,9 +2521,13 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     _hits.append(f"④内含条纹子 {_o['width']:.0f}x{_o['height']:.0f}")
                     break
             _bn5 = (_c.get('block_name') or '').lower()  # ⑤ 块名显式声明
+            _m5 = _SHEET_SIZE_NAME_RE.search(_bn5)
             if '图框' in _bn5 or 'frame' in _bn5:
                 _score += _SOLO_WEIGHTS['name_declared']
                 _hits.append('⑤块名声明')
+            elif _m5:
+                _score += _SOLO_WEIGHTS['name_declared']
+                _hits.append(f"⑤块名图幅({_m5.group(0).upper()})")
             for _o in frame_like:                       # ⑥ 嵌套内外框
                 if _o is _c or _o['layout'] != _lk:
                     continue

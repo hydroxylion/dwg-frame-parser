@@ -942,5 +942,38 @@ check('孤证互证: 同尺寸副本对经互证①保留 (smart)',
       and all(abs(c['width'] - 960) < 5 for c in r['candidates']))
 
 
+# ---- 用例 49：孤证互证⑤扩词——块名图幅代号（A0~A9）救援独立图框 ----
+# 真实场景（13013-11-AW-FP.dwg）：A1 加长 1/4 图幅（1:150 出图）的独立图纸
+# 157650×89100，块名 A1+0.25，全图唯一、ratio 1.769 无同比例兄弟、图签条纹
+# 未被检出（③盲点）→ 六通道 score=0 被孤证复核误杀。块名图幅代号是设计者
+# 按图幅命名图框块的强证据，与"图框/frame"同权重。词边界 (?<![a-z0-9])a[0-9](?![0-9])
+# 防 A$C... 匿名块名（其 a6 前是字母数字）与 A31005 类编号误伤。
+doc = make_doc()
+msp = doc.modelspace()
+_blk = doc.blocks.new(name='A1+0.25')
+add_line_rect(_blk, 0, 0, 84100, 59400)
+msp.add_blockref('A1+0.25', (100000, 0))
+msp.add_line((3000000, 0), (3000500, 800))   # 离群实体撑爆 layout 总 bbox
+data = to_bytes(doc)
+check('孤证互证⑤扩词: 块名图幅代号 A1+0.25 救援独立图框 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and abs(r['candidates'][0]['width'] - 84100) < 5)
+
+
+# ---- 用例 50：孤证互证⑤扩词防误伤——匿名块名含"a6"不命中图幅代号 ----
+# A$C6A6C4DA6 类 ACAD 匿名块名 lower 后含 a6，但 a6 前是字母数字（无词边界），
+# 不得命中图幅代号——同构造的孤立尘埃块仍应被孤证复核剔除。
+doc = make_doc()
+msp = doc.modelspace()
+_blk = doc.blocks.new(name='A$C6A6C4DA6')
+add_line_rect(_blk, 0, 0, 960, 2400)
+msp.add_blockref('A$C6A6C4DA6', (30000, 0))
+msp.add_line((3000000, 0), (3000500, 800))   # 离群实体撑爆 layout 总 bbox
+data = to_bytes(doc)
+check('孤证互证⑤扩词防误伤: 匿名块名 a6 无词边界仍剔除 (smart)',
+      lambda: expect_error_no_frame(data), lambda ok: ok)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)
