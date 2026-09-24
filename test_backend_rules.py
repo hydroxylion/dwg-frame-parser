@@ -1241,5 +1241,122 @@ check('R36非矩形块无内含真框: 不让位照常保留, fc=2=321093x2 (sma
       and not any(abs(c['width'] - 518495) < 5 for c in r['candidates']))
 
 
+# ---- 用例 59：d013 修复（R37）：空壳幽灵锚点 + 孤证 A 系纸（d013.dwg 3 实际 4 检出） ----
+# d013 与 d012 同系列（配电房大样及接地）但两处形态关键差异：
+#   差异1：38 顶点不规则边界（矩形度 0.70）在 **顶层**（d012 在块内走 R36 让位）
+#     → 被顶层矩形度过滤正确拒绝、从未成候选 → R34 空壳剔除的 ① 找不到
+#     [25%,50%)×big 窗口内的被罩者（200700A 仅占 518495 面积 14.6%）
+#     → 518495 存活 → 去重"留大剔小"吃掉完全包含于其中的真图框 200700A。
+#     修1（幽灵锚点）：候选锚点搜索无果时，追加接受布局内**闭合 LWPOLYLINE
+#     原始实体 bbox**（38v 边界 bbox 321093×259386：面积 47.9%∈[25,50)、
+#     交集 91.6%、错位溢出，四条件全过）；排除与 big 自身 bbox 相同者
+#     （d012 BZ 518495 自身是闭合多段线的自锚防护）；④ 认领逻辑不变。
+#   差异2：独立 A1 大样框 84100×59400（直线矩形，与所有候选无嵌套、无同尺寸
+#     副本）——rel=2.88%（分母被 518495 抬大）过不了 C、area_ratio 1.2% 过不了
+#     A、同尺寸仅 1 份过不了 D、非块候选 E 不适用 → 四通道全败漏检。
+#     修2（条件F 孤证 A 系纸）：直线矩形 + ratio 近√2(±2%) + rel∈[1%,10%)
+#     + short_side≥20000 + 框内严格内部实体≥12。
+#   两修缺一不可：仅修1 → 缺模型 84100；仅修2 → 518495 仍在、200700A 仍被吃。
+def _build_d013_like_doc():
+    doc = make_doc()
+    msp = doc.modelspace()
+    # [0] 518495×335087 出图范围框——d013 中是 4 条 LINE 的直线矩形（d012 是
+    # BZ 层闭合多段线）；ratio 1.5473 偏离 √2 9.41% 擦线进 √2 保护
+    add_line_rect(msp, 2090800, -4552675, 518495, 335087)
+    # [1][2] 38 顶点不规则闭合边界 ×2——顶层 LWPOLYLINE（矩形度 <0.92 正确拒绝，
+    # 不成候选；但作为闭合 LWPOLYLINE 其实体 bbox 是修1 的幽灵锚点）
+    _irreg_pts = [(0, 0), (321093, 0), (321093, 50000), (240000, 120000),
+                  (321093, 190000), (321093, 259386), (180000, 259386),
+                  (90000, 170000), (0, 259386)]
+    msp.add_lwpolyline([(x + 2190078, y - 4574520) for x, y in _irreg_pts], close=True)
+    msp.add_lwpolyline([(x + 2190078, y - 4979330) for x, y in _irreg_pts], close=True)
+    # [3][4] 真图框 200700×126150 ×2（直线矩形；rel=14.6% 走条件C；
+    # [3] 完全包含于 518495 → 修1 失效时被去重"留大剔小"吃掉）
+    add_line_rect(msp, 2265921, -4456370, 200700, 126150)
+    add_line_rect(msp, 2265921, -4861180, 200700, 126150)
+    # 框内内容横线 ×2×25（真实 d013 框内 ≥40 实体；横线略短于框宽不成假矩形，
+    # y 在框内自底边向上均布）。同时承担 R34 条件④ 的线长基数：真实 d013
+    # 518495 bbox 内总线长 1.53e7（38v 边界自由段仅占 6.8%），单测需等量级
+    # 认领线复现 <10% 口径。
+    for _bx, _by in ((2265921, -4456370), (2265921, -4861180)):
+        for _k in range(25):
+            msp.add_line((_bx + 1079, _by + 4370 + _k * 4900),
+                         (_bx + 199079, _by + 4370 + _k * 4900))
+    # [5][6] 内框 195450×123150 ×2（rel=13.9% 过 C，去重被 200700 嵌套收掉）
+    add_line_rect(msp, 2269671, -4454870, 195450, 123150)
+    add_line_rect(msp, 2269671, -4859680, 195450, 123150)
+    # [7] 独立 A1 大样框 84100×59400（d013 真实坐标；与所有候选无嵌套交集）
+    add_line_rect(msp, 2135989, -4842605, 84100, 59400)
+    # 框内内容证据 13 条横线（条件F 要求严格内部实体 ≥12；单 y 簇不成假矩形）
+    for _k in range(13):
+        msp.add_line((2140000 + _k * 4000, -4820000),
+                     (2140000 + _k * 4000 + 3000, -4820000))
+    # 远距离散实体撑大 msp 总 bbox（复刻 area_ratio 量级，同用例 56/57）
+    add_line_rect(msp, 1000000, -1000000, 3000, 2000)
+    add_line_rect(msp, 3500000, -5500000, 3000, 2000)
+    # 布局"配电房大样及接地"：84100×59400 图框 + 80600×57400 内框（去重被嵌套收掉）
+    _lay13 = doc.layouts.new('配电房大样及接地')
+    add_closed_rect(_lay13, 0, 0, 84100, 59400)
+    add_closed_rect(_lay13, 1000, 1000, 80600, 57400)
+    return to_bytes(doc)
+
+
+_data13 = _build_d013_like_doc()
+check('d013: 幽灵锚点剔范围框 + 条件F救孤证A1, fc=4 (smart)',
+      lambda: parse(_data13),
+      lambda r: r['frame_count'] == 4
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 200700) < 5 and abs(c['height'] - 126150) < 5) == 2
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 84100) < 5 and abs(c['height'] - 59400) < 5) == 2
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 84100) < 5 and c['layout'] == '模型空间') == 1
+      and not any(abs(c['width'] - 518495) < 5 for c in r['candidates'])
+      and not any(abs(c['width'] - 321093) < 5 for c in r['candidates'])
+      and not any(abs(c['width'] - 195450) < 5 for c in r['candidates']))
+
+
+def _parse_env(data, **switches):
+    """带环境开关的解析（用后恢复），供开关守卫用例。"""
+    import os as _os
+    _saved = {k: _os.environ.get(k) for k in switches}
+    for _k, _v in switches.items():
+        _os.environ[_k] = _v
+    try:
+        return parse(data)
+    finally:
+        for _k, _v in _saved.items():
+            if _v is None:
+                _os.environ.pop(_k, None)
+            else:
+                _os.environ[_k] = _v
+
+
+# ---- 用例 60：开关守卫 NO_SHELL_GHOST=1（修1 关、修2 开） ----
+# 范围框 518495 复活（无幽灵锚点）→ 去重吃掉 200700A；84100model 靠条件F 仍被
+# 救回 → fc=4 但构成退化为 {518495, 200700B, 84100模, 84100布}。
+check('d013开关 NO_SHELL_GHOST=1: 范围框复活吃200700A, fc=4含518495',
+      lambda: _parse_env(_data13, FRAME_PARSER_NO_SHELL_GHOST='1'),
+      lambda r: r['frame_count'] == 4
+      and any(abs(c['width'] - 518495) < 5 for c in r['candidates'])
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 200700) < 5 and abs(c['height'] - 126150) < 5) == 1
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 84100) < 5 and abs(c['height'] - 59400) < 5) == 2)
+
+# ---- 用例 61：开关守卫 NO_COND_F=1（修1 开、修2 关） ----
+# 范围框被幽灵锚点剔除、200700A 存活；独立 A1 因无条件F 漏检 → fc=3。
+check('d013开关 NO_COND_F=1: 独立A1漏检, fc=3=200700x2+84100布',
+      lambda: _parse_env(_data13, FRAME_PARSER_NO_COND_F='1'),
+      lambda r: r['frame_count'] == 3
+      and not any(abs(c['width'] - 518495) < 5 for c in r['candidates'])
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 200700) < 5 and abs(c['height'] - 126150) < 5) == 2
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 84100) < 5 and abs(c['height'] - 59400) < 5) == 1
+      and any(abs(c['width'] - 84100) < 5 and c['layout'] != '模型空间'
+              for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)

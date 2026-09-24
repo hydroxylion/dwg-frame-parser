@@ -2331,6 +2331,31 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     and _cond_d_entity_count(c) >= COND_D_MIN_ENTITIES):
                 c['_via'] = 'D'
                 return True
+            # 条件F（R37）：「孤证 A 系纸」——d013.dwg 漏检的独立 A1 大样框。
+            #   场景：84100×59400（ratio 1.4158，偏差 0.11%）直线矩形独立放置、
+            #   无嵌套无同尺寸副本——rel=2.88%（分母被同 layout 最大候选 518495
+            #   抬大）过不了 C、area_ratio 1.2% 过不了 A、同尺寸仅 1 份过不了 D、
+            #   非块候选 E 不适用 → 特征评分四通道全败漏检。
+            #   判据设计：
+            #   * ratio ±2%：A 系纸宽高比公差极小（84100/59400 偏差 0.11%）；
+            #     挡掉 73600×57400 内框（9.35%）与 200700×126150（12.5%）
+            #   * rel∈[1%,10%)：下限与条件D 同门槛（排除 rel<1% 的孤立小矩形），
+            #     上限即条件C 已拒的区间——本通道只救"C 差一点"的孤证
+            #   * short_side ≥20000：1:1 机械图幅短边 ≤~2500 与 1:100 建筑图幅
+            #     短边 ≥29700 的分界——只有建筑 1:100 级大图才可能孤证 A 系纸
+            #   * 内容证据 ≥12：与条件D 同阈值（d013 实测 84100 框内 ≥40，
+            #     73600 内框仅 3 被自然挡住）
+            #   本通道设 _via='F'：孤证复核只查 _via=='C'，F 成员天然豁免
+            #   （内容证据 ≥12 本身已是强证据，无需再复核）。
+            #   开关 FRAME_PARSER_NO_COND_F=1 可关（回退旧行为）。
+            if (os.environ.get('FRAME_PARSER_NO_COND_F') != '1'
+                    and c['type'] == '直线矩形'
+                    and abs(c['ratio'] - _SQRT2) / _SQRT2 <= 0.02
+                    and 0.01 <= c['rel_area_ratio'] < REL_AREA_THRESHOLD
+                    and c['short_side'] >= 20000
+                    and _cond_d_entity_count(c) >= COND_D_MIN_ENTITIES):
+                c['_via'] = 'F'
+                return True
             # 条件E（A+ 通道）："块模板本身就是标准图幅" + 实例按常用制图比例等比缩放。
             #   场景：同一个标准图幅图框块被以多种比例重复插入（2.8米皮带线.DWG：块
             #   A4-横-杨勇 块定义 297×210=A4，12 个实例以 ×1/×2×8/×4/×10/×20 插入，
@@ -2942,6 +2967,63 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                             _shell_c = _sc
                             _shell_inter_pct = _inter / _sa2 * 100.0
                             break
+                        # R37 修1「幽灵锚点」（d013.dwg 3 实际 4 检出）：候选锚点
+                        # 搜索无果时，追加搜索布局内**闭合 LWPOLYLINE 的原始实体
+                        # bbox**。d013 与 d012 同系列但形态关键差异：d012 的 38 顶点
+                        # 不规则边界（矩形度 0.70）在块内（hfzxhx INSERT×2）→ 走 R36
+                        # 让位；d013 中它是顶层 LWPOLYLINE×2（块定义存在但无 INSERT）
+                        # → 被顶层矩形度过滤正确拒绝、从未成为候选 → 上面的候选锚点
+                        # 搜索找不到 [25%,50%)×big 窗口内的被罩者（200700A 仅占
+                        # 518495 面积 14.6%）→ 518495 存活 → 去重"留大剔小"吃掉完全
+                        # 包含于其中的真图框 200700A。38v 边界虽非候选，但作为几何
+                        # 实体其 bbox 恰是 321093×259386——面积 47.9%∈[25,50)×big、
+                        # 交集 91.6%、错位溢出，四条件依旧全过。排除与 big 自身 bbox
+                        # 相同的闭合多段线（d012 的 BZ 518495 自身是闭合多段线，若不
+                        # 自排除会自我锚定）。④ 认领逻辑不变（d013 实测现状口径自由
+                        # 占比 6.84% <10% 已通过）。开关 FRAME_PARSER_NO_SHELL_GHOST=1
+                        # 可关（回退旧行为）。
+                        if (_shell_c is None
+                                and os.environ.get('FRAME_PARSER_NO_SHELL_GHOST') != '1'
+                                and lay_objs):
+                            _lay_big = lay_objs.get(big['layout'])
+                            if _lay_big is not None:
+                                _ox1, _oy1, _ox2, _oy2 = big['bbox']
+                                for _ge in _lay_big:
+                                    try:
+                                        if _ge.dxftype() != 'LWPOLYLINE' or not _ge.closed:
+                                            continue
+                                        _gb4 = get_entity_bbox(_ge, doc)
+                                        if _gb4 is None:
+                                            continue
+                                        _gb = tuple(_gb4[:4])
+                                    except Exception:
+                                        continue
+                                    if _gb == tuple(big['bbox']):
+                                        continue  # 自排除：d012 BZ 自锚防护
+                                    _gw = _gb[2] - _gb[0]
+                                    _gh = _gb[3] - _gb[1]
+                                    _ga = _gw * _gh
+                                    if not (big['area'] * SHELL_INNER_AREA_MIN <= _ga
+                                            <= big['area'] * WRAP_INNER_AREA_RATIO):
+                                        continue
+                                    _iw = min(_ox2, _gb[2]) - max(_ox1, _gb[0])
+                                    _ih = min(_oy2, _gb[3]) - max(_oy1, _gb[1])
+                                    if _iw <= 0 or _ih <= 0:
+                                        continue
+                                    _inter = _iw * _ih
+                                    if _inter < _ga * SHELL_OVERLAP_RATIO:
+                                        continue
+                                    # ③ 未被 big 完全包含（错位溢出）——ghost 不是
+                                    # 候选，直接按 bbox 判（口径同 _is_contained）
+                                    if (_gb[0] >= _ox1 - WRAPPED_EPS
+                                            and _gb[1] >= _oy1 - WRAPPED_EPS
+                                            and _gb[2] <= _ox2 + WRAPPED_EPS
+                                            and _gb[3] <= _oy2 + WRAPPED_EPS):
+                                        continue
+                                    _shell_c = {'bbox': _gb, 'width': _gw,
+                                                'height': _gh, '_ghost': True}
+                                    _shell_inter_pct = _inter / _ga * 100.0
+                                    break
                         if _shell_c is not None and all_bboxes_by_layout and lay_objs:
                             from math import hypot as _shell_hypot
                             _ln_big = big['layout']
@@ -2989,6 +3071,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                 safe_log(f"  [空壳范围框剔除] {big['layout']} | "
                                          f"{big['width']:.0f}×{big['height']:.0f}（ratio {_bw/_bs:.3f}）"
                                          f"罩住 {_shell_c['width']:.0f}×{_shell_c['height']:.0f}"
+                                         f"{'（幽灵锚点：非候选闭合边界）' if _shell_c.get('_ghost') else ''}"
                                          f"（交集 {_shell_inter_pct:.0f}%、错位溢出）"
                                          f"| bbox 内自由内容线长占比 {_sparse * 100:.1f}%"
                                          f"<{SHELL_SPARSE_FREE_MAX * 100:.0f}% → 判为范围框非图框"
