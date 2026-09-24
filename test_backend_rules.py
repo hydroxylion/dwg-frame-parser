@@ -1157,5 +1157,89 @@ check('d012空壳范围框: √2保护破例剔除, fc=2 (smart)',
               if abs(c['width'] - 321093) < 5 and abs(c['height'] - 259386) < 5) == 2)
 
 
+# ---- 用例 57：R36 非矩形边界块让位内含真框（d012.dwg 真实块形态复刻） ----
+# hfzxhx 块定义内仅 1 条闭合不规则边界多段线（38 顶点 + 3 圆弧、宽 0.5m，矩形度
+# 实测 0.7005——基坑/用地范围线形态，非图框）。块 bbox 321093×259386 经 R27 闭合
+# 证据通道（旧判据把任何闭合多段线都当边框证据）+ 条件I 表格救援入池，每块 bbox
+# 恰完全包住一个真图框 200700×126150（顶层 4 顶点矩形）→ 去重"留大剔小"把真框
+# 吃掉 → 报 321093×2（用户在 CAD 里找不到：8 号灰点划线不规则边界是范围线）。
+# 修复：包裹剔除后、去重前，"闭合成环但非矩形"的块参照让位给内含显式矩形真框。
+# 注意：不能在 R27 入口直接淘汰——R34 空壳破例剔 BZ 518495 范围框依赖 321093
+# 候选触发（面积 47.9% ∈(25%,50%)×big + 错位半包含），入口淘汰会让 BZ 复活并
+# 反向吃掉 200700A。本用例同时守护该连锁（BZ 必须仍被剔除）。
+doc = make_doc()
+msp = doc.modelspace()
+# [0] BZ 层范围框（同用例 56）
+add_closed_rect(msp, 2090800, -4552675, 518495, 335087)
+# [1][2] "图框"块参照——块定义换成不规则闭合边界（矩形度 0.835 <0.92，带斜边）
+_blk_r36 = doc.blocks.new(name='HFZXHX_IRREG')
+_blk_r36.add_lwpolyline([
+    (0, 0), (321093, 0), (321093, 50000), (240000, 120000), (321093, 190000),
+    (321093, 259386), (180000, 259386), (90000, 170000), (0, 259386),
+], close=True)
+msp.add_blockref('HFZXHX_IRREG', (2190078, -4574520))
+msp.add_blockref('HFZXHX_IRREG', (2190078, -4979330))
+# 条件I 表格线（同用例 56：每框内顶层横线 ≥30 + 竖线 ≥6）
+for _bx, _by in ((2190078, -4574520), (2190078, -4979330)):
+    for _k in range(32):
+        _yy = _by + 3000 + _k * 7500
+        msp.add_line((_bx + 2000, _yy), (_bx + 319093, _yy))
+    for _k in range(7):
+        _xx = _bx + 30000 + _k * 42000
+        msp.add_line((_xx, _by + 2000), (_xx, _by + 257386))
+# 每块 bbox 内的真图框组（200700 + 195450，去重时 195450 被嵌套收掉，200700 应存活）
+add_closed_rect(msp, 2265921, -4456370, 200700, 126150)   # [1] 内
+add_closed_rect(msp, 2269671, -4454870, 195450, 123150)
+add_closed_rect(msp, 2265921, -4861180, 200700, 126150)   # [2] 内
+add_closed_rect(msp, 2269671, -4859680, 195450, 123150)
+# [0] bbox 内自由散线 + 远距离散实体（同用例 56）
+msp.add_line((2091000, -4350000), (2091000, -4420000))
+msp.add_line((2300000, -4217000), (2352000, -4269000))
+add_line_rect(msp, 1000000, -1000000, 3000, 2000)
+add_line_rect(msp, 3500000, -5500000, 3000, 2000)
+data = to_bytes(doc)
+check('R36非矩形边界块让位: 不规则块输给内含真框, fc=2=200700x2 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 2
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 200700) < 5 and abs(c['height'] - 126150) < 5) == 2
+      and not any(abs(c['width'] - 321093) < 5 for c in r['candidates'])
+      and not any(abs(c['width'] - 518495) < 5 for c in r['candidates']))
+
+
+# ---- 用例 58：非矩形块但无内含真框 → 不让位、照常保留（防误杀守卫） ----
+# 让位规则的语义边界：块参照闭合成环但非矩形（范围线形态）时，只有当其 bbox
+# 内完全包含显式类型真框候选才让位。无内含真框的非矩形块（若通过全部条件）
+# 仍按原口径报告——本用例锁定该行为，防止规则过度外溢。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 2090800, -4552675, 518495, 335087)
+_blk_r36b = doc.blocks.new(name='HFZXHX_IRREG')
+_blk_r36b.add_lwpolyline([
+    (0, 0), (321093, 0), (321093, 50000), (240000, 120000), (321093, 190000),
+    (321093, 259386), (180000, 259386), (90000, 170000), (0, 259386),
+], close=True)
+msp.add_blockref('HFZXHX_IRREG', (2190078, -4574520))
+msp.add_blockref('HFZXHX_IRREG', (2190078, -4979330))
+for _bx, _by in ((2190078, -4574520), (2190078, -4979330)):
+    for _k in range(32):
+        _yy = _by + 3000 + _k * 7500
+        msp.add_line((_bx + 2000, _yy), (_bx + 319093, _yy))
+    for _k in range(7):
+        _xx = _bx + 30000 + _k * 42000
+        msp.add_line((_xx, _by + 2000), (_xx, _by + 257386))
+msp.add_line((2091000, -4350000), (2091000, -4420000))
+msp.add_line((2300000, -4217000), (2352000, -4269000))
+add_line_rect(msp, 1000000, -1000000, 3000, 2000)
+add_line_rect(msp, 3500000, -5500000, 3000, 2000)
+data = to_bytes(doc)
+check('R36非矩形块无内含真框: 不让位照常保留, fc=2=321093x2 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 2
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 321093) < 5 and abs(c['height'] - 259386) < 5) == 2
+      and not any(abs(c['width'] - 518495) < 5 for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)

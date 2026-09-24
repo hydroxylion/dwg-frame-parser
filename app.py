@@ -1239,12 +1239,83 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     _BLOCK_CLOSED_RATIO = 0.50
     _block_closed_cache = {}
 
-    def _block_closed_frame_len(_name, _bb_len, _visited=None):
+    def _closed_polyline_rect_len(_ent, _tol_p):
+        """闭合 LWPOLYLINE 的「矩形证据」长边（R36，d012.dwg 场景）。
+
+        场景：hfzxhx 块定义内仅 1 条 38 顶点闭合不规则边界多段线（3 段圆弧、宽
+        0.5m、矩形度实测 0.7005、38 边仅 2 条轴对齐——基坑/用地范围线形态），
+        旧闭合证据通道把"任何闭合多段线"都当图框边框证据 → 块 bbox
+        321093×259386 被当图框，反而把 bbox 内的真图框 200700×126150 挤掉。
+
+        矩形判据（满足其一即返回长边，否则返回 0）：
+          a) 多边形面积/bbox 面积 ≥ 0.92（与顶层闭合多段线候选同一矩形度门槛
+             RECTANGULARITY_THRESHOLD）——覆盖轴对齐矩形及带小缺口/共线顶点画法；
+          b) 恰 4 个顶点的斜放矩形（对边平行等长、邻边垂直）——旋转矩形相对
+             轴对齐 bbox 的矩形度会塌缩（30° 时仅 0.48），必须按几何特征判。
+        带圆弧段（bulge≠0）的闭合线不算矩形。非矩形闭合线（范围线/红线、
+        L 形等）返回 0，不得作为图框边框证据。
+        """
+        try:
+            _pts5 = _ent.get_points('xyseb')
+        except Exception:
+            return 0.0
+        if len(_pts5) < 3:
+            return 0.0
+        if any(abs(_p[4]) > 1e-9 for _p in _pts5):
+            return 0.0
+        _v = [(_p[0], _p[1]) for _p in _pts5]
+        _dv = [_v[0]]
+        for _p in _v[1:]:
+            if _math.hypot(_p[0] - _dv[-1][0], _p[1] - _dv[-1][1]) > max(2 * _tol_p, 1e-9):
+                _dv.append(_p)
+        # 首尾重合（画框忘设 closed 标志的常见画法）→ 去尾点
+        if len(_dv) >= 2 and _math.hypot(_dv[0][0] - _dv[-1][0],
+                                         _dv[0][1] - _dv[-1][1]) <= 2 * _tol_p:
+            _dv = _dv[:-1]
+        _n = len(_dv)
+        if _n < 3:
+            return 0.0
+        _xs = [p[0] for p in _dv]
+        _ys = [p[1] for p in _dv]
+        _bw = max(_xs) - min(_xs)
+        _bh = max(_ys) - min(_ys)
+        if _bw <= 0 or _bh <= 0:
+            return 0.0
+        _area = polygon_area(_dv)
+        if _area <= 0:
+            return 0.0
+        if _area / (_bw * _bh) >= 0.92:
+            return max(_bw, _bh)
+        if _n == 4:
+            _e = [(_dv[(i + 1) % 4][0] - _dv[i][0], _dv[(i + 1) % 4][1] - _dv[i][1])
+                  for i in range(4)]
+            _L = [_math.hypot(_e[i][0], _e[i][1]) for i in range(4)]
+            if min(_L) <= 0:
+                return 0.0
+
+            def _cross(a, b):
+                return a[0] * b[1] - a[1] * b[0]
+
+            def _dot(a, b):
+                return a[0] * b[0] + a[1] * b[1]
+
+            if (abs(_L[0] - _L[2]) <= 0.02 * max(_L[0], _L[2]) and
+                    abs(_L[1] - _L[3]) <= 0.02 * max(_L[1], _L[3]) and
+                    abs(_cross(_e[0], _e[2])) <= 0.02 * _L[0] * _L[2] and
+                    abs(_cross(_e[1], _e[3])) <= 0.02 * _L[1] * _L[3] and
+                    abs(_dot(_e[0], _e[1])) <= 0.02 * _L[0] * _L[1]):
+                return max(max(_L[0], _L[2]), max(_L[1], _L[3]))
+        return 0.0
+
+    def _block_closed_frame_len(_name, _bb_len, _visited=None, _rect_only=False):
         """块定义内「闭合矩形边框」的长边（块定义内坐标，未应用 INSERT 缩放）。
         证据 = max(闭合 LWPOLYLINE bbox 长边, LINE 横竖簇配对矩形长边, 嵌套子块证据×缩放)。
-        无闭合框返回 0。"""
-        if _name in _block_closed_cache:
-            return _block_closed_cache[_name]
+        无闭合框返回 0。
+        _rect_only=True（R36）：闭合 LWPOLYLINE 须本身是矩形（_closed_polyline_rect_len
+        判据）才计入——用于"非矩形边界块让位"判定；LINE 横竖簇配对本身就是矩形，不受影响。"""
+        _ck = (_name, _rect_only)
+        if _ck in _block_closed_cache:
+            return _block_closed_cache[_ck]
         if _visited is None:
             _visited = set()
         if _name in _visited or _name not in doc.blocks or _bb_len <= 0:
@@ -1276,7 +1347,13 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                     _is_loop = bool(_ent.closed) or _math.hypot(
                         _ps[-1][0] - _ps[0][0], _ps[-1][1] - _ps[0][1]) <= _tol_p * 2
                     if _is_loop:
-                        _ev = max(_ev, max(max(_xs2) - min(_xs2), max(_ys2) - min(_ys2)))
+                        if _rect_only:
+                            # R36：只认"本身是矩形"的闭合线（范围线/红线形态不算）
+                            _rl = _closed_polyline_rect_len(_ent, _tol_p)
+                            if _rl > 0:
+                                _ev = max(_ev, _rl)
+                        else:
+                            _ev = max(_ev, max(max(_xs2) - min(_xs2), max(_ys2) - min(_ys2)))
                 elif _t == 'INSERT':
                     _sub_bb = _get_block_world_bbox(_ent.dxf.name)
                     if _sub_bb is not None:
@@ -1285,7 +1362,8 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                             _sx = getattr(_ent.dxf, 'xscale', 1) or 1
                             _sy = getattr(_ent.dxf, 'yscale', 1) or 1
                             _ev = max(_ev, _block_closed_frame_len(
-                                _ent.dxf.name, _sub_bblen, _visited) * max(abs(_sx), abs(_sy)))
+                                _ent.dxf.name, _sub_bblen, _visited,
+                                _rect_only=_rect_only) * max(abs(_sx), abs(_sy)))
             except Exception:
                 continue
         # LINE 横竖簇配对成矩形：横线按 y 聚类、竖线按 x 聚类；两横簇
@@ -1335,7 +1413,7 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                     _ww = min(_right, _ox2) - max(_left, _ox1)
                     if _ww >= _min_seg:
                         _ev = max(_ev, _ww, _hh)
-        _block_closed_cache[_name] = _ev
+        _block_closed_cache[_ck] = _ev
         return _ev
 
     _rescued_keys = set()  # 布局空间网格图框救援命中的 bbox key（修法A，见下）
@@ -1596,6 +1674,9 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             if _key in seen_bbox:
                 continue
             seen_bbox.add(_key)
+            # R36：块内闭合环的「矩形证据」长边（_rect_only 判据）。闭合成环但
+            # 非矩形（范围线/红线形态）的块，后续"让位"给 bbox 内的显式矩形真框。
+            _rect_len36 = _block_closed_frame_len(_bn, _bb_len, _rect_only=True)
             candidates.append({
                 'type': '块参照插入',
                 'area': _w * _h,
@@ -1614,6 +1695,7 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 # 斜放块标记（旋转非 90° 倍数）：bbox 是旋转外接矩形（膨胀框），
                 # 去重规则1 不得以其 bbox 为包含区域剔除内部候选
                 'tilted': _tilted,
+                'block_rect_len': _rect_len36,
             })
             _insert_kept += 1
         except Exception:
@@ -3000,6 +3082,59 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         wrap_stripped_count = len(frame_like)
         if wrap_removed:
             safe_log(f"🧹 [包裹框识别] 剔除外层包裹框 {wrap_removed} 个（各含 ≥{MIN_WRAPPED_FRAMES} 个图框候选）")
+
+        # ---------- R36：非矩形边界块「让位」内含真框（d012.dwg 尺寸口径修复） ----------
+        # 场景：hfzxhx 块定义内仅 1 条 38 顶点闭合不规则边界多段线（3 段圆弧、宽
+        #   0.5m、矩形度实测 0.7005——基坑/用地范围线形态，非图框），块 bbox
+        #   321093×259386 经 R27 闭合证据通道（旧判据把任何闭合多段线都当边框
+        #   证据）+ 条件I 表格救援（框内顶层横竖线 382/48）入池。每块 bbox 恰完
+        #   全包住一个真图框 200700×126150（顶层 JZ 4 顶点矩形）→ 去重"留大剔小"
+        #   把真框吃掉 → fc=3 报成 321093×259386×2 + 84100×59400，且用户在 CAD
+        #   里"找不到 321093 图框"（8 号灰点划线不规则边界，视觉是范围线）。
+        # 为何"让位"而非 R27 入口直接淘汰：R34 空壳范围框破例（剔 BZ 518495×
+        #   335087 范围框）的触发依赖 321093 候选在场（面积 47.9% ∈(25%,50%)×big
+        #   + 错位半包含）——入口淘汰会让 BZ 复活并在去重时反向吃掉 200700A。
+        #   故本规则放在包裹剔除之后、去重之前：R34 机制照常工作，随后非矩形
+        #   块输给内含真框。
+        # 判据（全部满足才让位）：
+        #   ① 候选为块参照插入；
+        #   ② 块定义闭合证据成立（≥块长边×50%，即 R27 放行的前提），但"矩形证
+        #      据"长边（block_rect_len，入库时按 _rect_only 判据算得）< 块长边
+        #      ×50%（闭合环不是矩形——范围线形态）；
+        #   ③ bbox 内完全包含 ≥1 个显式类型（闭合多段线/直线矩形）候选，且面积
+        #      < 50%×块候选（WRAP_INNER_AREA_RATIO，排除同图框重复画法）。
+        _R36_YIELD_RATIO = 0.50
+        _r36_yield_ids = set()
+        if os.environ.get('FRAME_PARSER_NO_R36_YIELD') != '1':
+            for _c in frame_like:
+                if _c.get('type') != '块参照插入':
+                    continue
+                _bn36 = _c.get('block_name')
+                if not _bn36 or _bn36 not in doc.blocks:
+                    continue
+                _bbl36 = max(_c.get('block_def_w', 0), _c.get('block_def_h', 0))
+                if _bbl36 <= 0:
+                    continue
+                # R27 已保证入库块的闭合证据 ≥50%；此处只看矩形证据是否达标
+                if _c.get('block_rect_len', 0) >= _bbl36 * _R36_YIELD_RATIO:
+                    continue    # 闭合环本身是矩形：正常图框块，不让位
+                _cx1, _cy1, _cx2, _cy2 = _c['bbox']
+                for _o in frame_like:
+                    if (_o is _c or _o.get('type') not in EXPLICIT_TYPES
+                            or _o['layout'] != _c['layout']
+                            or _o['area'] >= _c['area'] * WRAP_INNER_AREA_RATIO):
+                        continue
+                    if (_o['bbox'][0] >= _cx1 - 1 and _o['bbox'][1] >= _cy1 - 1 and
+                            _o['bbox'][2] <= _cx2 + 1 and _o['bbox'][3] <= _cy2 + 1):
+                        _r36_yield_ids.add(id(_c))
+                        break
+        if _r36_yield_ids:
+            _y_desc = ', '.join('%.0fx%.0f' % (_c['width'], _c['height'])
+                                for _c in frame_like if id(_c) in _r36_yield_ids)
+            frame_like = [_c for _c in frame_like if id(_c) not in _r36_yield_ids]
+            all_candidates = [_c for _c in all_candidates if id(_c) not in _r36_yield_ids]
+            safe_log(f"  [R36·非矩形边界块让位] 剔除 {len(_r36_yield_ids)} 个闭合环非矩形的"
+                     f"块参照（范围线/红线形态，让位内含真框）: {_y_desc}（d012 场景）")
 
         # ---------- 去重（嵌套 + IoU 重叠） ----------
         # 同一个 layout 内，逐步剔除"与更大候选高度重叠"的候选：
