@@ -2725,6 +2725,43 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         WRAP_INNER_AREA_RATIO = 0.5
         WRAP_SIZE_EPS = 0.05  # 尺寸聚类容差：宽高相对差 <5% 视为同组（同图框重复画法）
 
+        # R34「空壳范围框」破例常量（d012.dwg 3 实际 4 检出）：√2 纸张保护候选取消
+        # 豁免、直接判范围框的补充判据（四条全中才破例，见 √2 保护段内注释）。
+        SHELL_INNER_AREA_MIN = 0.25   # 被罩候选面积下限（×big）：罩"一张图"的框与图同量级；
+                                      # <25% 的跨边界小矩形是"边缘杂线"形态，不触发
+        SHELL_OVERLAP_RATIO = 0.90    # 错位半包含：交集 ≥ 90%×候选面积
+        SHELL_SPARSE_FREE_MAX = 0.10  # 空壳判定：bbox 内自由内容线长占比 <10%
+                                      # （d012 [0] 实测 3.82%；真图框内大量内容被内部
+                                      # 候选认领后自由占比也低，故稀疏只是必要条件，
+                                      # 防误伤主靠"错位半包含+面积区间"两条几何护栏）
+
+        def _collect_layout_segments(layout):
+            """收集 layout 顶层线段（LINE + LWPOLYLINE/POLYLINE 各边，闭合补边）。
+
+            只取顶层实体、不展开 INSERT 块内部：空壳范围框罩住的"那张图"若是块
+            参照，其 bbox 已作为候选参与线段认领，块内线条无需展开（d012 实证：
+            [1] 为块参照、其内容线在顶层，bbox 认领口径下 [0] 自由占比 3.82%）。
+            """
+            _segs = []
+            for _e in layout:
+                _t = _e.dxftype()
+                try:
+                    if _t == 'LINE':
+                        _s, _en = _e.dxf.start, _e.dxf.end
+                        _segs.append(((_s.x, _s.y), (_en.x, _en.y)))
+                    elif _t in ('LWPOLYLINE', 'POLYLINE'):
+                        _pts = [(p[0], p[1]) for p in (
+                            _e.get_points() if _t == 'LWPOLYLINE'
+                            else [(v.dxf.location.x, v.dxf.location.y) for v in _e.vertices])]
+                        if len(_pts) >= 2:
+                            if _e.closed:
+                                _pts = _pts + [_pts[0]]
+                            for _a, _b in zip(_pts, _pts[1:]):
+                                _segs.append((_a, _b))
+                except Exception:
+                    pass
+            return _segs
+
         def _is_contained(inner, outer, eps=WRAPPED_EPS):
             """inner 的 bbox 是否完全落在 outer 的 bbox 内"""
             ix1, iy1, ix2, iy2 = inner['bbox']
@@ -2732,8 +2769,14 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             return (ix1 >= ox1 - eps and iy1 >= oy1 - eps and
                     ix2 <= ox2 + eps and iy2 <= oy2 + eps)
 
-        def strip_wrapping_frames(cands):
-            """剔除"外层包裹框"：内部包含 ≥ MIN_WRAPPED_FRAMES 个其他图框候选的大框"""
+        def strip_wrapping_frames(cands, all_bboxes_by_layout=None, lay_objs=None):
+            """剔除"外层包裹框"：内部包含 ≥ MIN_WRAPPED_FRAMES 个其他图框候选的大框
+
+            all_bboxes_by_layout: {layout_name: [bbox, ...]} 全量候选 bbox（含未通过
+                特征者），供空壳判定的线段认领（口径与插桩一致：d012 [0] 自由占比
+                3.82% 是按全量候选认领测得；若只用 frame_like 认领，占比升至 ~12%）。
+            lay_objs: {layout_name: layout 对象}，惰性收集线段用。
+            """
             if len(cands) <= 2:
                 return cands, 0
             # 主导模板比例（2026-09-14，春风公寓2）：同 layout 内 ≥3 个候选共享的
@@ -2752,6 +2795,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     _wrap_dominant[_ln] = _s
             # 按 layout 分组，组内判断包含（不同 layout 不在同一坐标系）
             layout_groups = {}
+            _shell_segs_cache = {}   # R34：per-layout 顶层线段缓存（空壳判定的稀疏统计用）
             for idx, c in enumerate(cands):
                 layout_groups.setdefault(c['layout'], []).append(idx)
             remove_set = set()
@@ -2773,6 +2817,101 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     _bs = min(big['width'], big['height'])
                     if (_bs > 0 and big.get('type') in EXPLICIT_TYPES
                             and abs(_bw / _bs - 2 ** 0.5) / (2 ** 0.5) <= 0.10):
+                        # R34「空壳范围框」破例（d012.dwg 3 实际 4 检出）：
+                        # BZ 层 518495×335087（ratio 1.5473，偏离 √2 仅 9.41% ≤10%
+                        # 擦线进本保护）罩住真图框 321093×259386 的 91.6% 面积但底边
+                        # 溢出 21845mm（错位半包含）→ 条件C rel=100% 自我循环入选（最大
+                        # 候选=分母）+ 孤证复核 ⑥内含嵌套框群拿 1.0 分 + 本保护 continue
+                        # + 去重双路失效（非完全嵌套、IoU 0.42<0.5 尺寸悬殊被稀释）→
+                        # fc 多 1。且实测即使去掉 √2 保护主判据也剔不掉它（[1] 错位不进
+                        # inners、嵌套框群与 [1] 内子框聚同组 same_n=2<3 触发块豁免、
+                        # dom 不中：嵌套框比例与 [0] 仅差 2.8%<10%）→ 必须**直接剔除**。
+                        # 破例判据（四条全中）：
+                        #   ① 存在候选面积 ∈ [25%, 50%)×big——罩"一张图"的框与图同量级；
+                        #     <25% 的跨边界小矩形是"边缘杂线"形态不触发
+                        #   ② 交集 ≥ 90%×该候选面积——被罩的图几乎整个在框内
+                        #   ③ 该候选未被 big 完全包含（错位溢出）——真图框的内框/内容
+                        #     候选全部完全包含（图纸目录双层框实证：外框 vs 表格框
+                        #     完全包含、内框 vs 外框交集 89.7%<90% 且面积比 111.6%>50%，
+                        #     双双不触发）；A0 完全包含 A1 也不触发
+                        #   ④ 内容稀疏：big bbox 内自由内容线长占比 <10%（排除自身边线、
+                        #     排除被同 layout 全量候选 bbox 认领的线段）
+                        _shell_c = None
+                        _shell_inter_pct = 0.0
+                        for _j in indices:
+                            if _j == i:
+                                continue
+                            _sc = cands[_j]
+                            _sa2 = _sc['area']
+                            if not (big['area'] * SHELL_INNER_AREA_MIN <= _sa2
+                                    <= big['area'] * WRAP_INNER_AREA_RATIO):
+                                continue
+                            _ox1, _oy1, _ox2, _oy2 = big['bbox']
+                            _cx1, _cy1, _cx2, _cy2 = _sc['bbox']
+                            _iw = min(_ox2, _cx2) - max(_ox1, _cx1)
+                            _ih = min(_oy2, _cy2) - max(_oy1, _cy1)
+                            if _iw <= 0 or _ih <= 0:
+                                continue
+                            _inter = _iw * _ih
+                            if _inter < _sa2 * SHELL_OVERLAP_RATIO:
+                                continue
+                            if _is_contained(_sc, big):
+                                continue
+                            _shell_c = _sc
+                            _shell_inter_pct = _inter / _sa2 * 100.0
+                            break
+                        if _shell_c is not None and all_bboxes_by_layout and lay_objs:
+                            from math import hypot as _shell_hypot
+                            _ln_big = big['layout']
+                            if _ln_big not in _shell_segs_cache:
+                                _shell_segs_cache[_ln_big] = (
+                                    _collect_layout_segments(lay_objs[_ln_big])
+                                    if _ln_big in lay_objs else [])
+                            _segs = _shell_segs_cache[_ln_big]
+                            # 认领 bbox：同 layout 全量候选，排除 big 自己（否则框内
+                            # 线段全被自己认领、自由占比恒 0）；预过滤与 big 相交者
+                            _obbs = [tuple(_b) for _b in all_bboxes_by_layout.get(_ln_big, ())
+                                     if tuple(_b) != tuple(big['bbox'])
+                                     and _b[0] < _ox2 and _b[2] > _ox1
+                                     and _b[1] < _oy2 and _b[3] > _oy1]
+                            _tot = _free = 0.0
+                            for _sa, _sb in _segs:
+                                if not (_ox1 - 1 <= _sa[0] <= _ox2 + 1
+                                        and _oy1 - 1 <= _sa[1] <= _oy2 + 1
+                                        and _ox1 - 1 <= _sb[0] <= _ox2 + 1
+                                        and _oy1 - 1 <= _sb[1] <= _oy2 + 1):
+                                    continue
+                                _a_on = (((abs(_sa[0] - _ox1) <= 1 or abs(_sa[0] - _ox2) <= 1)
+                                          and _oy1 - 1 <= _sa[1] <= _oy2 + 1)
+                                         or ((abs(_sa[1] - _oy1) <= 1 or abs(_sa[1] - _oy2) <= 1)
+                                             and _ox1 - 1 <= _sa[0] <= _ox2 + 1))
+                                _b_on = (((abs(_sb[0] - _ox1) <= 1 or abs(_sb[0] - _ox2) <= 1)
+                                          and _oy1 - 1 <= _sb[1] <= _oy2 + 1)
+                                         or ((abs(_sb[1] - _oy1) <= 1 or abs(_sb[1] - _oy2) <= 1)
+                                             and _ox1 - 1 <= _sb[0] <= _ox2 + 1))
+                                if _a_on and _b_on:
+                                    continue  # 自身边线
+                                _L = _shell_hypot(_sb[0] - _sa[0], _sb[1] - _sa[1])
+                                _tot += _L
+                                for _ob in _obbs:
+                                    if (_ob[0] - 1 <= _sa[0] <= _ob[2] + 1
+                                            and _ob[1] - 1 <= _sa[1] <= _ob[3] + 1
+                                            and _ob[0] - 1 <= _sb[0] <= _ob[2] + 1
+                                            and _ob[1] - 1 <= _sb[1] <= _ob[3] + 1):
+                                        break
+                                else:
+                                    _free += _L
+                            _sparse = (_free / _tot) if _tot > 0 else 0.0
+                            if _sparse < SHELL_SPARSE_FREE_MAX:
+                                remove_set.add(i)
+                                safe_log(f"  [空壳范围框剔除] {big['layout']} | "
+                                         f"{big['width']:.0f}×{big['height']:.0f}（ratio {_bw/_bs:.3f}）"
+                                         f"罩住 {_shell_c['width']:.0f}×{_shell_c['height']:.0f}"
+                                         f"（交集 {_shell_inter_pct:.0f}%、错位溢出）"
+                                         f"| bbox 内自由内容线长占比 {_sparse * 100:.1f}%"
+                                         f"<{SHELL_SPARSE_FREE_MAX * 100:.0f}% → 判为范围框非图框"
+                                         f"（d012 场景）")
+                                continue
                         continue
                     # 收集 big 内部、面积显著小于 big 的候选（排除同图框重复画法本身的互相嵌套）
                     inners = [cands[j] for j in indices
@@ -2846,7 +2985,18 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             kept = [c for k, c in enumerate(cands) if k not in remove_set]
             return kept, len(remove_set)
 
-        frame_like, wrap_removed = strip_wrapping_frames(frame_like)
+        # R34：构造空壳判定的辅助数据（全量候选 bbox 认领集合 + layout 对象惰性表）
+        _all_bboxes_by_layout = {}
+        for _c in all_candidates:
+            _all_bboxes_by_layout.setdefault(_c['layout'], []).append(tuple(_c['bbox']))
+        _lay_objs_wrap = {'模型空间': msp}
+        for _lname in {c['layout'] for c in all_candidates}:
+            if _lname != '模型空间' and _lname not in _lay_objs_wrap:
+                try:
+                    _lay_objs_wrap[_lname] = doc.layouts.get(_lname.strip('"').strip('“”'))
+                except Exception:
+                    pass
+        frame_like, wrap_removed = strip_wrapping_frames(frame_like, _all_bboxes_by_layout, _lay_objs_wrap)
         wrap_stripped_count = len(frame_like)
         if wrap_removed:
             safe_log(f"🧹 [包裹框识别] 剔除外层包裹框 {wrap_removed} 个（各含 ≥{MIN_WRAPPED_FRAMES} 个图框候选）")
