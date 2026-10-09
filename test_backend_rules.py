@@ -1419,11 +1419,110 @@ def _run18_no_pre():
         return {'error': str(e)}
 
 
-# ---- R39 开关守卫：NO_COND_E_PRE=1（回退旧判据）----
-# 预放大块回到六通道全灭 → smart 抛"未检测到图框"（线上 fc=0 的红形态）。
-check('R39开关 NO_COND_E_PRE=1: 预放大块漏检(抛未检测到图框)',
-      _run18_no_pre,
-      lambda r: 'error' in r and '未检测到图框' in r['error'])
+# ---- R40 用例：d006,007.dwg fc=20 实际 4 —— 块内图框救援 + rel 分母补强 ----
+# 场景（tmp_diag_d0607_r40.py 实测复现）：模型空间 = 巨型拼接底图块 BIG_WRAP
+# （R27 拒：闭合框长边 200700 < 块长边×50%；其内部藏着 2 份 200700×126150 闭合
+# 矩形真图框——d012/d013 同源图打包成块）+ 18 个 CSW-1499 设备块散布
+# （771×514×13 + 844×506×5，闭合外形框=块边界 → R27 通过入库）。
+# 红形态链条：设备块 rel 分母塌缩（巨块被拒且超 2.5e6 计回上限 → 分母=设备块
+# 自身 427064）→ 18 块 rel 93~100% 全过条件C（ratio 1.5/1.667 均∈[1.343,2.5]）；
+# 771 组 ratio 1.4999 擦线进 √2±10% 对齐保护窗躲过对齐剔除；844 组散布对齐
+# 判据不命中 → fc = 18假 + 2真(布局) = 20，且模型 2 真图框漏检。
+# 修法（R40，单扫描点双效果）：R27 拒绝块内若存在 ≥2 份同尺寸矩形闭合 LWPOLYLINE
+# （矩形度≥0.92、短边≥20000、ratio∈[1.05,5.5]——图框族强证据）→
+# ①提升为候选（type='块内闭合线'，INSERT matrix 变换到世界坐标）；
+# ②该尺寸面积计入 _r27_rej_max（rel 分母补强）→ 设备块 rel=0.0016% 全灭
+# （六通道逐一核查：A ar≈0/B 非 EXPLICIT/C rel 崩/D,F 非直线矩形/E 514 不在
+# A系×白名单倍率）。
+# 理想口径（用户确认）：模型 200700×126150×2 + 布局 841×594 + 1338×841 = fc=4。
+def _build_d0607_like_doc():
+    doc = make_doc()
+    msp = doc.modelspace()
+    # [0] 巨型拼接底图块：内含 2 份 200700×126150 闭合矩形（真图框，d006,007 实测
+    #     块内坐标）+ 框内横线 + 远距离散件（撑出 5261364 跨度 → R27 拒且不计回）
+    _blk = doc.blocks.new(name='BIG_WRAP')
+    _bx, _by = 2265921, -4756370
+    _blk.add_lwpolyline([(_bx, _by), (_bx + 200700, _by),
+                         (_bx + 200700, _by + 126150), (_bx, _by + 126150)], close=True)
+    _bx2, _by2 = 2265921, -3855370
+    _blk.add_lwpolyline([(_bx2, _by2), (_bx2 + 200700, _by2),
+                         (_bx2 + 200700, _by2 + 126150), (_bx2, _by2 + 126150)], close=True)
+    for _k in range(6):              # 框内内容横线（每框 3 条，长 150000）
+        _oy = _by if _k < 3 else _by2
+        _kk = _k % 3
+        _blk.add_line((_bx + 20000, _oy + 20000 + _kk * 30000),
+                      (_bx + 170000, _oy + 20000 + _kk * 30000))
+    _blk.add_line((0, 0), (5261364, 0))          # 远距离散件（撑块定义 bbox）
+    _blk.add_line((5261364, 0), (5261364, 1309513))
+    msp.add_blockref('BIG_WRAP', (0, 0))
+    # [1] 设备块 ×2 型号散布（闭合外形框=块边界、内部近空 → R27 通过入库；
+    #     散布坐标复刻实测区域，x/y 双向散布 → 对齐剔除不命中）
+    _blk_a = doc.blocks.new(name='DEV_A')        # 771×514 ratio 1.4999
+    _blk_a.add_lwpolyline([(0, 0), (771, 0), (771, 514), (0, 514)], close=True)
+    _blk_a.add_line((100, 100), (200, 200))
+    _blk_b = doc.blocks.new(name='DEV_B')        # 844×506 ratio 1.667
+    _blk_b.add_lwpolyline([(0, 0), (844, 0), (844, 506), (0, 506)], close=True)
+    for _x, _y in [(2322790, -4445180), (2333192, -4441920), (2338445, -4437027),
+                   (2326043, -4433822), (2328643, -4439434), (2333216, -4445092),
+                   (2380907, -4402021), (2380907, -4401249), (2377323, -4406907),
+                   (2377766, -4406275), (2399771, -4359624), (2399637, -4358864),
+                   (2399047, -4367634)]:
+        msp.add_blockref('DEV_A', (_x, _y))
+    for _x, _y in [(2327667, -4438712), (2375921, -4395526),
+                   (2375914, -4408918), (2395967, -4363076), (2329878, -4444248)]:
+        msp.add_blockref('DEV_B', (_x, _y))
+    # [2] 顶层散斜线（设备连线，不进 P1 横竖簇）。多角度分散：真实 d006,007
+    #     的 830 条设备连线杂角度分布、族占比 < 65%，不触发全局旋转矫正；
+    #     若同角度（如全 45°）会误触发旋转矫正，把轴对齐实体整体转斜 45°，
+    #     设备块 bbox 771x514→907x910（ratio 1.003 出条件C 窗）、巨块同毁
+    #     → 模型空间候选全灭（tmp_diag3_d0607_r40 实证 fc=2 假象）。
+    _dirs = [(11591, 3107), (10392, 6000), (8485, 8485), (6000, 10392),
+             (3107, 11591), (-3107, 11591), (-6000, 10392), (-8485, 8485)]
+    for _k, (_dx, _dy) in enumerate(_dirs):
+        _sx = 2320000 + _k * 9000
+        _sy = -4430000 + _k * 7000
+        msp.add_line((_sx, _sy), (_sx + _dx, _sy + _dy))
+    # [3] 布局1：双真框 + 内框（内框被嵌套去重收掉）
+    _lay = doc.layouts.new('布局1')
+    add_closed_rect(_lay, 984, 2, 1338, 841)
+    add_closed_rect(_lay, 1009, 12, 1303, 821)
+    add_closed_rect(_lay, 2, 2, 841, 594)
+    add_closed_rect(_lay, 28, 12, 806, 574)
+    return to_bytes(doc)
+
+
+_data607 = _build_d0607_like_doc()
+check('R40 d006,007: 块内图框救援+rel分母补强, fc=4=200700x2+841布+1338布 (smart)',
+      lambda: parse(_data607),
+      lambda r: r['frame_count'] == 4
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 200700) < 10 and abs(c['height'] - 126150) < 10
+              and c['layout'] == '模型空间') == 2
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 841) < 5 and abs(c['height'] - 594) < 5
+              and c['layout'] != '模型空间') == 1
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 1338) < 5 and abs(c['height'] - 841) < 5
+              and c['layout'] != '模型空间') == 1
+      and not any(c['width'] < 2000 and c['layout'] == '模型空间'
+                  for c in r['candidates'])
+      and r['width'] == 200700 and r['height'] == 126150)
+
+
+def _run607_no_rescue():
+    try:
+        return _parse_env(_data607, FRAME_PARSER_NO_BLOCK_FRAME_RESCUE='1')
+    except RuntimeError as e:
+        return {'error': str(e)}
+
+
+# ---- R40 开关守卫：NO_BLOCK_FRAME_RESCUE=1（回退：无救援、无分母补强）----
+# 设备块 rel 分母回到塌缩态（自身量级）→ 18 个全过条件C 复活 → fc=20 红形态。
+check('R40开关 NO_BLOCK_FRAME_RESCUE=1: 设备块复活, fc=20红形态',
+      _run607_no_rescue,
+      lambda r: r.get('frame_count') == 20
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 771) < 5 and c['layout'] == '模型空间') >= 10)
 
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

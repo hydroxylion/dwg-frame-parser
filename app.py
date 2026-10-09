@@ -1585,6 +1585,7 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     _insert_kept = 0
     _insert_filtered = 0  # 预筛剔除数（非图框级尺寸）
     _r27_rej_max = 0.0    # R27 闭合通道拒绝、但构件证据合格的内容块最大面积（rel 分母计回用）
+    _resc_credit = {}     # R40 块内图框救援的组面积记账 {(w,h): area}——末尾让位检查后幸存组才合并进 _r27_rej_max
     # R30：计回尺寸上限。真图框长边物理上限 ≈ A0 纸 1189mm × 1:1000 出图 ≈ 1.19e6mm，
     # 取 2.5e6 留两倍余量。超限的巨型底图/xref 外包络（S010 北区商业街底图
     # 6345273×1806446，块内含超长道路线使构件证据"合格"）不得计回——否则 rel
@@ -1703,6 +1704,130 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                             and max(_w, _h) <= _R27_CREDIT_MAX_SIDE):
                         if _w * _h > _r27_rej_max:
                             _r27_rej_max = _w * _h
+                # R40 块内图框救援（d006,007）：R27 拒绝的巨型拼接底图块内部
+                #   可能藏着同模板复制的真图框——d006,007 巨块
+                #   13013-11-AW-FP改10#下移0516_t3（定义 bbox 5261364×1309513、
+                #   内部 12520 实体，d012/d013 同源图打包成块）内含 2 份
+                #   200700×126150 闭合矩形，块 bbox 被顶层次散件撑大 → R27
+                #   闭合证据 <50% 拒掉 → collect 只扫顶层不递归 → 2 真框漏检；
+                #   同时该巨块被拒不进 rel 分母且超计回上限 → 分母塌缩到设备块
+                #   自身量级 → 18 个火警设备块（771×514/844×506，闭合外形框=
+                #   块边界入库）rel 93~100% 全过条件C → fc 20（18假+2真布局）。
+                # 救援判据（图框族强证据）：块定义内存在 ≥2 份同尺寸闭合矩形
+                #   LWPOLYLINE（_closed_polyline_rect_len 矩形判据、变换后短边
+                #   ≥20000、ratio∈[FRAME_RATIO_MIN,FRAME_RATIO_MAX]），双效果：
+                #   ① 逐份提升为候选（type='块内闭合线'，INSERT matrix 精确变换
+                #     + 全局旋转，每组 ≤50 份防异常块撑爆候选库）；
+                #   ② 该尺寸世界面积记入 _resc_credit（rel 分母补强）→ 设备块
+                #     rel≈0.002% 条件C 全灭（A ar≈0/B 非显式/C rel 崩/D,F 非直线
+                #     矩形/E 514 不在 A系×白名单倍率），200700 候选 rel=100% 过 C。
+                #   注：只扫块定义顶层（真实场景覆盖；嵌套子块不递归，控制成本）。
+                #   计回不在组发现时立即生效：末尾"救援候选让位"检查后，
+                #   幸存组的面积才合并进 _r27_rej_max（1号2号楼 S-0-COLS 的
+                #   200000×300000 图纸裁剪边界包住真图框，若立即计回 6e10 会
+                #   压低全部真图框 rel——必须整组撤销）。
+                # 开关 FRAME_PARSER_NO_BLOCK_FRAME_RESCUE=1 回退（不提升不补分母）。
+                if (os.environ.get('FRAME_PARSER_NO_BLOCK_FRAME_RESCUE') != '1'
+                        and _bn in doc.blocks):
+                    _resc_groups = {}
+                    _tol_p_res = max(1.0, _bb_len * 0.002)
+                    for _ent_in in doc.blocks[_bn]:
+                        try:
+                            if _ent_in.dxftype() != 'LWPOLYLINE':
+                                continue
+                            if not is_polyline_closed(_ent_in):
+                                continue
+                            if _closed_polyline_rect_len(_ent_in, _tol_p_res) <= 0:
+                                continue
+                            _pv = get_polyline_vertices(_ent_in)
+                            if len(_pv) < 3:
+                                continue
+                            # 块内坐标 → 世界坐标：p = insert + R(rot)·S·(p − base)
+                            _wl = []
+                            for (_px, _py) in _pv:
+                                _qx = (_px - _bpx) * _xs
+                                _qy = (_py - _bpy) * _ys
+                                if _ins_rot:
+                                    _rad_r = _math.radians(_ins_rot)
+                                    _cr_r = _math.cos(_rad_r)
+                                    _sr_r = _math.sin(_rad_r)
+                                    _qx, _qy = (_qx * _cr_r - _qy * _sr_r,
+                                                _qx * _sr_r + _qy * _cr_r)
+                                _qx += _ip[0]
+                                _qy += _ip[1]
+                                if _rot is not None:
+                                    _qx, _qy = _rot_pt(_qx, _qy)
+                                _wl.append((_qx, _qy))
+                            _rxs = [p[0] for p in _wl]
+                            _rys = [p[1] for p in _wl]
+                            _rx1, _ry1 = min(_rxs), min(_rys)
+                            _rx2, _ry2 = max(_rxs), max(_rys)
+                            _rw = _rx2 - _rx1
+                            _rh = _ry2 - _ry1
+                            if _rw <= 0 or _rh <= 0:
+                                continue
+                            _rshort = min(_rw, _rh)
+                            if _rshort < 20000:
+                                continue
+                            # ratio 下限 1.30（R40 回归修正）：近方形 1.0~1.1 的
+                            #   "多份同尺寸闭合矩形"是建筑轮廓/平面图边界/表格边界
+                            #   形态（北区商业街拼接底图块 137089×145635×11 等
+                            #   ratio 1.055~1.063），绝不可能是 A 系图框（最扁
+                            #   A 竖 1.414，历史图框 ratio 观测下限 1.343）。
+                            #   初版下限 1.05 放它们进来：S010 假阳性 +1（条件I
+                            #   表格救援救回 1 份）、一层.dwg 分母被计回 2e10
+                            #   膨胀 187 倍 → 家具候选 rel 全崩 → fc 11→0 抛错。
+                            _rratio = max(_rw, _rh) / _rshort
+                            if not (1.30 <= _rratio <= FRAME_RATIO_MAX):
+                                continue
+                            _rarea = polygon_area(_wl)
+                            if _rarea <= 0 or _rw * _rh <= 0:
+                                continue
+                            _rgk = (round(_rw), round(_rh))
+                            _resc_groups.setdefault(_rgk, []).append({
+                                'bbox': (_rx1, _ry1, _rx2, _ry2),
+                                'area': _rw * _rh,
+                                'rect': _rarea / (_rw * _rh),
+                            })
+                        except Exception:
+                            continue
+                    for _rgk, _rgrp in _resc_groups.items():
+                        if len(_rgrp) < 2:
+                            continue
+                        # ② 分母补强记账（max 语义）：末尾让位检查后幸存组合并
+                        if _rgrp[0]['area'] > _resc_credit.get(_rgk, 0):
+                            _resc_credit[_rgk] = _rgrp[0]['area']
+                        # ① 提升候选（每组 ≤50 份）
+                        _n_up = 0
+                        for _rm in _rgrp:
+                            if _n_up >= 50:
+                                break
+                            _rk = (round(_rm['bbox'][0], 3), round(_rm['bbox'][1], 3),
+                                   round(_rm['bbox'][2], 3), round(_rm['bbox'][3], 3))
+                            if _rk in seen_bbox:
+                                continue
+                            seen_bbox.add(_rk)
+                            candidates.append({
+                                'type': '块内闭合线',
+                                'area': _rm['area'],
+                                'bbox': _rm['bbox'],
+                                'width': _rgk[0],
+                                'height': _rgk[1],
+                                'layout': layout_name,
+                                'rectangularity': _rm['rect'],
+                                'block_name': _bn,
+                                'insert_layer': _entity.dxf.layer,
+                                'block_def_w': 0.0,
+                                'block_def_h': 0.0,
+                                'tilted': False,
+                                'block_rect_len': max(_rgk),
+                            })
+                            _n_up += 1
+                        if _n_up:
+                            safe_log(f"  [块内图框救援] 块 {_bn}（R27 拒：{_reject_reason}）内含 "
+                                     f"{len(_rgrp)} 份 {_rgk[0]:.0f}×{_rgk[1]:.0f} 闭合矩形"
+                                     f"（图框族证据）→ 提升 {_n_up} 份为候选，面积 "
+                                     f"{_rgrp[0]['area']:,.0f} 计回 rel 分母")
                 continue
             if _key in seen_bbox:
                 continue
@@ -1942,6 +2067,45 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             })
         elif any(e.dxftype() == 'VIEWPORT' for e in visible_entities):
             safe_log(f"  [{layout_name}] 空布局（仅含视口，无绘图实体），跳过全实体包围盒降级")
+
+    # R40 救援候选让位检查：包住同 layout 非救援候选的救援候选是"图纸裁剪
+    # 边界框"而非图框——1号2号楼 S-0-COLS 巨块内 8 份 200000×300000 裁剪
+    # 边界包住 126164×178350/126164×222937 等真图框，提升后触发去重"留大
+    # 剔小"顶替 5 个真图框（fc=11 不变但 best 变 200000×300000），且计回
+    # 6e10 压低真图框 rel。判据：救援候选 bbox 四边罩住（含 1mm 容差）任一
+    # 非救援候选 → 该尺寸组整体撤销（删候选 + 撤计回）。真图框不嵌套其他
+    # 图框（嵌套关系由包裹框剔除专门处理），d006,007 的 200700×126150 与
+    # 设备块位置错开不受影响。
+    if _resc_credit:
+        import itertools as _it
+        _resc_cands = [c for c in candidates if c.get('type') == '块内闭合线']
+        _other_cands = [c for c in candidates if c.get('type') != '块内闭合线']
+        _revoke_keys = set()
+        for _rc in _resc_cands:
+            _rb = _rc['bbox']
+            for _oc in _other_cands:
+                _ob = _oc['bbox']
+                if (_rb[0] <= _ob[0] + 1.0 and _rb[1] <= _ob[1] + 1.0
+                        and _rb[2] >= _ob[2] - 1.0 and _rb[3] >= _ob[3] - 1.0):
+                    _revoke_keys.add((_rc['width'], _rc['height']))
+                    break
+        if _revoke_keys:
+            for _gk in _revoke_keys:
+                _resc_credit.pop(_gk, None)
+            _n_rm = sum(1 for c in candidates
+                        if c.get('type') == '块内闭合线'
+                        and (c['width'], c['height']) in _revoke_keys)
+            candidates = [c for c in candidates
+                          if not (c.get('type') == '块内闭合线'
+                                  and (c['width'], c['height']) in _revoke_keys)]
+            safe_log(f"  [{layout_name}] [救援候选让位] {_n_rm} 个块内闭合线候选包住其他图框候选"
+                     f"（图纸裁剪边界形态，{', '.join(f'{k[0]:.0f}x{k[1]:.0f}' for k in sorted(_revoke_keys))}）"
+                     f"→ 整组撤销（候选与 rel 分母计回一并撤回）")
+        if _resc_credit:
+            _rej_from_resc = max(_resc_credit.values())
+            if _rej_from_resc > _r27_rej_max:
+                _r27_rej_max = _rej_from_resc
+
     return candidates, _r27_rej_max
 
 # ---------- 主解析函数 ----------
