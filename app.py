@@ -137,6 +137,11 @@ def load_document(path):
     """加载 DXF/DWG 文档（尽量容错）：
     - DXF：直接用 ezdxf 读取（不再绕道 ODA 转换，更快），失败后用 recover 模式重试
     - DWG：通过 ODA File Converter 转换后读取，出错时翻译成可读的提示
+    R38 性能修正：默认 audit=True 单次转换。旧逻辑先普通转换、解析失败才带
+    audit 重试——大 DWG（25MB 四川自贡实测）普通转换产物截断概率高，几乎必走
+    重试，而 ODA 转换 + ezdxf 解析每次各 ~25s+~98s，双读白白多花 125s（整次
+    请求 263s 的 47%）。实测 audit 对正常文件 no-op、转换耗时与普通模式相同
+    （25.7s = 25.7s），产物兼容 ezdxf（此前 audit 兜底路径已在线上长期使用）。
     """
     if path.lower().endswith('.dxf'):
         try:
@@ -146,16 +151,8 @@ def load_document(path):
             doc, _ = ezdxf.recover.readfile(path)
             return doc
     try:
-        return odafc.readfile(path)
+        return odafc.readfile(path, audit=True)
     except Exception as e:
-        # 某些 DWG 普通转换产物会被截断（块记录表中途停止，缺 ENDSEC/EOF），
-        # ezdxf 读入抛 DXFStructureError: missing ENDSEC tag（非圆减速器装配.dwg）。
-        # ODA 带 audit=True 会先审计/修复源文件流再转换，产物完整可正常解析。
-        # 兜底重试：audit 也失败时保留原错误往下走。
-        try:
-            return odafc.readfile(path, audit=True)
-        except Exception:
-            pass
         msg = str(e)
         if 'ODAFileConverter' in msg or 'Could not find' in msg:
             raise RuntimeError('未找到 ODA File Converter，无法解析 DWG 文件，请先安装 ODA File Converter')
@@ -436,7 +433,13 @@ def _has_full_side_line(lines, coord, lo, hi, eps=LINE_CLUSTER_EPS):
     coord: 目标坐标（如 ya/yb/xa/xb，即矩形边的位置）
     lo, hi: 需要覆盖的区间
     返回 True 当存在至少一条线段的单体跨度覆盖 [lo, hi]（允许 eps 误差）。
-    这防止了"边线残段+内部标注线拼凑出假矩形"的情况。"""
+    这防止了"边线残段+内部标注线拼凑出假矩形"的情况。
+
+    R38 演化：本函数原为全量线性扫描，被主循环每个通过剪枝的组合调 4 次——
+    13013 实测 50 万次调用 42.8s（1.8 亿次 abs），大图逼近分钟级。现由
+    detect_rectangles_from_lines 内部的 _h_side_full/_v_side_full 替代：
+    按 coord 排序 + bisect 粗筛窗口（±eps 外扩 1e-6）+ 原条件精判，
+    命中集合数学等价。本模块级版本仅保留定义供潜在外部引用。"""
     for c, l, h in lines:
         if abs(c - coord) <= eps and l <= lo + eps and h >= hi - eps:
             return True
@@ -594,6 +597,34 @@ def detect_rectangles_from_lines(entity_list, rot=None):
     # 全漏。坐标包含遍历后全部图框在 examined≈80 万内即被找到。
     import bisect as _bisect
     PAIR_RATIO_BOUND = 8.0
+    # R38 P1 加速索引：按 coord 排序 + bisect 粗筛窗口，替代全量线性扫描。
+    # 窗口在 ±eps 基础上外扩 1e-6mm 只做粗筛，窗口内逐条用原条件
+    # （abs(c-coord)<=eps + 覆盖判断）精判——命中集合与线性扫描完全等价。
+    h_sorted = sorted(h_lines, key=lambda t: t[0])
+    v_sorted = sorted(v_lines, key=lambda t: t[0])
+    h_cs = [t[0] for t in h_sorted]
+    v_cs = [t[0] for t in v_sorted]
+
+    def _h_side_full(coord, lo, hi):
+        _i = _bisect.bisect_left(h_cs, coord - LINE_CLUSTER_EPS - 1e-6)
+        _j = _bisect.bisect_right(h_cs, coord + LINE_CLUSTER_EPS + 1e-6)
+        for _k in range(_i, _j):
+            _c, _l, _h = h_sorted[_k]
+            if (abs(_c - coord) <= LINE_CLUSTER_EPS
+                    and _l <= lo + LINE_CLUSTER_EPS and _h >= hi - LINE_CLUSTER_EPS):
+                return True
+        return False
+
+    def _v_side_full(coord, lo, hi):
+        _i = _bisect.bisect_left(v_cs, coord - LINE_CLUSTER_EPS - 1e-6)
+        _j = _bisect.bisect_right(v_cs, coord + LINE_CLUSTER_EPS + 1e-6)
+        for _k in range(_i, _j):
+            _c, _l, _h = v_sorted[_k]
+            if (abs(_c - coord) <= LINE_CLUSTER_EPS
+                    and _l <= lo + LINE_CLUSTER_EPS and _h >= hi - LINE_CLUSTER_EPS):
+                return True
+        return False
+
     v_by_xa = sorted(v_pairs, key=lambda p: p[0])
     v_xas = [p[0] for p in v_by_xa]
     # 竖线对公共覆盖总长预计算：覆盖总长 < 矩形高的竖对必然纵跨不住 [ya,yb]，
@@ -639,13 +670,15 @@ def detect_rectangles_from_lines(entity_list, rot=None):
                     continue
                 # P1 严格矩形判定：4 条边的每一侧都必须至少有一条完整 LINE 覆盖
                 # 防止"边线残段+内部标注线拼凑出假矩形"
-                if not _has_full_side_line(h_lines, ya, xa, xb):
+                # （R38：_h_side_full/_v_side_full bisect 窗口版，等价替代
+                #   _has_full_side_line 全量线性扫描）
+                if not _h_side_full(ya, xa, xb):
                     continue
-                if not _has_full_side_line(h_lines, yb, xa, xb):
+                if not _h_side_full(yb, xa, xb):
                     continue
-                if not _has_full_side_line(v_lines, xa, ya, yb):
+                if not _v_side_full(xa, ya, yb):
                     continue
-                if not _has_full_side_line(v_lines, xb, ya, yb):
+                if not _v_side_full(xb, ya, yb):
                     continue
                 w = xb - xa
                 h = yb - ya
