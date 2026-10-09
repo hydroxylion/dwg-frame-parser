@@ -1358,5 +1358,73 @@ check('d013开关 NO_COND_F=1: 独立A1漏检, fc=3=200700x2+84100布',
               for c in r['candidates']))
 
 
+# ---- R39 用例：d018.dwg 预放大图框块 fc=0 —— 条件E 等效比例链 ----
+# 场景（tmp_diag_d018_r39.py 实测复现）：真图框 = 块 AW_FRAME_PRE100（块定义即
+# 59400×42000 = A2 横放 ×100，缩放做进块定义，实例 ×1 插入，ratio 1.4143 精确√2）。
+# 六通道全灭：
+#   A 灭：msp_total(≈3.27e10) 被 R27 拒绝并计回的巨型内容块 BIG_CONTENT
+#         （223536×146407，闭合框长边 34200 < 50% 判内容块）撑大 → ar=7.62%<15%
+#   C 灭：R27 计回分母（防塌缩机制）→ rel=7.62%<10%
+#   B 不适用（块非 EXPLICIT_TYPES）；D/F 仅直线矩形适用
+#   E 灭：块定义短边 42000 ∉ A 系 —— 旧判据未覆盖"预放大模板"
+# 线上链路：smart 抛"未检测到图框"→ 前端自动 force_max 重试 → 尺寸对
+# （59400×42000）但 frame_count=0。修法：条件E 扩展等效比例链
+# （实例 = A系短边×白名单倍率 + 实例相对块定义等比 ≤0.5% + 长边≈短边×√2）。
+def _build_d018_like_doc():
+    doc = make_doc()
+    msp = doc.modelspace()
+    # [0] 预放大图框块：块定义 59400×42000（A2×100），实例 ×1 插入
+    _blk_f = doc.blocks.new(name='AW_FRAME_PRE100')
+    add_closed_rect(_blk_f, 0, 0, 59400, 42000)
+    # 标题栏内部横线 ×3（长 30000 不撑 bbox）
+    for _k in range(3):
+        _blk_f.add_line((3000, 3000 + _k * 1500), (33000, 3000 + _k * 1500))
+    msp.add_blockref('AW_FRAME_PRE100', (10000, 10000))
+    # [1] 巨型内容块：bbox 223536×146407；闭合证据仅 34200 小框（<50% → R27 拒）；
+    #     最长直边构件 80000（≥30% → 构件证据合格 → R27 计回 rel 分母）；
+    #     横簇重叠带 [0,80000] 不含竖线 x=223536 → LINE 簇不成框
+    _blk_b = doc.blocks.new(name='BIG_CONTENT')
+    _blk_b.add_line((0, 0), (80000, 0))
+    _blk_b.add_line((223536, 0), (223536, 80000))
+    _blk_b.add_line((0, 146407), (150000, 146407))
+    _blk_b.add_line((100000, 20000), (223536, 100000))
+    add_closed_rect(_blk_b, 20000, 20000, 34200, 24000)
+    msp.add_blockref('BIG_CONTENT', (0, 0))
+    # [2] 顶层对角斜线（斜线不进 P1 横竖簇；保证 msp_total 无论 ezdxf fast 对
+    #     INSERT 的展开行为如何都被撑到巨块量级 → ar 复现 7.62%）
+    msp.add_line((0, 0), (223536, 146407))
+    # [3] 顶层散斜线 ×6（复刻 d018 顶层 LINE 不成矩形；bbox 在巨块内）
+    for _k in range(6):
+        msp.add_line((120000 + _k * 8000, 60000 + _k * 5000),
+                     (150000 + _k * 8000, 70000 + _k * 5000))
+    # 空布局1（d018 实况：布局无实体、无候选）
+    doc.layouts.new('布局1')
+    return to_bytes(doc)
+
+
+_data18 = _build_d018_like_doc()
+check('R39 d018: 预放大图框块(A2x100)条件E等效比例链救回, fc=1 (smart)',
+      lambda: parse(_data18),
+      lambda r: r['frame_count'] == 1
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 59400) < 5 and abs(c['height'] - 42000) < 5
+              and c['layout'] == '模型空间') == 1
+      and r['width'] == 59400 and r['height'] == 42000)
+
+
+def _run18_no_pre():
+    try:
+        return _parse_env(_data18, FRAME_PARSER_NO_COND_E_PRE='1')
+    except RuntimeError as e:
+        return {'error': str(e)}
+
+
+# ---- R39 开关守卫：NO_COND_E_PRE=1（回退旧判据）----
+# 预放大块回到六通道全灭 → smart 抛"未检测到图框"（线上 fc=0 的红形态）。
+check('R39开关 NO_COND_E_PRE=1: 预放大块漏检(抛未检测到图框)',
+      _run18_no_pre,
+      lambda r: 'error' in r and '未检测到图框' in r['error'])
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)

@@ -2401,33 +2401,62 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #   与条件B/C 的区别：不依赖面积占比、不依赖绝对尺寸，只看"模板标准 + 倍率合法"。
             #   挡住装饰块：家具/门窗符号块定义尺寸不在 A 系列、比例也远离 √2；自定义
             #   倍率缩放（39.05× 等）被白名单拦下。
+            #   R39 扩展（预放大模板，d018.dwg）：设计院也常把出图缩放**做进块定义**
+            #   ——块定义即 59400×42000（= A2 横放 ×100），实例 ×1 插入。旧判据要求
+            #   块定义命中 A 系裸尺寸（594×420）→ 42000 ∉ A 系全灭；该图框又死于
+            #   A/C（area_ratio 7.62%<15%、rel 7.62%<10%——分母被 R27 拒绝并计回的
+            #   巨型内容块 223536×146407 撑大）→ fc=0，smart 抛"未检测到图框"触发
+            #   前端 force_max 重试 → 前端"尺寸对但图框数量 0"。
+            #   扩展：等效比例链「标准A系 → 块定义×实例倍率 = 实例尺寸」——实例短边
+            #   命中某 A 系短边 × 白名单倍率（相对容差 1%，与 k 校验同口径）、实例
+            #   长边 ≈ 短边×√2，且实例相对块定义等比（两方向比值一致 ≤0.5%，防非
+            #   等比拉伸）。原"直接模板"分支是本链 k_def=1 的特例：块定义=A系裸尺寸
+            #   + 实例×k ∈ 白名单 ⇒ 实例 = A系×k 直接命中，行为完全兼容。
+            #   误判面增量：块定义本身为 A系×合法倍率的块——即"按出图尺寸制作的
+            #   图框块"，实为图框的概率极高；装饰块同时满足 ratio≈√2 + A系整倍率
+            #   + 等比的组合概率极低（40 张回归实证零变化）。
+            #   开关 FRAME_PARSER_NO_COND_E_PRE=1 可关扩展（回退旧行为）。
             if c['type'] == '块参照插入':
                 _bdw = c.get('block_def_w') or 0
                 _bdh = c.get('block_def_h') or 0
                 if _bdw > 0 and _bdh > 0:
                     _b_short = min(_bdw, _bdh)
                     _b_long = max(_bdw, _bdh)
-                    _is_std_paper = any(
-                        abs(_b_short - _s) <= 1.0 and abs(_b_long - _s * _SQRT2) <= 1.0
-                        for _s in A_SERIES_SHORT_SIDES)
-                    if _is_std_paper:
-                        # 宽高分别对块定义宽高求比（两种对应关系：原向 / 旋转 90° 互换）
+                    # 等比校验（两分支共用）：实例/块定义 宽高比值一致（≤0.5%，
+                    # 吸收浮点/取整噪声）；rotation 90° 插入时宽高互换兼容
+                    _k_ins = None
+                    for _dw, _dh in ((_bdw, _bdh), (_bdh, _bdw)):
+                        _kw = c['width'] / _dw
+                        _kh = c['height'] / _dh
+                        _kmax = max(_kw, _kh)
+                        if _kmax <= 0:
+                            continue
+                        if abs(_kw - _kh) <= _kmax * 0.005:
+                            _k_ins = (_kw + _kh) / 2
+                            break
+                    if _k_ins is not None:
                         _k_ok = False
-                        for _dw, _dh in ((_bdw, _bdh), (_bdh, _bdw)):
-                            _kw = c['width'] / _dw
-                            _kh = c['height'] / _dh
-                            _kmax = max(_kw, _kh)
-                            if _kmax <= 0:
-                                continue
-                            # 等比：两方向比值相对差 ≤ 0.5%（吸收浮点/取整噪声）
-                            if abs(_kw - _kh) > _kmax * 0.005:
-                                continue
-                            _k = (_kw + _kh) / 2
-                            # k 落在常用制图比例白名单（相对容差 1%，容纳 2.5 等非整数比例）
-                            if any(abs(_k - _s) <= max(0.01, _s * 0.01)
-                                   for _s in COMMON_PLOT_SCALES):
-                                _k_ok = True
-                                break
+                        # ① 直接模板（原逻辑）：块定义 = A系裸尺寸 + 实例 = 定义×k∈白名单
+                        _is_std_paper = any(
+                            abs(_b_short - _s) <= 1.0 and abs(_b_long - _s * _SQRT2) <= 1.0
+                            for _s in A_SERIES_SHORT_SIDES)
+                        if _is_std_paper:
+                            _k_ok = any(abs(_k_ins - _s) <= max(0.01, _s * 0.01)
+                                        for _s in COMMON_PLOT_SCALES)
+                        # ② 预放大模板（R39）：实例 = A系×k_total（k_total = k_def×k_ins）
+                        if not _k_ok and os.environ.get('FRAME_PARSER_NO_COND_E_PRE') != '1':
+                            _inst_short = min(c['width'], c['height'])
+                            _inst_long = max(c['width'], c['height'])
+                            for _s in A_SERIES_SHORT_SIDES:
+                                for _ks in COMMON_PLOT_SCALES:
+                                    _tgt_short = _s * _ks
+                                    _tgt_long = _tgt_short * _SQRT2
+                                    if (abs(_inst_short - _tgt_short) <= max(1.0, _tgt_short * 0.01)
+                                            and abs(_inst_long - _tgt_long) <= max(1.0, _tgt_long * 0.01)):
+                                        _k_ok = True
+                                        break
+                                if _k_ok:
+                                    break
                         if _k_ok:
                             c['_via'] = 'E'
                             return True
