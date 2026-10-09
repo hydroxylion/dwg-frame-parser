@@ -1615,6 +1615,13 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     _insert_filtered = 0  # 预筛剔除数（非图框级尺寸）
     _r27_rej_max = 0.0    # R27 闭合通道拒绝、但构件证据合格的内容块最大面积（rel 分母计回用）
     _resc_credit = {}     # R40 块内图框救援的组面积记账 {(w,h): area}——末尾让位检查后幸存组才合并进 _r27_rej_max
+    # R43：计回按块记账 {block_name: max 面积}（同块多实例取 max，末尾统一
+    #   取全局 max 与原逐实例累积数学等价）。单独维护是为了让救援幸存组能
+    #   "让位"替换特定块的计回——d008 巨块 13013-11-AW-FP 计回 1.06e12
+    #   （块 bbox 面积）压死内含真框 200700×126150 的 rel（2.4%）。
+    _r27_credit_by_block = {}
+    # R43：救援组 → 关联块名 {组key: set(block_name)}——让位替换时定位块。
+    _resc_credit_blocks = {}
     # R30：计回尺寸上限。真图框长边物理上限 ≈ A0 纸 1189mm × 1:1000 出图 ≈ 1.19e6mm，
     # 取 2.5e6 留两倍余量。超限的巨型底图/xref 外包络（S010 北区商业街底图
     # 6345273×1806446，块内含超长道路线使构件证据"合格"）不得计回——否则 rel
@@ -1731,8 +1738,10 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                     _member_len_r27 = _block_max_member_len(_bn)
                     if (_member_len_r27 >= _bb_len * _BLOCK_EVIDENCE_RATIO
                             and max(_w, _h) <= _R27_CREDIT_MAX_SIDE):
-                        if _w * _h > _r27_rej_max:
-                            _r27_rej_max = _w * _h
+                        # R43：按块记账（同块多实例取 max），末尾统一让位/合并
+                        _prev_credit = _r27_credit_by_block.get(_bn, 0)
+                        if _w * _h > _prev_credit:
+                            _r27_credit_by_block[_bn] = _w * _h
                 # R40 块内图框救援（d006,007）：R27 拒绝的巨型拼接底图块内部
                 #   可能藏着同模板复制的真图框——d006,007 巨块
                 #   13013-11-AW-FP改10#下移0516_t3（定义 bbox 5261364×1309513、
@@ -1759,6 +1768,7 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 if (os.environ.get('FRAME_PARSER_NO_BLOCK_FRAME_RESCUE') != '1'
                         and _bn in doc.blocks):
                     _resc_groups = {}
+                    _resc_all = []    # R43：全部过门槛闭合矩形实例（嵌套对判定用）
                     _tol_p_res = max(1.0, _bb_len * 0.002)
                     for _ent_in in doc.blocks[_bn]:
                         try:
@@ -1818,14 +1828,54 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                                 'area': _rw * _rh,
                                 'rect': _rarea / (_rw * _rh),
                             })
+                            _resc_all.append({
+                                'bbox': (_rx1, _ry1, _rx2, _ry2),
+                                'area': _rw * _rh,
+                            })
                         except Exception:
                             continue
+                    # R43 嵌套图框对救援：块内仅 1 份外框 + 1 份内框（同层
+                    #   标题栏嵌套体系，外框=图框、内框=装订边/内框线），
+                    #   两份尺寸各只有 1 份 → R40 "≥2 份同尺寸" 判据不命中
+                    #   → 漏检（d008：巨块 13013-11-AW-FP 内 200700×126150
+                    #   外框 + 195450×123150 内框，各 1 份，面积比 0.951）。
+                    #   判据：存在 A、B 两份不同尺寸、B 严格嵌套于 A（bbox
+                    #   四边内缩 >1.0mm）、bbox 面积比 B/A ∈ [0.85, 0.995]
+                    #   （同模板内外框体系，差异仅边框/装订边厚度）→ A 组视
+                    #   为"嵌套对组"提升（只提外框组，内框组不提，避免留大
+                    #   剔小顶替）。ratio ∈ [1.30, MAX] 门槛天然挡住一层.dwg
+                    #   /S010 的近方形建筑轮廓（1.055~1.063）；面积比下限
+                    #   0.85 挡住普通嵌套（家具/表格嵌套通常 <0.85）。
+                    _nested_pair_keys = set()
+                    if len(_resc_groups) >= 2 and 2 <= len(_resc_all) <= 400:
+                        for _npi in range(len(_resc_all)):
+                            for _npj in range(len(_resc_all)):
+                                if _npi == _npj:
+                                    continue
+                                _rba = _resc_all[_npi]['bbox']
+                                _rbb = _resc_all[_npj]['bbox']
+                                if not (_rbb[0] > _rba[0] + 1.0
+                                        and _rbb[1] > _rba[1] + 1.0
+                                        and _rbb[2] < _rba[2] - 1.0
+                                        and _rbb[3] < _rba[3] - 1.0):
+                                    continue
+                                _area_a = _resc_all[_npi]['area']
+                                _area_b = _resc_all[_npj]['area']
+                                if _area_a <= 0:
+                                    continue
+                                if not (0.85 <= _area_b / _area_a <= 0.995):
+                                    continue
+                                _nested_pair_keys.add(
+                                    (round(_rba[2] - _rba[0]),
+                                     round(_rba[3] - _rba[1])))
                     for _rgk, _rgrp in _resc_groups.items():
-                        if len(_rgrp) < 2:
+                        if len(_rgrp) < 2 and _rgk not in _nested_pair_keys:
                             continue
                         # ② 分母补强记账（max 语义）：末尾让位检查后幸存组合并
                         if _rgrp[0]['area'] > _resc_credit.get(_rgk, 0):
                             _resc_credit[_rgk] = _rgrp[0]['area']
+                        # R43：记录救援组关联的块名（末尾让位替换时定位）
+                        _resc_credit_blocks.setdefault(_rgk, set()).add(_bn)
                         # ① 提升候选（每组 ≤50 份）
                         _n_up = 0
                         for _rm in _rgrp:
@@ -1850,6 +1900,8 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                                 'block_def_h': 0.0,
                                 'tilted': False,
                                 'block_rect_len': max(_rgk),
+                                # R43：嵌套图框对组标记（孤证复核通道⑦用）
+                                'nested_pair': _rgk in _nested_pair_keys,
                             })
                             _n_up += 1
                         if _n_up:
@@ -2105,6 +2157,13 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     # 非救援候选 → 该尺寸组整体撤销（删候选 + 撤计回）。真图框不嵌套其他
     # 图框（嵌套关系由包裹框剔除专门处理），d006,007 的 200700×126150 与
     # 设备块位置错开不受影响。
+    # R43：计回按块记账的末尾合并。effective = 各被拒块计回（按块取 max，
+    #   全局 max 与原逐实例累积数学等价）；救援幸存组"让位"**替换**其关联
+    #   块的计回为组面积——d008 巨块 13013-11-AW-FP 被拒计回 1.06e12（块
+    #   bbox 面积），内含嵌套图框对 200700×126150 rel 仅 2.4% 过不了条件C；
+    #   该块救援幸存后让位替换为组面积 2.53e10 → rel=100%（与 d006,007 同
+    #   路）。非救援场景 effective 即原 _r27_rej_max，行为不变。
+    _effective_credit = dict(_r27_credit_by_block)
     if _resc_credit:
         import itertools as _it
         _resc_cands = [c for c in candidates if c.get('type') == '块内闭合线']
@@ -2114,8 +2173,18 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             _rb = _rc['bbox']
             for _oc in _other_cands:
                 _ob = _oc['bbox']
-                if (_rb[0] <= _ob[0] + 1.0 and _rb[1] <= _ob[1] + 1.0
+                if not (_rb[0] <= _ob[0] + 1.0 and _rb[1] <= _ob[1] + 1.0
                         and _rb[2] >= _ob[2] - 1.0 and _rb[3] >= _ob[3] - 1.0):
+                    continue
+                # R43 面积比门槛：被罩候选 ≥ 救援候选 10% 才算"裁剪边界罩
+                #   真图框"形态。正常图框罩住图内小部件（表格/家具闭合线）
+                #   通常远小于 10%（d008：10500×26406 / 200700×126150 =
+                #   1.1%）——真图框罩小部件是正常图框行为，不是裁剪边界；
+                #   1号2号楼 被罩真图框 126164×178350 / 200000×300000 =
+                #   37.5% ≥ 10% 仍撤销，行为不变。
+                _rb_area = max(1.0, (_rb[2] - _rb[0]) * (_rb[3] - _rb[1]))
+                _ob_area = max(0.0, (_ob[2] - _ob[0]) * (_ob[3] - _ob[1]))
+                if _ob_area >= _rb_area * 0.10:
                     _revoke_keys.add((_rc['width'], _rc['height']))
                     break
         if _revoke_keys:
@@ -2131,9 +2200,18 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                      f"（图纸裁剪边界形态，{', '.join(f'{k[0]:.0f}x{k[1]:.0f}' for k in sorted(_revoke_keys))}）"
                      f"→ 整组撤销（候选与 rel 分母计回一并撤回）")
         if _resc_credit:
-            _rej_from_resc = max(_resc_credit.values())
-            if _rej_from_resc > _r27_rej_max:
-                _r27_rej_max = _rej_from_resc
+            # R43 幸存组让位：替换（非 max）关联块的计回——d008 组面积
+            #   2.53e10 必须覆盖块计回 1.06e12，否则 rel 分母仍被污染。
+            #   同块多幸存组时取最大组面积（分母至少容纳最大幸存图框）。
+            _resc_block_credit = {}
+            for _gk, _g_area in _resc_credit.items():
+                for _cb in _resc_credit_blocks.get(_gk, ()):
+                    if _g_area > _resc_block_credit.get(_cb, 0):
+                        _resc_block_credit[_cb] = _g_area
+            for _cb, _cb_area in _resc_block_credit.items():
+                _effective_credit[_cb] = _cb_area
+    if _effective_credit:
+        _r27_rej_max = max(_effective_credit.values())
 
     return candidates, _r27_rej_max
 
@@ -2985,6 +3063,10 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             'stripe_inside':      1.0,  # ④ 内含带条纹子候选（标题栏在框内）
             'name_declared':      1.0,  # ⑤ 块名含 图框/frame/图幅代号(A0~A9)
             'nested_frame':       1.0,  # ⑥ 内含不同尺寸通过候选（嵌套内外框）
+            'nested_pair_rescue': 1.0,  # ⑦ R43 块内嵌套图框对救援提升（扫描时
+                                        #    已验证严格嵌套+面积比[0.85,0.995]，
+                                        #    强于⑥的宽松包含判据；内框未入库时
+                                        #    ⑥ 拿不到分，⑦ 补上该盲区——d008）
         }
         # ⑤ 图幅代号：A0~A9 独立词。(?<![a-z0-9]) 防匿名块名 A$C6A6C4DA6
         # （其 a6 前是字母数字无词边界）；(?![0-9]) 防 A31005 类图纸编号误伤。
@@ -3045,6 +3127,9 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     _hits.append(f"⑥内含 {_o['width']:.0f}x{_o['height']:.0f}"
                                  f"({_o['type']})")
                     break
+            if _c.get('nested_pair'):                   # ⑦ R43 块内嵌套对互证
+                _score += _SOLO_WEIGHTS['nested_pair_rescue']
+                _hits.append('⑦嵌套图框对（救援扫描已验证严格嵌套+面积比）')
             return _score, _hits
 
         if _SOLO_RECHECK_ENABLED and frame_like:

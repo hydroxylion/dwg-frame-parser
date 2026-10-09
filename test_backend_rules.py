@@ -1525,5 +1525,54 @@ check('R40开关 NO_BLOCK_FRAME_RESCUE=1: 设备块复活, fc=20红形态',
               if abs(c['width'] - 771) < 5 and c['layout'] == '模型空间') >= 10)
 
 
+# ==================== R43 d008：嵌套图框对救援 + 计回按块记账/让位 ====================
+def _build_d008_like_doc():
+    doc = make_doc()
+    msp = doc.modelspace()
+    # [0] 巨块：内含 1 份外框 200700×126150 + 1 份嵌套内框（四边内缩 2000 →
+    #     196700×122150，面积比 0.949 ∈ [0.85,0.995]）+ 两条长 LINE 散件撑大
+    #     块定义 bbox 至 1800000×586909（复刻 d008 实测 1806307×586909 量级）：
+    #     闭合框长边 200700 < 1800000×50% → R27 拒绝；LINE 1800000 ≥ 30% →
+    #     构件证据合格 → 按块计回 1.056e12 压死外框 rel=2.4%——R43 让位机制
+    #     必须把它替换成组面积 2.53e10 → rel=100%。
+    _blk = doc.blocks.new(name='13013-11-AW-FP-R43')
+    _blk.add_lwpolyline([(0, 0), (200700, 0), (200700, 126150), (0, 126150)],
+                        close=True)
+    _blk.add_lwpolyline([(2000, 2000), (198700, 2000), (198700, 124150),
+                         (2000, 124150)], close=True)
+    _blk.add_line((0, 0), (1800000, 0))       # 散件撑块 bbox（水平跨度）
+    _blk.add_line((0, 0), (0, 586909))        # 散件撑块 bbox（垂直跨度）
+    msp.add_blockref('13013-11-AW-FP-R43', (0, 0))
+    # [1] 顶层小闭合矩形（表格/部件形态）：位于外框内部、被 200700 救援候选
+    #     罩住，面积占比 10500×26406/200700×126150 = 1.1% < 10% → 验证 R43
+    #     面积比门槛（正常图框罩小部件不触发让位撤销）。
+    add_closed_rect(msp, 50000, 30000, 10500, 26406)
+    return to_bytes(doc)
+
+
+_data008 = _build_d008_like_doc()
+check('R43 d008: 嵌套图框对救援+计回按块让位+面积比门槛, fc=1 200700x126150 (smart)',
+      lambda: parse(_data008),
+      lambda r: r['frame_count'] == 1
+      and r['width'] == 200700 and r['height'] == 126150
+      and r['candidates'][0]['type'] == '块内闭合线'
+      and r['candidates'][0]['layout'] == '模型空间')
+
+
+def _run008_no_rescue():
+    try:
+        return _parse_env(_data008, FRAME_PARSER_NO_BLOCK_FRAME_RESCUE='1')
+    except RuntimeError as e:
+        return {'error': str(e)}
+
+
+# ---- R43 开关守卫：NO_BLOCK_FRAME_RESCUE=1（回退：无救援、无让位）----
+# 巨块被拒不提升 → 顶层小框 10500×26406（ratio 2.515 出条件C 窗、rel 1.1%
+# ar 0.03%）全灭 → fc=0 抛错"未检测到图框"。
+check('R43开关 NO_BLOCK_FRAME_RESCUE=1: 无救援, 抛错未检测到图框',
+      _run008_no_rescue,
+      lambda r: 'error' in r and '未检测到图框' in r['error'])
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)
