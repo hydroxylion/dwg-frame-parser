@@ -394,7 +394,9 @@ def _intersect_segments(a, b):
     """两个已合并线段列表的交集"""
     out = []
     i = j = 0
-    while i < len(a) and j < len(b):
+    la = len(a)
+    lb = len(b)  # R42：长度提取，避免 while 每轮重算 len（1044 万次调用 × 每轮 2 次）
+    while i < la and j < lb:
         lo = max(a[i][0], b[j][0])
         hi = min(a[i][1], b[j][1])
         if hi > lo:
@@ -524,7 +526,19 @@ def detect_rectangles_from_lines(entity_list, rot=None):
         if n < 2:
             return pairs
 
+        # R42 bounding 快筛预计算：每个聚类合并段列表的首段 lo / 末段 hi
+        # （_cluster_parallel_lines 输出段列表已排序合并）。两聚类 bounding
+        # 不交（一方整体在另一方左侧/右侧）⇔ 段交集必空 ⇔ 原 add_pair 也会
+        # 因 common 为空丢弃——O(1) 提前剔除，数学等价。泛悦国际商业强电
+        # 长线全配通道 1044 万次 add_pair/_intersect_segments（47.6s，detect
+        # 段最大热点）中，坐标完全错开的对被零成本剪除。
+        _bounds = [(s[0][0], s[-1][1]) for _, s in clusters]
+
         def add_pair(i, j):
+            b1 = _bounds[i]
+            b2 = _bounds[j]
+            if b1[1] <= b2[0] or b2[1] <= b1[0]:
+                return  # bounding 不交，交集必空
             c1, s1 = clusters[i]
             c2, s2 = clusters[j]
             common = _intersect_segments(s1, s2)
@@ -560,16 +574,31 @@ def detect_rectangles_from_lines(entity_list, rot=None):
     if not h_pairs or not v_pairs:
         return []
 
+    # R42 has_internal_divider bisect 索引：聚类坐标数组（_cluster_parallel_lines
+    # 输出已按 coord 升序，直接提取）
+    _v_cs_clusters = [c for c, _ in v_clusters]
+    _h_cs_clusters = [c for c, _ in h_clusters]
+
     def has_internal_divider(x1, y1, x2, y2):
-        """矩形内部是否存在整条穿越的分隔线（说明该矩形是多个图框的拼合外包络）"""
-        for cx, segs in v_clusters:
-            if x1 + LINE_CLUSTER_EPS < cx < x2 - LINE_CLUSTER_EPS:
-                if _coverage_contains(segs, y1, y2):
-                    return True
-        for cy, segs in h_clusters:
-            if y1 + LINE_CLUSTER_EPS < cy < y2 - LINE_CLUSTER_EPS:
-                if _coverage_contains(segs, x1, x2):
-                    return True
+        """矩形内部是否存在整条穿越的分隔线（说明该矩形是多个图框的拼合外包络）
+
+        R42 加速：v_clusters/h_clusters 已由 _cluster_parallel_lines 按 coord
+        升序输出，用 bisect 定位 (x1+eps, x2-eps) 开区间窗口（左界取
+        bisect_right 跳过 ≤x1+eps 的聚类、右界取 bisect_left 排除 ≥x2-eps
+        的聚类——与原逐条判断 x1+eps < cx < x2-eps 的命中集合完全等价），
+        仅窗口内做 _coverage_contains 精判。旧实现每次全量扫描两侧全部聚类
+        （泛悦国际商业强电 11.8 万次调用 × 1.6 万聚类 = 14.2s 自耗时，detect
+        段第二大热点），窗口化后坐标不在矩形内的聚类零成本跳过。"""
+        _lo_i = _bisect.bisect_right(_v_cs_clusters, x1 + LINE_CLUSTER_EPS)
+        _hi_i = _bisect.bisect_left(_v_cs_clusters, x2 - LINE_CLUSTER_EPS)
+        for _k in range(_lo_i, _hi_i):
+            if _coverage_contains(v_clusters[_k][1], y1, y2):
+                return True
+        _lo_j = _bisect.bisect_right(_h_cs_clusters, y1 + LINE_CLUSTER_EPS)
+        _hi_j = _bisect.bisect_left(_h_cs_clusters, y2 - LINE_CLUSTER_EPS)
+        for _k in range(_lo_j, _hi_j):
+            if _coverage_contains(h_clusters[_k][1], x1, x2):
+                return True
         return False
 
     rects = []

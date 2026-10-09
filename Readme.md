@@ -128,6 +128,33 @@ ezdxf 默认不加载 XREF 外部文件，引用块会漏识别图框。检测�
 
 ## 三、优化记录
 
+### 2026-10-09（第四十二轮 —— R38 遗留"20.5 分钟 INSERT 黑洞"定案 + 直线矩形检测提速：黑洞真身 = detect_rectangles_from_lines，全程 -39%/detect -66%，判定零变化）
+
+**需求**：用户提供 R38 遗留黑洞图路径（泛悦国际商业强电.dwg，3.3MB，"建筑图纸（必须校验）/"），要求定位线上 11:50 请求（1324.5s / 120809 实体 / 候选 4407 / fc=26 / 3708 INSERT）中"可见实体 → INSERT 收集日志"之间 20.5 分钟静默黑洞的真因。
+
+**特征复核**：tmp_profile_fanyue_r42.py（cProfile 全程 + parser.log 时间线）——fc=26、候选 4407 与线上请求 C **逐字吻合**，确认同一张图。
+
+**黑洞定位（结论与 R38 锚点记载不同）**：
+- **INSERT 收集段本身不慢**：cProfile top30 中黑洞段组件（`_estimate_global_rotation`/`_get_block_world_bbox`/`_block_closed_frame_len`/`_block_max_member_len`——三级按名缓存有效）全部缺席，该段 <2s；
+- **真凶 = `detect_rectangles_from_lines`（直线矩形检测，app.py 1960 行调用，在 INSERT 收集日志之后）**：92.8s cumtime（占 collect 94.9s 的 98%），该段**零日志输出**——"静默黑洞"形态与此吻合。R38 排查时把 gap 锚点记成"可见实体→INSERT 收集"系记载偏差（真 gap 在"INSERT 收集→孤证复核"之间）；
+- **当天 20.5 分钟的构成**：旧代码 detect（R38 修B 前 `_has_full_side_line` 线性扫描仍在）+ 当天多请求资源争抢放大；R38 修B 只治了四边完整性检查，**未覆盖 make_pairs 组合生成与 has_internal_divider**。
+
+**三大热点（cProfile 实测）**：
+1. `make_pairs` 通道②"图框级长边聚类全配对"（跨度 ≥LINE_PAIR_FULL_SPAN(180mm) 的聚类两两配对）：本图强电桥架/走廊长线聚类数千 → **1044 万次 add_pair→_intersect_segments**（47.6s cumtime，detect 段最大热点）；
+2. `has_internal_divider`（拼合外包络剔除）：**11.8 万次调用、每次全量扫描两侧全部聚类**（1.6 万聚类 → 14.2s tottime，第二大热点）；
+3. `_intersect_segments` while 每轮重算 len（1044 万次 × 每轮 2 次 → 全程 9.47 亿次 len 调用中的大头）。
+
+**修法（三修，全部数学等价、判定逻辑零改动）**：
+- **修A has_internal_divider bisect 化**：v_clusters/h_clusters 已由 `_cluster_parallel_lines` 按 coord 升序输出 → bisect 定位 (x1+eps, x2-eps) 开区间窗口（左界 bisect_right 跳过 ≤x1+eps、右界 bisect_left 排除 ≥x2-eps），窗口内保留原 `_coverage_contains` 精判——命中集合与全量扫描完全等价；
+- **修B make_pairs bounding 快筛**：预计算每聚类合并段列表 bounding（首段 lo/末段 hi），两聚类 bounding 不交 ⇔ 段交集必空 ⇔ 原 add_pair 也因 common 空丢弃 → O(1) 提前剔除（**1044 万 → 69.8 万次 _intersect_segments，-93%**）；
+- **修C _intersect_segments len 提取**：la/lb 提前计算。
+
+**验证**：单测 **72/72 全绿**；泛悦复测 **fc=26、best=148600×84100、候选尺寸组数 6 与修复前逐字一致**；cProfile 复测**全程 164.0s→100.7s（-39%）、detect 92.8→31.9s（-66%）、make_pairs 56.0→9.6s（-83%）、has_internal_divider 掉出热榜（≈-97%）**；40 张全量回归一致 40 / 变化 0 / 缺失 0（R41 修正版脚本含 error 条目口径）。
+
+**附带发现（线上服务代码版本警示）**：排查期间 parser.log 出现另一进程对同批图纸的解析记录（120809 实体暖通图 12607 INSERT/7435 候选/选中 105100×59400 vs HEAD 3708 INSERT/4407 候选/148600×84100）——**同图输出完全不同，线上服务仍在跑旧代码**，R38~R42 新代码需重启加载后方可生效。
+
+**结论**：R38 遗留待办"20.5 分钟 INSERT 黑洞需用户提供 120809 实体图路径"**关闭**——黑洞真身已定位并修复（detect 段两热点），R38 三大根因至此全部收口。
+
 ### 2026-10-09（第四十一轮 —— R40 遗留"一层.dwg 疑似环境漂移"勘误：基线条目误读 + 回归脚本缺陷，行为零漂移，遗留关闭）
 
 **背景**：R40 回归报"一致 39 / 变化 1"（唯一变化一层.dwg），当时定性"R38 前既有遗留 + 疑似 ODA 环境漂移"（第四十轮遗留段已加勘误指针）。本轮单独排查，**结论反转：无代码问题、无环境漂移——"变化"系 R40 临时回归脚本 tmp_regress_r40.py 的比对缺陷 + 基线条目误读；一层.dwg 自 9-14 孤证复核修复以来行为零漂移，遗留待办关闭**。
