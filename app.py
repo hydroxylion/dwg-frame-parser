@@ -3063,12 +3063,48 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
 
             _in_fl_i = {id(c) for c in frame_like}
             _i_added = []
+            # R49：块候选可见性前置（08，09-MW-FP006 误检 3 实际 2）。块 DOTE
+            #   （35950×33400 纯网格表）全部 58 个实体位于 off 图层 DOTE$0$A-ANNO-DOTE
+            #   → CAD 中整块不可见；条件I 数线扫描把主图框左侧相邻的可见管线细节线
+            #   （ACS_SFG_FL/M-LPD 等，恰好 41 横+16 竖落入其 bbox）误当表格行/列线，
+            #   救回一张"隐形表格页"。修法：块参照候选救援前检查块定义内实体图层
+            #   ——至少存在 1 个实体且全部位于 off/frozen 图层 → 整块不可见，跳过
+            #   救援（"看不见的东西不是表格页"）。仅窄化条件I 入口，不动候选收集。
+            _blk_invisible_cache = {}
+
+            def _block_all_invisible(_bn):
+                if _bn not in _blk_invisible_cache:
+                    _all_inv = False    # 块缺失/无实体时不判隐形（保守不拦）
+                    try:
+                        _blk = doc.blocks.get(_bn)
+                        _ents = list(_blk)
+                        if _ents:
+                            _all_inv = True
+                            for _e in _ents:
+                                try:
+                                    _la = doc.layers.get(_e.dxf.layer)
+                                except Exception:
+                                    _la = None
+                                if _la is None or (_la.is_on() and not _la.is_frozen()):
+                                    _all_inv = False
+                                    break
+                    except Exception:
+                        _all_inv = False
+                    _blk_invisible_cache[_bn] = _all_inv
+                return _blk_invisible_cache[_bn]
+
             for _c in all_candidates:
                 if id(_c) in _in_fl_i:
                     continue
                 if _c['width'] < 5000 or _c['height'] < 5000:
                     continue
                 if not (FRAME_RATIO_MIN <= _c['ratio'] <= FRAME_RATIO_MAX):
+                    continue
+                if _c['type'] == '块参照插入' and _c.get('block_name') \
+                        and _block_all_invisible(_c['block_name']):
+                    safe_log(f"   [条件I·跳过] 块 {_c['block_name']} "
+                             f"{_c['width']:.0f}×{_c['height']:.0f}：块内实体全部位于关闭/冻结图层"
+                             f"（CAD 中不可见），不判表格页")
                     continue
                 if any(_c['bbox'][0] >= _f['bbox'][0] - 1 and _c['bbox'][1] >= _f['bbox'][1] - 1 and
                        _c['bbox'][2] <= _f['bbox'][2] + 1 and _c['bbox'][3] <= _f['bbox'][3] + 1

@@ -1716,5 +1716,55 @@ check('R48条件F扩展: 低rel闭合多段线A系纸两框均存活 (smart)',
               and abs(c['height'] - 29700) < 5) == 1)
 
 
+# ---- 用例 65：R49 条件I 护栏——隐形块（全实体 off 层）不判表格页 ----
+# 复刻 08，09-MW-FP006 形态：块 DOTE_GRID（35950×33400 纯网格，全部实体在
+# off 图层）插在真框左侧，bbox 内恰有相邻可见管线折线（41 横+16 竖）——
+# 修复前条件I 把"别人的线"数进隐形块的 bbox，救回一张隐形表格页（fc 3→2）。
+# 断言：无表格页候选、无 35950 候选；两张真框互证存活。
+doc = make_doc()
+msp = doc.modelspace()
+doc.layers.new('DOTE_OFF', dxfattribs={'color': -7})    # color<0 = 图层关闭（ezdxf is_off 口径）
+_blk_inv = doc.blocks.new(name='DOTE_GRID')
+for _i in range(10):     # 块内画网格（横 10 × 竖 6，全部在 off 层）
+    _blk_inv.add_line((0, _i * 3340), (35950, _i * 3340), dxfattribs={'layer': 'DOTE_OFF'})
+for _j in range(6):
+    _blk_inv.add_line((_j * 6500, 0), (_j * 6500, 33400), dxfattribs={'layer': 'DOTE_OFF'})
+msp.add_blockref('DOTE_GRID', (-72525, -810))
+# 隐形块 bbox 内的可见管线折线（修复前被条件I 误数成表格线）
+for _i in range(41):
+    _x0 = -72000 + _i * 500
+    msp.add_line((_x0, 5000 + (_i % 4) * 800), (_x0 + 500, 5000 + (_i % 4) * 800 + 300))
+for _j in range(16):
+    msp.add_line((-70000 + _j * 1500, 4000), (-70000 + _j * 1500, 20000))
+# 两张真框互证（远离隐形块区域，避免孤证复核干扰）
+add_closed_rect(msp, 100000, 0, 84100, 59400)
+add_closed_rect(msp, 200000, 0, 84100, 59400)
+data = to_bytes(doc)
+check('R49条件I护栏: 隐形块(全实体off层)不判表格页 (smart)',
+      lambda: parse(data),
+      lambda r: not any(c.get('rescued_by') == 'table_page' for c in r['candidates'])
+      and not any(abs(c['width'] - 35950) < 5 for c in r['candidates']))
+
+
+# ---- 用例 66：R49 对照——可见表格页（顶层闭合框+网格）仍被条件I 救回 ----
+# 复刻香槟半岛图纸目录页真实形态：顶层闭合多段线外框 35950×33400（可见）
+# + 框内网格线（横 ≥30 / 竖 ≥6）→ 条件I 必须照常救援，护栏不得误伤。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 0, 0, 35950, 33400)      # 表格外框（可见，顶层）
+for _i in range(1, 33):                        # 横 32 条（≥30，内缩避免压线）
+    msp.add_line((100, _i * 1000), (35850, _i * 1000))
+for _j in range(1, 7):                         # 竖 6 条（≥6）
+    msp.add_line((_j * 5500, 100), (_j * 5500, 33300))
+# 表格页旁边放两张真框互证
+add_closed_rect(msp, 100000, 0, 84100, 59400)
+add_closed_rect(msp, 200000, 0, 84100, 59400)
+data = to_bytes(doc)
+check('R49对照: 可见表格页仍被条件I救回 (smart)',
+      lambda: parse(data),
+      lambda r: any(c.get('rescued_by') == 'table_page'
+                    and abs(c['width'] - 35950) < 5 for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)
