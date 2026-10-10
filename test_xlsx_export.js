@@ -201,5 +201,60 @@ check('不设列宽时 !cols 为空（对照）', wsNoCols['!cols'] === undefine
 fs.unlinkSync(outPath);
 console.log('   已清理临时文件');
 
+console.log('\n=== 6. R44 图纸类型统计（buildTypeStats / buildTypeStatsTable） ===');
+const TYPE_STATS_META = eval('(' + extractConst('TYPE_STATS_META').split('=')[1].trim().replace(/;$/, '') + ')');
+const getRecordType = eval('(' + extractFn('getRecordType') + ')');
+const buildTypeStats = eval('(' + extractFn('buildTypeStats') + ')');
+const buildTypeStatsTable = eval('(' + extractFn('buildTypeStatsTable') + ')');
+
+// 10 条混合记录：4 标准 + 2 非标加长 + 1 近似 + 1 非标准 + 2 解析失败
+const mix = [
+    { type: 'standard' }, { type: 'standard' }, { type: 'standard' }, { type: 'standard' },
+    { type: 'extended' }, { type: 'extended' },
+    { type: 'fallback' },
+    { type: 'nonstandard' },
+    { isFailed: true }, { isFailed: true },
+];
+const st = buildTypeStats(mix);
+check('类型数固定 5 类', st.length, 5);
+check('顺序稳定（standard 在首）', st[0].key, 'standard');
+check('standard 计数 4', st.find(s => s.key === 'standard').count, 4);
+check('extended 计数 2', st.find(s => s.key === 'extended').count, 2);
+check('fallback 计数 1', st.find(s => s.key === 'fallback').count, 1);
+check('nonstandard 计数 1', st.find(s => s.key === 'nonstandard').count, 1);
+check('isFailed → failed 计数 2', st.find(s => s.key === 'failed').count, 2);
+check('standard 百分比 40', st.find(s => s.key === 'standard').pct, 40);
+check('failed 百分比 20', st.find(s => s.key === 'failed').pct, 20);
+check('百分比均为数字（非字符串）', st.every(s => typeof s.pct === 'number'), true);
+
+const stEmpty = buildTypeStats([]);
+check('空集全 0', stEmpty.every(s => s.count === 0 && s.pct === 0), true);
+
+const stUnknown = buildTypeStats([{ type: 'mixed_strong' }, { type: 'unknown_x' }]);
+check('未知类型缺省归 nonstandard（与主表口径一致）',
+    stUnknown.find(s => s.key === 'nonstandard').count, 2);
+
+const tbl = buildTypeStatsTable(mix);
+check('sheet 表头', tbl[0], ['图纸类型', '数量(张)', '占比(%)']);
+check('行数 = 表头 + 5 类型 + 合计', tbl.length, 7);
+check('合计行数量 = 10', tbl[tbl.length - 1][1], 10);
+check('合计行占比 = 100', tbl[tbl.length - 1][2], 100);
+check('逐行占比数字型', tbl.slice(1).every(r => typeof r[2] === 'number'), true);
+const pctSum = tbl.slice(1, -1).reduce((a, r) => a + r[2], 0);
+check('逐行占比合计接近 100（舍入容差 0.5）', Math.abs(pctSum - 100) <= 0.5, true);
+
+// 端到端：双 sheet 工作簿——与 exportXlsx 相同方式 append，读回验证 sheet 名与统计内容
+const wbR44 = XLSX.utils.book_new();
+const wsMain44 = XLSX.utils.aoa_to_sheet([['序号'], [1], [2]]);
+XLSX.utils.book_append_sheet(wbR44, wsMain44, '图框检测记录');
+const wsStats44 = XLSX.utils.aoa_to_sheet(tbl);
+wsStats44['!cols'] = [{ wch: 12 }, { wch: 10 }, { wch: 10 }];
+XLSX.utils.book_append_sheet(wbR44, wsStats44, '图纸类型统计');
+check('工作簿含 2 个 sheet', wbR44.SheetNames, ['图框检测记录', '图纸类型统计']);
+const statRows = XLSX.utils.sheet_to_json(wbR44.Sheets['图纸类型统计']);
+check('统计 sheet 读回行数 6（5 类型 + 合计）', statRows.length, 6);
+check('统计 sheet 读回合计占比 100',
+    statRows[statRows.length - 1]['占比(%)'], 100);
+
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);

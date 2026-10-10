@@ -1084,6 +1084,8 @@ function renderRecords() {
     const countSpan = document.getElementById('recordCount');
     const filterCountSpan = document.getElementById('filterCount');
 
+    renderTypeStats();  // R44：类型分布条随记录/筛选实时刷新（空集自动隐藏）
+
     const filtered = getFilteredRecords();
     countSpan.textContent = records.length + ' 条';
     filterCountSpan.textContent = `当前筛选：${filtered.length} 条`;
@@ -1571,6 +1573,64 @@ function computeColWidths(headers, rows) {
     });
 }
 
+// ---------- 图纸类型统计（R44） ----------
+// 需求：批量识别完成后，统计当前文件夹中不同类型图纸的百分比——页面显示
+// 分布条，导出 Excel 时写入单独 sheet「图纸类型统计」。口径与主表一致：
+// getRecordType（isFailed→failed，否则 rec.type，缺省归 nonstandard）。
+// 固定 5 类顺序输出（含 0 数量类型），便于 sheet 结构稳定、行序可预期。
+const TYPE_STATS_META = [
+    { key: 'standard',    label: '标准',     color: '#0a623a' },
+    { key: 'extended',    label: '非标加长', color: '#8f6318' },
+    { key: 'fallback',    label: '近似匹配', color: '#1a4b8c' },
+    { key: 'nonstandard', label: '非标准',   color: '#8f2f2f' },
+    { key: 'failed',      label: '解析失败', color: '#5e6f8d' },
+];
+
+function buildTypeStats(data) {
+    const total = data.length;
+    const counts = {};
+    data.forEach(rec => {
+        const t = getRecordType(rec);
+        // 兜底：5 类之外的值（异常数据/历史遗留）归入 nonstandard，不静默丢数
+        const k = TYPE_STATS_META.some(m => m.key === t) ? t : 'nonstandard';
+        counts[k] = (counts[k] || 0) + 1;
+    });
+    return TYPE_STATS_META.map(m => {
+        const count = counts[m.key] || 0;
+        const pct = total > 0 ? Math.round(count / total * 1000) / 10 : 0;
+        return { key: m.key, label: m.label, color: m.color, count, pct };
+    });
+}
+
+// 导出 sheet 用数据表：表头 + 5 类型行 + 合计行（占比保留 1 位小数，数字型
+// 便于 Excel 内二次计算；逐行四舍五入合计可能 99.9/100.1，合计行固定 100）
+function buildTypeStatsTable(data) {
+    const total = data.length;
+    const rows = buildTypeStats(data).map(s => [s.label, s.count, s.pct]);
+    rows.push(['合计', total, total > 0 ? 100 : 0]);
+    return [['图纸类型', '数量(张)', '占比(%)'], ...rows];
+}
+
+// 页面分布条：堆叠横条（各类型色段宽度=张数占比）+ 图例。随 renderRecords
+// 实时刷新——批量解析过程中即渐进显示，全部识别完成后即最终分布。
+function renderTypeStats() {
+    const bar = document.getElementById('typeStats');
+    if (!bar) return;
+    if (records.length === 0) { bar.hidden = true; bar.innerHTML = ''; return; }
+    const stats = buildTypeStats(records);
+    const total = records.length;
+    const segs = stats.filter(s => s.count > 0).map(s =>
+        `<div class="type-stats-seg" style="flex:${s.count};background:${s.color}" title="${s.label} ${s.count} 张 · ${s.pct}%"></div>`
+    ).join('');
+    const legend = stats.map(s =>
+        `<span class="type-stats-item"><span class="type-stats-dot" style="background:${s.color}"></span>${s.label} ${s.count} 张（${s.pct}%）</span>`
+    ).join('');
+    bar.hidden = false;
+    bar.innerHTML = `<div class="type-stats-title">📐 图纸类型分布（共 ${total} 张）</div>`
+        + (segs ? `<div class="type-stats-bar">${segs}</div>` : '')
+        + `<div class="type-stats-legend">${legend}</div>`;
+}
+
 // 导出用的数据表（CSV 与 XLSX 共用同一套表头/行构造，避免两处漂移）
 function buildExportTable(data) {
     const headers = ['序号', '图纸名称', '图框数', '布局分布', '图框尺寸', '宽(mm)', '高(mm)', '类型', '实际判断结果', '图框置信度(%)', '比例置信度(%)', '预期幅面', '匹配预期', '备注'];
@@ -1663,6 +1723,29 @@ function exportXlsx(filtered) {
 
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, '图框检测记录');
+
+    // R44：第二个 sheet「图纸类型统计」——按本次导出范围（筛选子集或全部）
+    // 统计各类型图纸数量与百分比，列宽固定、表头样式与主表一致。
+    const statAoa = buildTypeStatsTable(data);
+    const wsStats = XLSX.utils.aoa_to_sheet(statAoa);
+    wsStats['!cols'] = [{ wch: 12 }, { wch: 10 }, { wch: 10 }];
+    const rangeS = XLSX.utils.decode_range(wsStats['!ref']);
+    for (let R = rangeS.s.r; R <= rangeS.e.r; R++) {
+        for (let C = rangeS.s.c; C <= rangeS.e.c; C++) {
+            const addr = XLSX.utils.encode_cell({ r: R, c: C });
+            const cell = wsStats[addr];
+            if (!cell) continue;
+            cell.s = (R === 0)
+                ? {
+                    font: { bold: true },
+                    fill: { fgColor: { rgb: 'F0F3F8' } },
+                    alignment: { horizontal: 'center', vertical: 'center' },
+                }
+                : { alignment: { vertical: 'top' } };
+        }
+    }
+    XLSX.utils.book_append_sheet(wb, wsStats, '图纸类型统计');
+
     const fileName = `图框检测记录_${buildExportSuffix()}_${new Date().toISOString().slice(0, 10)}.xlsx`;
 
     const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
