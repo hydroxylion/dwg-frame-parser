@@ -1619,5 +1619,67 @@ check('R45立面图: 单张双线框(无孪生)靠自身内框反证存活 (smar
                     and abs(c['height'] - 123150) < 5) == 1)
 
 
+# ---- 用例 61：R46 同块镜像实例整组去重（立面图.dwg 13→5） ----
+# 巨块内含 2 份同尺寸闭合框（外 118900×84100 + 内 115400×82100 模拟），块被
+# INSERT 两次：1 正常 (1,1) + 1 水平镜像 (-1,1) → 救援提升 4 份同尺寸候选。
+# 判据（全满足才整组剔）：同块名同尺寸组、≥2 来源实例、|s| 一致、实例间
+# 镜像（sx 异号）。断言：整组清零（含内框组，防"留大剔小"失去大框后复活）。
+def _build_mirror_dup_doc():
+    doc = make_doc()
+    msp = doc.modelspace()
+    blk = doc.blocks.new(name='ELEV_BASE_MIRROR')
+    blk.add_lwpolyline([(0, 0), (118900, 0), (118900, 84100), (0, 84100)], close=True)
+    blk.add_lwpolyline([(2000, 2000), (117400, 2000), (117400, 82100), (2000, 82100)], close=True)
+    # 散线撑大块 bbox 至 300000 宽 → R27 闭合证据 118900<300000×50% 拒块
+    # （复刻立面图巨块"散件撑大 bbox 被拒→救援提升"的真实链路）
+    blk.add_line((0, 0), (300000, 0))
+    msp.add_blockref('ELEV_BASE_MIRROR', (7619, -74396))                      # 实例① 正常
+    _ins2 = msp.add_blockref('ELEV_BASE_MIRROR', (432293, -21592))            # 实例② 镜像
+    _ins2.dxf.xscale = -1.0
+    # 顶层真图框 ×2（同尺寸互证，避免孤证复核剔除干扰断言）
+    add_closed_rect(msp, 0, 300000, 84100, 59400)
+    add_closed_rect(msp, 100000, 300000, 84100, 59400)
+    return to_bytes(doc)
+
+
+_data61 = _build_mirror_dup_doc()
+check('R46同块镜像实例: 整组去重, 无118900/115400候选 (smart)',
+      lambda: parse(_data61),
+      lambda r: r['frame_count'] >= 1
+      and not any(abs(c['width'] - 118900) < 5 for c in r['candidates'])
+      and not any(abs(c['width'] - 115400) < 5 for c in r['candidates']))
+
+# ---- 用例 62：R46 护栏——单实例巨块（d006,007 形态）不受镜像去重影响 ----
+doc = make_doc()
+msp = doc.modelspace()
+blk2 = doc.blocks.new(name='ELEV_BASE_SINGLE')
+blk2.add_lwpolyline([(0, 0), (118900, 0), (118900, 84100), (0, 84100)], close=True)
+blk2.add_lwpolyline([(2000, 2000), (117400, 2000), (117400, 82100), (2000, 82100)], close=True)
+blk2.add_line((0, 0), (300000, 0))    # 散线撑大 bbox → R27 拒块走救援路径
+msp.add_blockref('ELEV_BASE_SINGLE', (0, 0))    # 仅 1 个实例
+data = to_bytes(doc)
+check('R46护栏: 单实例巨块救援不受影响, 118900 候选仍在 (smart)',
+      lambda: parse(data),
+      lambda r: sum(1 for c in r['candidates']
+                    if abs(c['width'] - 118900) < 5) >= 1)
+
+# ---- 用例 63：R46 护栏——同块无镜像多实例（图集排版形态）不去重 ----
+# 块定义内 2 份同尺寸框（d006,007 形态），块插 2 次、均无镜像 → 救援提升
+# 4 份候选（2 实例 × 2 份），镜像去重不得触发（无 sx/sy 符号差）。
+doc = make_doc()
+msp = doc.modelspace()
+blk3 = doc.blocks.new(name='ELEV_BASE_ROW')
+blk3.add_lwpolyline([(0, 0), (118900, 0), (118900, 84100), (0, 84100)], close=True)
+blk3.add_lwpolyline([(200000, 0), (318900, 0), (318900, 84100), (200000, 84100)], close=True)
+blk3.add_line((0, 0), (400000, 0))    # 散线撑大 bbox → R27 拒块走救援路径
+msp.add_blockref('ELEV_BASE_ROW', (0, 0))            # 实例① 无镜像
+_msi2 = msp.add_blockref('ELEV_BASE_ROW', (0, 300000))  # 实例② 平移不重叠无镜像
+data = to_bytes(doc)
+check('R46护栏: 无镜像多实例(图集排版)不去重, 4 份候选均在 (smart)',
+      lambda: parse(data),
+      lambda r: sum(1 for c in r['candidates']
+                    if abs(c['width'] - 118900) < 5) == 4)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)

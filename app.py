@@ -1902,6 +1902,12 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                                 'block_rect_len': max(_rgk),
                                 # R43：嵌套图框对组标记（孤证复核通道⑦用）
                                 'nested_pair': _rgk in _nested_pair_keys,
+                                # R46：来源实例指纹（同块镜像实例整组去重用）——
+                                #   插入点 + 缩放符号 + 缩放绝对值
+                                'inst_pos': (round(_ip[0], 1), round(_ip[1], 1)),
+                                'inst_sx_neg': _xs < 0,
+                                'inst_sy_neg': _ys < 0,
+                                'inst_abs': (round(abs(_xs), 6), round(abs(_ys), 6)),
                             })
                             _n_up += 1
                         if _n_up:
@@ -1942,6 +1948,54 @@ def collect_candidates_from_layout(layout, doc, layout_name):
 
     if _insert_total:
         safe_log(f"  [{layout_name}] INSERT 块参照: 共 {_insert_total} 个 | 预筛剔除 {_insert_filtered} 个（非图框级尺寸）| 入库 {_insert_kept} 个")
+
+        # R46 同块镜像实例整组去重（立面图.dwg 13→5）：R27 拒绝的巨块被镜像
+        #    成对 INSERT（如 s=(-1,1)）时，块内救援出的同尺寸图框组随实例翻倍
+        #    ——立面图巨块 5、6、7、8号楼-立面图 内含 4 对 A0×100 框（外
+        #    118900×84100 + 内 115400×82100）× 2 实例（1 正常 + 1 水平镜像）
+        #    = 8 份外框 + 8 份内框假候选（底图参照内容，非独立图纸；用户口径
+        #    只数顶层手画的 3 张出图图纸）。判据（全部满足才整组剔除）：
+        #    ① 同块名同 layout 的 '块内闭合线' 同尺寸组；
+        #    ② 候选来自 ≥2 个不同 INSERT 实例（插入点 + 缩放符号区分）；
+        #    ③ 各实例 |sx|/|sy| 完全一致（同模板同比例复制）；
+        #    ④ 实例间存在镜像（sx 或 sy 符号相反）——镜像成对放置=冗余底图/
+        #      归档拷贝，整组剔除（内外框组各自独立命中，双双清零，避免"留大
+        #      剔小"失去大框后内框组复活）。
+        #    护栏：d006,007/d008（巨块仅 1 个实例）不触发②；图集排版"同块插
+        #    一排"（各实例无镜像）不触发④；同位重复粘贴在提升时已被 seen_bbox
+        #    精确去重、近似重叠由后续 IoU 去重处理，均不受本规则影响。
+        _mirror_groups = {}
+        for _idx, _c in enumerate(candidates):
+            if (_c.get('type') == '块内闭合线' and _c.get('layout') == layout_name
+                    and _c.get('block_name') and 'inst_sx_neg' in _c):
+                _mirror_groups.setdefault(
+                    (_c['block_name'], _c['width'], _c['height']), []).append(_idx)
+        _rm_mirror = set()
+        for (_gbn, _gw, _gh), _idxs in _mirror_groups.items():
+            _clusters = {}
+            for _i in _idxs:
+                _c = candidates[_i]
+                _clusters.setdefault(
+                    (_c['inst_pos'], _c['inst_sx_neg'], _c['inst_sy_neg']),
+                    []).append(_i)
+            if len(_clusters) < 2:
+                continue  # ② 单实例（d006,007/d008 形态）不动
+            _cks = list(_clusters)
+            _abs0 = candidates[_clusters[_cks[0]][0]]['inst_abs']
+            if any(candidates[_clusters[_k][0]]['inst_abs'] != _abs0
+                   for _k in _cks[1:]):
+                continue  # ③ 缩放不一致 → 非同模板复制，不动
+            _sx_signs = {_k[1] for _k in _cks}
+            _sy_signs = {_k[2] for _k in _cks}
+            if len(_sx_signs) < 2 and len(_sy_signs) < 2:
+                continue  # ④ 无镜像（图集排版形态）不动
+            _rm_mirror.update(_i for _k in _cks for _i in _clusters[_k])
+            safe_log(f"  [同块镜像实例整组去重] 块 {_gbn} {_gw:.0f}×{_gh:.0f}："
+                     f"{len(_cks)} 个实例（含镜像放置，|s| 一致）→ 整组剔除 "
+                     f"{len(_idxs)} 份（冗余底图参照）")
+        if _rm_mirror:
+            candidates[:] = [c for _i, c in enumerate(candidates)
+                             if _i not in _rm_mirror]
 
         # 1.6. 对齐排列剔除：同块名 ≥3 个 INSERT 实例，若它们在 x 或 y 方向紧贴成线
         #    （短方向标准差 < 平均尺寸 0.5，另一方向散布 >5 倍），视为对齐排列的装饰块——
