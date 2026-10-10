@@ -3285,28 +3285,48 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         #     排除被同 layout 全量候选 bbox 认领的线段）
                         _shell_c = None
                         _shell_inter_pct = 0.0
-                        for _j in indices:
-                            if _j == i:
+                        # R45「自身内框反证」（立面图.dwg 3 实际 4 检出）：big 完全包含
+                        # 一个 ≥85%×85% 自身尺寸的内框候选——这是双线框图纸的内 border，
+                        # big 是真实纸张图框而非空壳范围框，直接跳过锚点搜索与空壳剔除。
+                        #   实证：立面图两张 173100×123150 大图（√2 偏差 0.64%）各带
+                        #   162600×123150 内框（宽/高比 93.9%/100%），内框认领了 big bbox
+                        #   内几乎全部内容线 → 自由占比 0.0% → 被误判空壳剔除；幸存孪生
+                        #   只是因与块内框交集 72%<90% 未凑齐锚点。d012/d013 被剔范围框
+                        #   内部候选最大仅 62%/77%（321093/518495），85% 线不受影响。
+                        _own_border = False
+                        for _bj in indices:
+                            if _bj == i:
                                 continue
-                            _sc = cands[_j]
-                            _sa2 = _sc['area']
-                            if not (big['area'] * SHELL_INNER_AREA_MIN <= _sa2
-                                    <= big['area'] * WRAP_INNER_AREA_RATIO):
+                            _bc = cands[_bj]
+                            if not _is_contained(_bc, big):
                                 continue
-                            _ox1, _oy1, _ox2, _oy2 = big['bbox']
-                            _cx1, _cy1, _cx2, _cy2 = _sc['bbox']
-                            _iw = min(_ox2, _cx2) - max(_ox1, _cx1)
-                            _ih = min(_oy2, _cy2) - max(_oy1, _cy1)
-                            if _iw <= 0 or _ih <= 0:
-                                continue
-                            _inter = _iw * _ih
-                            if _inter < _sa2 * SHELL_OVERLAP_RATIO:
-                                continue
-                            if _is_contained(_sc, big):
-                                continue
-                            _shell_c = _sc
-                            _shell_inter_pct = _inter / _sa2 * 100.0
-                            break
+                            if (_bc['width'] >= big['width'] * 0.85
+                                    and _bc['height'] >= big['height'] * 0.85):
+                                _own_border = True
+                                break
+                        if not _own_border:
+                            for _j in indices:
+                                if _j == i:
+                                    continue
+                                _sc = cands[_j]
+                                _sa2 = _sc['area']
+                                if not (big['area'] * SHELL_INNER_AREA_MIN <= _sa2
+                                        <= big['area'] * WRAP_INNER_AREA_RATIO):
+                                    continue
+                                _ox1, _oy1, _ox2, _oy2 = big['bbox']
+                                _cx1, _cy1, _cx2, _cy2 = _sc['bbox']
+                                _iw = min(_ox2, _cx2) - max(_ox1, _cx1)
+                                _ih = min(_oy2, _cy2) - max(_oy1, _cy1)
+                                if _iw <= 0 or _ih <= 0:
+                                    continue
+                                _inter = _iw * _ih
+                                if _inter < _sa2 * SHELL_OVERLAP_RATIO:
+                                    continue
+                                if _is_contained(_sc, big):
+                                    continue
+                                _shell_c = _sc
+                                _shell_inter_pct = _inter / _sa2 * 100.0
+                                break
                         # R37 修1「幽灵锚点」（d013.dwg 3 实际 4 检出）：候选锚点
                         # 搜索无果时，追加搜索布局内**闭合 LWPOLYLINE 的原始实体
                         # bbox**。d013 与 d012 同系列但形态关键差异：d012 的 38 顶点
@@ -3323,6 +3343,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         # 占比 6.84% <10% 已通过）。开关 FRAME_PARSER_NO_SHELL_GHOST=1
                         # 可关（回退旧行为）。
                         if (_shell_c is None
+                                and not _own_border
                                 and os.environ.get('FRAME_PARSER_NO_SHELL_GHOST') != '1'
                                 and lay_objs):
                             _lay_big = lay_objs.get(big['layout'])
@@ -3364,6 +3385,28 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                                 'height': _gh, '_ghost': True}
                                     _shell_inter_pct = _inter / _ga * 100.0
                                     break
+                        if _shell_c is not None and all_bboxes_by_layout and lay_objs:
+                            # R45「孪生反证」：同布局存在同尺寸（±1%）、与 big 位置
+                            # 不重叠的孪生候选 → 该尺寸是真实纸张图框的双张/复制形态，
+                            # 不因单点形态判空壳。（立面图.dwg：两张 173100×123150
+                            # 大图上下排列互不重叠，一张被误剔时另一张即为反证；
+                            # d012/d013 的范围框全图唯一，无孪生，不受影响）
+                            _bx1, _by1, _bx2, _by2 = big['bbox']
+                            for _tj in indices:
+                                if _tj == i:
+                                    continue
+                                _tc = cands[_tj]
+                                if (abs(_tc['width'] - big['width']) / max(big['width'], 1.0) > 0.01
+                                        or abs(_tc['height'] - big['height']) / max(big['height'], 1.0) > 0.01):
+                                    continue
+                                _tx1, _ty1, _tx2, _ty2 = _tc['bbox']
+                                if _tx1 < _bx2 and _tx2 > _bx1 and _ty1 < _by2 and _ty2 > _by1:
+                                    continue  # 与 big 重叠 → 非独立孪生
+                                _shell_c = None
+                                safe_log(f"  [空壳剔除孪生反证] {big['layout']} | "
+                                         f"{big['width']:.0f}×{big['height']:.0f} "
+                                         f"存在同尺寸独立孪生（bbox={_tc['bbox']}）→ 保留")
+                                break
                         if _shell_c is not None and all_bboxes_by_layout and lay_objs:
                             from math import hypot as _shell_hypot
                             _ln_big = big['layout']

@@ -1574,5 +1574,50 @@ check('R43开关 NO_BLOCK_FRAME_RESCUE=1: 无救援, 抛错未检测到图框',
       lambda r: 'error' in r and '未检测到图框' in r['error'])
 
 
+# ---- 用例 59：立面图.dwg 形态——双线框图纸孪生 + 空壳锚点，误剔真框须救回 ----
+# 两张 173100×123150 大图（ratio 1.4052，√2 偏差 0.64%）上下排列互不重叠，
+# 各带同左下角 162600×123150 内框（双线框图纸）。一个 118900×84100 框
+# （√2 纸张形态）与图 A 交集 97.1% 且右缘溢出 3412mm → 满足空壳锚点
+# 四条件（面积 46.9%∈(25,50)×big、交集≥90%、错位溢出、自由占比 0%——
+# 内容全被内框认领）→ 旧逻辑误剔图 A。修复双保险：
+#   修3 自身内框反证：big 完全包含 ≥85%×85% 自身尺寸内框 → 真纸张，跳过空壳剔除；
+#   修2 孪生反证：同尺寸同布局存在位置不重叠孪生 → 保留。
+# 断言：两张 173100×123150 全部存活（旧逻辑只剩 1 张）。
+doc = make_doc()
+msp = doc.modelspace()
+# 图 A（下）：外框 + 内框（同左下角，宽 93.9%/高 100%）
+add_closed_rect(msp, 158049, -106453, 173100, 123150)
+add_closed_rect(msp, 158049, -106453, 162600, 123150)
+# 图 B（上）：外框 + 内框
+add_closed_rect(msp, 167872, 40180, 173100, 123150)
+add_closed_rect(msp, 167872, 40180, 162600, 123150)
+# 空壳锚点框：与图 A 交集 97.1%（x 重叠 115488/118900、y 全高）、右缘溢出 3412mm
+add_closed_rect(msp, 215661, -100451, 118900, 84100)
+# 第二份同尺寸锚点框（立面图真实形态：块内 4 框，此处 1 份足够触发）
+add_closed_rect(msp, 105351, -153255, 118900, 84100)
+data = to_bytes(doc)
+check('R45立面图: 孪生反证+自身内框反证, 两张173100双线框全存活 (smart)',
+      lambda: parse(data),
+      lambda r: sum(1 for c in r['candidates']
+                    if abs(c['width'] - 173100) < 5
+                    and abs(c['height'] - 123150) < 5) == 2)
+
+
+# ---- 用例 60：单张双线框图纸（无孪生）→ 自身内框反证独立生效 ----
+# 只有一张 173100×123150 双线框图 + 97% 交集锚点框：无孪生可依，
+# 修3（自身内框反证）必须独立救回——守护"修2 失效时修3 兜底"。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 158049, -106453, 173100, 123150)
+add_closed_rect(msp, 158049, -106453, 162600, 123150)
+add_closed_rect(msp, 215661, -100451, 118900, 84100)
+data = to_bytes(doc)
+check('R45立面图: 单张双线框(无孪生)靠自身内框反证存活 (smart)',
+      lambda: parse(data),
+      lambda r: sum(1 for c in r['candidates']
+                    if abs(c['width'] - 173100) < 5
+                    and abs(c['height'] - 123150) < 5) == 1)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)
