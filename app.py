@@ -2346,6 +2346,11 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     'height': round(ch),
                     # 世界坐标 bbox（供调试/测试断言位置；前端当前不用此字段）
                     'bbox': [round(bx1), round(by1), round(bx2), round(by2)],
+                    # R48：救援来源标记（'table_page'=条件I 表格内容页救援）——
+                    #   前端在记录表给这类图框打"表格页"徽标（用户需求：表格页
+                    #   保留但需页面可见地区分）。非救援候选无此字段。
+                    **({'rescued_by': c['rescued_by']}
+                       if c.get('rescued_by') else {}),
                 })
             return result_cands
 
@@ -2697,19 +2702,27 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #   判据设计：
             #   * ratio ±2%：A 系纸宽高比公差极小（84100/59400 偏差 0.11%）；
             #     挡掉 73600×57400 内框（9.35%）与 200700×126150（12.5%）
-            #   * rel∈[1%,10%)：下限与条件D 同门槛（排除 rel<1% 的孤立小矩形），
-            #     上限即条件C 已拒的区间——本通道只救"C 差一点"的孤证
+            #   * rel∈[0.3%,10%)：R48 扩展前下限 1%（与条件D 同门槛），泛悦国际
+            #     总平图（消防车道改）rel 分母被巨型图廓块 730112×425000 撑大，
+            #     顶层闭合多段线真框 42000×29700/59400×42000 rel 仅 0.40%/0.80%
+            #     → 扩展后下限 0.3% 覆盖；上限即条件C 已拒的区间——本通道只救
+            #     "C 差一点"的孤证
             #   * short_side ≥20000：1:1 机械图幅短边 ≤~2500 与 1:100 建筑图幅
             #     短边 ≥29700 的分界——只有建筑 1:100 级大图才可能孤证 A 系纸
             #   * 内容证据 ≥12：与条件D 同阈值（d013 实测 84100 框内 ≥40，
             #     73600 内框仅 3 被自然挡住）
+            #   R48 类型扩展：直线矩形 → EXPLICIT_TYPES（含闭合多段线）——总平
+            #     两真框是闭合多段线（层 PUB_TITLE/A-ANNO-TTLB，顶点角度精确
+            #     0°/90°、尺寸精确 A3×100/A2×100，框内 184/507 实体）；闭合多段线
+            #   有矩形度≥0.92 前置过滤，内容≥12 + ratio±2% + 短边≥20000 联合
+            #   门槛控制误伤（44 张回归验证）。
             #   本通道设 _via='F'：孤证复核只查 _via=='C'，F 成员天然豁免
             #   （内容证据 ≥12 本身已是强证据，无需再复核）。
             #   开关 FRAME_PARSER_NO_COND_F=1 可关（回退旧行为）。
             if (os.environ.get('FRAME_PARSER_NO_COND_F') != '1'
-                    and c['type'] == '直线矩形'
+                    and c['type'] in EXPLICIT_TYPES
                     and abs(c['ratio'] - _SQRT2) / _SQRT2 <= 0.02
-                    and 0.01 <= c['rel_area_ratio'] < REL_AREA_THRESHOLD
+                    and 0.003 <= c['rel_area_ratio'] < REL_AREA_THRESHOLD
                     and c['short_side'] >= 20000
                     and _cond_d_entity_count(c) >= COND_D_MIN_ENTITIES):
                 c['_via'] = 'F'
@@ -3194,6 +3207,12 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 _score, _hits = _solo_evidence_score(_c)
                 if _score < _SOLO_SCORE_THRESHOLD:
                     _solo_rm.append(_c)
+                    if _SOLO_DEBUG:
+                        safe_log(f"    [孤证评分] {_c['width']:.0f}x{_c['height']:.0f} 剔除 "
+                                 f"score={_score:.1f} via={_c.get('_via')} "
+                                 f"ar={_c.get('area_ratio', 0):.3f} type={_c.get('type')} "
+                                 f"bbox={tuple(round(v) for v in _c['bbox'])}"
+                                 f"（{'；'.join(_hits) if _hits else '无任何互证'}）")
                 elif _SOLO_DEBUG:
                     safe_log(f"    [孤证评分] {_c['width']:.0f}x{_c['height']:.0f} 保留 "
                              f"score={_score:.1f}（{'；'.join(_hits)}）")

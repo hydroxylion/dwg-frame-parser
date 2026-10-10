@@ -931,6 +931,11 @@ function addRecord(w, h, result, name, path, framesInfo) {
     }
     // 多图框信息由记录表「图框数」列展示，这里不再拼进实际判断结果
     const actualResult = result.label + ' · ' + result.detail;
+    // R48：表格页标记——后端条件I"表格内容页救援"捞回的候选带 rescued_by=
+    // 'table_page'（用户需求：表格页保留，但页面要能看出哪个是表格页）。
+    // 同一条记录可能有多个表格页候选，尺寸清单存 tablePageText 供徽标 title。
+    const tablePageFrames = candidates.filter(c => c && c.rescued_by === 'table_page');
+    const tablePageText = tablePageFrames.map(c => `${c.width}×${c.height}(${c.layout})`).join('、');
     // 结构化候选（每框 w/h/layout），供逐框分类判断"标准+非标混合"
     const framesMeta = candidates.map(c => ({
         w: c.width,
@@ -962,6 +967,9 @@ function addRecord(w, h, result, name, path, framesInfo) {
         // 单图框的空间来源（模型空间 / 布局 "Sheet1"），气泡内以"空间来源"标题展示。
         // 取不到候选（旧记录 / 后端未返回 candidates）时为 null → 气泡显示 "—"，不做猜测
         primaryLayout: (framesMeta.find(m => m && m.layout) || {}).layout || null,
+        // R48：表格页标记（后端条件I 救援候选带 rescued_by='table_page'）
+        hasTablePage: tablePageFrames.length > 0,
+        tablePageText: tablePageText,
     };
     records.push(record);
     saveRecords();
@@ -1132,7 +1140,12 @@ function renderRecords() {
         const mixedHtml = mixedLvl
             ? `<span class="type-tag mixed ${mixedLvl === 'strong' ? 'mixed-strong' : 'mixed-weak'}" title="构成：${escHtml(mixedSummary(rec))}">${mixedLvl === 'strong' ? '⚠️' : '🌀'} 混合</span>`
             : '';
-        const typeHtml = `<span class="type-tag ${typeInfo.cls}">${typeInfo.label}</span>${mixedHtml}`;
+        // R48：表格页徽标——该记录含条件I"表格内容页救援"的图框时展示，
+        // title 列出具体哪些尺寸是表格页（非破坏性附加标记，不改变类型筛选）
+        const tablePageHtml = rec.hasTablePage
+            ? `<span class="type-tag table-page" title="含表格页（条件I 表格内容页救援）：${escHtml(rec.tablePageText || '')}">📋 表格页</span>`
+            : '';
+        const typeHtml = `<span class="type-tag ${typeInfo.cls}">${typeInfo.label}</span>${mixedHtml}${tablePageHtml}`;
         // 图框数列：展示该图纸检测到的图框数量（模型空间 + 布局空间合计）。
         // 点击任一单元格弹出气泡查看明细——**单图框也要能看**（首要用途是
         // "这一张来自模型空间还是布局空间"，多图框则是空间分布 + 尺寸清单）。
@@ -1143,7 +1156,7 @@ function renderRecords() {
         // frameCount=0 也是有效检测结果（真·无图框），要显示 "0" 而非 "—"；
         // "—" 只留给手动输入/失败记录（frameCount 字段缺失）。
         const hasFrameCount = typeof rec.frameCount === 'number' && rec.frameCount >= 0;
-        const tipAttrs = `data-frames="${escHtml(rec.framesText || '')}" data-all="${escHtml(rec.framesAll || rec.framesText || '')}" data-layouts="${escHtml(JSON.stringify(rec.layoutCounts || {}))}" data-primary-layout="${escHtml(rec.primaryLayout || '')}"`;
+        const tipAttrs = `data-frames="${escHtml(rec.framesText || '')}" data-all="${escHtml(rec.framesAll || rec.framesText || '')}" data-layouts="${escHtml(JSON.stringify(rec.layoutCounts || {}))}" data-primary-layout="${escHtml(rec.primaryLayout || '')}" data-table-pages="${escHtml(rec.tablePageText || '')}"`;
         let frameCountHtml = '—';
         if (hasFrameCount) {
             // 布局分布次级文本（模型空间×N、布局 "Sheet1"×M …），仅多图框时显示在图框
@@ -1275,9 +1288,16 @@ function showTip(anchor) {
         }
         dimCount.set(dim, dimCount.get(dim) + 1);
     });
+    // R48：表格页尺寸集合（data-table-pages 与 framesAll 同格式 "W×H(布局)" 顿号分隔）
+    // ——聚合行命中的尺寸在数字后追加 📋 小徽标（hover 提示"表格页"），与
+    // 类型列的"📋 表格页"徽标呼应，气泡内一眼看出哪个尺寸是表格页
+    const tableDims = new Set(
+        String(anchor.dataset.tablePages || '').split('、').filter(Boolean)
+            .map(line => line.split('(')[0].trim())
+    );
     const dimRows = dimOrder.map(dim => {
         const n = dimCount.get(dim);
-        return `<div class="tip-line">${escHtml(dim)}${n > 1 ? ` <span class="tip-times">×${n}</span>` : ''}</div>`;
+        return `<div class="tip-line">${escHtml(dim)}${n > 1 ? ` <span class="tip-times">×${n}</span>` : ''}${tableDims.has(dim) ? ' <span class="tip-tag-table" title="表格页（条件I 表格内容页救援）">📋</span>' : ''}</div>`;
     }).join('');
     const nDim = dimOrder.length;
     const truncated = nRaw > 20;                      // 原始图框超 20 个才在标题旁提示"· 下方滚动查看"

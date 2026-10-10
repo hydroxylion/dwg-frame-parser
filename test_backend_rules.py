@@ -1681,5 +1681,40 @@ check('R46护栏: 无镜像多实例(图集排版)不去重, 4 份候选均在 (
                     if abs(c['width'] - 118900) < 5) == 4)
 
 
+# ---- 用例 64：R48 条件 F 扩展——低 rel 闭合多段线 A 系纸（泛悦国际总平图形态） ----
+# 巨型图廓线框（730112×425000）撑大 rel 分母 → 两真框 rel 仅 0.80%/0.40%，
+# 旧 F 只认直线矩形且 rel 下限 0.01 → 全灭。扩展后（EXPLICIT_TYPES 含闭合
+# 多段线 + rel 下限 0.003）两框经 F 通道救援。各带 13 条横线满足实体数门槛。
+doc = make_doc()
+msp = doc.modelspace()
+# 巨型图廓（分母毒源）复刻真实形态：块内闭合线 + INSERT（真实 DWG 中为
+# A$C3E115B39 块，rot≈359°，后被孤证复核按 score=0 剔除）
+_gk = doc.blocks.new(name='GIANT_BORDER')
+_gk.add_lwpolyline([(0, 0), (730112, 0), (730112, 425000), (0, 425000)], close=True)
+msp.add_blockref('GIANT_BORDER', (-2000000, -1000000))
+
+
+def _add_a_series(x, y, w, h):
+    add_closed_rect(msp, x, y, w, h)
+    # 横线两端内缩 100mm：条件 D/F 实体计数要求 bbox 严格内缩 1mm（压线不算，
+    # 与真实 DWG 框内实体均在边界内一致）
+    for _i in range(1, 14):
+        _yy = y + h * _i / 14.0
+        msp.add_line((x + 100, _yy), (x + w - 100, _yy))
+
+
+_add_a_series(741525, 245073, 59400, 42000)
+_add_a_series(684505, 244722, 42000, 29700)
+data = to_bytes(doc)
+check('R48条件F扩展: 低rel闭合多段线A系纸两框均存活 (smart)',
+      lambda: parse(data),
+      lambda r: sum(1 for c in r['candidates']
+                    if abs(c['width'] - 59400) < 5
+                    and abs(c['height'] - 42000) < 5) == 1
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 42000) < 5
+              and abs(c['height'] - 29700) < 5) == 1)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)

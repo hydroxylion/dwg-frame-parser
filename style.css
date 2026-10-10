@@ -684,6 +684,16 @@
             cursor: pointer;
             white-space: nowrap;
         }
+        /* R48 表格页徽标：条件I"表格内容页救援"的图框（青绿底、虚线边，中性提示）
+           ——保留但需页面可见区分，title 列出具体尺寸清单 */
+        .type-tag.table-page {
+            background: #e8f5f1;
+            color: #1f7a5c;
+            border: 1px dashed #9ccdbd;
+            margin-left: 4px;
+            cursor: help;
+            white-space: nowrap;
+        }
         /* 图框数下的布局分布次级文本：模型空间×N、布局 "Sheet1"×M … */
         .frame-dist {
             font-size: 11px;
@@ -786,6 +796,17 @@
             font-weight: 600;
             font-size: 12px;
             margin-left: 2px;
+        }
+        /* R48 表格页小徽标：尺寸聚合行命中的表格页尺寸后追加 📋（hover 提示），
+           与类型列"📋 表格页"徽标同色系（虚线绿框），气泡深色底上提高对比 */
+        .tip-pop .tip-tag-table {
+            margin-left: 4px;
+            font-size: 12px;
+            cursor: help;
+            padding: 0 3px;
+            border: 1px dashed #9ccdbd;
+            border-radius: 4px;
+            background: rgba(31, 122, 92, 0.25);
         }
         /* 空间信息缺失时的占位符（—）：弱化显示，表明"取不到"而非"空字符串" */
         .tip-pop .tip-none {
