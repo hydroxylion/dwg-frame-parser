@@ -3976,17 +3976,29 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         # 等大页面框，模型空间就只是这些页面的内容源，其内的任何大框都不是图框。
         # 与既有的"模型空间降级清洗"同源思路，但更彻底（那条只清 全实体包围盒，
         # 本条清模型空间的全部候选）。
+        # R52 收窄（大样图(内外保温).dwg）：布局有网格页 ≠ 模型候选全是内容框。
+        #   该图布局 5 页 + 模型空间自有 2 张真图框（42050×29700 A3×100、
+        #   23780×16820，比例均 ≈√2，且经孤证互证链互认）被一刀切剔除（fc 7→5）。
+        #   豁免判据：模型候选比例 ≈√2（±2%，与条件F 同口径）——真图框页几乎都是
+        #   A 系 √2 比例，而本规则当初要清的"内容区轮廓"（DS4 的 9900×12900，
+        #   比例 1.303/0.767）不落在 √2 附近；条件I 表格页救援产物（36740×28700，
+        #   比例 1.28）同样不豁免。开关 FRAME_PARSER_NO_LAYOUT_WINS 仍可整条关。
         if 'FRAME_PARSER_NO_LAYOUT_WINS' not in os.environ:
+            from math import sqrt as _sqrt52
+            _sqrt2_r52 = _sqrt52(2.0)
             _paper_layouts = [ln for ln in {c['layout'] for c in frame_like}
                               if ln != '模型空间']
             _paper_frame_n = sum(1 for c in frame_like if c['layout'] != '模型空间')
-            _model_frame_n = sum(1 for c in frame_like if c['layout'] == '模型空间')
-            if _paper_layouts and _paper_frame_n >= 4 and _model_frame_n > 0:
-                _before = len(frame_like)
-                frame_like = [c for c in frame_like if c['layout'] != '模型空间']
+            _model_cands = [c for c in frame_like if c['layout'] == '模型空间']
+            _model_keep = [c for c in _model_cands
+                           if abs(c['ratio'] - _sqrt2_r52) / _sqrt2_r52 <= 0.02]
+            _model_frame_n = len(_model_cands)
+            if _paper_layouts and _paper_frame_n >= 4 and _model_frame_n > len(_model_keep):
+                frame_like = _model_keep + [c for c in frame_like if c['layout'] != '模型空间']
                 safe_log(f"  [布局空间优先] 布局空间 {_paper_layouts} 已识别 {_paper_frame_n} 个"
-                         f"网格排版图纸页 → 剔除模型空间候选 {_before - len(frame_like)} 个"
-                         f"（模型空间仅为页面内容源，其大框不是图框）")
+                         f"网格排版图纸页 → 剔除模型空间候选 {_model_frame_n - len(_model_keep)} 个"
+                         f"（√2 比例的 {len(_model_keep)} 个豁免保留，"
+                         f"模型空间其余大框视为页面内容源）")
 
         # frame_count 只统计"像图框"的候选数。旧写法在 frame_like 为空时兜底成
         # len(all_candidates)，导致真·无图框图纸（如 一层.dwg，全是家具/构件小矩形）

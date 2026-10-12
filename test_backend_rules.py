@@ -1800,5 +1800,51 @@ check('R50护栏: 条带不满90%框高不并入, 主框保持94600 (smart)',
       and not any(abs(c['width'] - 101600) < 5 for c in r['candidates']))
 
 
+# ---- 用例 69：R52 布局空间优先收窄——模型空间 √2 比例真框豁免剔除 ----
+# 场景来源：大样图(内外保温).dwg。布局 5 张页框正常，模型空间另有 2 张真图框
+#   42050×29700、23780×16820（均 A 系 √2 比例），旧"布局空间优先"一刀切把
+#   模型候选全剔 → 漏检 2 张。收窄：模型候选 ratio ≈√2（±2%）豁免保留。
+# 复刻形态：布局1 3×2 网格页 + 模型空间两个 √2 真框 → fc=8（模型 2 + 布局 6）。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 0, 0, 42050, 29700)      # ratio 1.4158，偏差 0.11%
+add_closed_rect(msp, 60000, 0, 23780, 16820)  # ratio 1.4138，偏差 0.03%
+blk3 = doc.blocks.new('PAGE_FRAME3')
+add_closed_rect(blk3, 0, 0, 434.1, 311.1)
+lay3 = doc.layouts.new('布局1')
+for _cy in range(2):
+    for _cx in range(3):
+        lay3.add_blockref('PAGE_FRAME3', (_cx * 434.1, _cy * 311.1))
+data = to_bytes(doc)
+check('R52布局优先收窄: 模型√2真框豁免保留, 模型2+布局6 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 8
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 42050) < 5 and abs(c['height'] - 29700) < 5) == 1
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 23780) < 5 and abs(c['height'] - 16820) < 5) == 1
+      and r['frame_counts_by_layout'].get('布局 "布局1"') == 6)
+
+# ---- 用例 70：R52 护栏——模型空间非 √2 内容框仍被布局优先剔除 ----
+# 同形态但模型框为非 √2 内容区轮廓（13423×9014，ratio 1.489，偏差 5.3% >2%）
+#   → 不得豁免，仍整体剔除（守护 DS4 等布局网格页图纸不因收窄而复活模型候选）。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 0, 0, 13423, 9014)      # ratio 1.489，非 √2
+add_closed_rect(msp, 20000, 0, 8926, 13464)  # 同上
+blk4 = doc.blocks.new('PAGE_FRAME4')
+add_closed_rect(blk4, 0, 0, 434.1, 311.1)
+lay4 = doc.layouts.new('布局1')
+for _cy in range(2):
+    for _cx in range(3):
+        lay4.add_blockref('PAGE_FRAME4', (_cx * 434.1, _cy * 311.1))
+data = to_bytes(doc)
+check('R52护栏: 模型非√2内容框仍被布局优先剔除, fc=6 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 6
+      and r['frame_counts_by_layout'] == {'布局 "布局1"': 6}
+      and not any(abs(c['width'] - 13423) < 5 for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)
