@@ -956,6 +956,107 @@ def _expand_frames_with_title_strips(frame_like, strips, layout_name='模型空�
     return frame_like, expanded
 
 
+# ---------- 第50轮：贴边附栏条带并入（101600口径，2026-10-12） ----------
+# 场景（08，09-MW-FP004.dwg）：主框 94600×57400（闭合多段线），右侧贴边一条
+#   7000×57400 附栏（3 段闭合矩形 85247..92247 零间隙、纵向首尾相接拼满框高，
+#   层 0）——用户口径整体 101600×57400。第23轮附栏外扩不适用：该机制只认
+#   J-图框/TK 层图签条、外扩量固定 21000、且要求条带宿主是邻框（错排拼排场景）；
+#   本图条带在层 0、宽度 7000、宿主是自身（贴边自附栏形态）。
+# 判据（全满足才并入，从窄防误伤）：
+#   ① 主框横版（宽>高）、短边 ≥50000、宽 <95000（已达附栏口径不扩）；
+#   ② 条带为**闭合** LWPOLYLINE，贴主框边零间隙（|条带内缘 - 主框边| ≤500mm）；
+#   ③ 条带宽 4000~13000（附栏宽度量级——邻页拼排的页框宽 ≥50000 天然排除）；
+#   ④ 条带纵向完全落在主框高 ±500 内，且合并跨度 ≥90% 主框高（拼满框高）；
+#   ⑤ 按实际条宽外扩（非固定 21000），每框只并一侧。
+EDGE_STRIP_GAP = 500.0              # 条带内缘与主框边的贴边容差
+EDGE_STRIP_W_RANGE = (4000.0, 13000.0)   # 条带宽度范围
+EDGE_STRIP_COVER = 0.9              # 条带合并跨度 / 主框高 下限
+
+
+def _expand_frames_with_edge_strips(msp, frame_like, layout_name='模型空间'):
+    """贴边附栏条带并入（第50轮）。扫描 msp 闭合 LWPOLYLINE 中贴主框边、
+    纵向拼满框高的窄条带组，按实际条宽外扩主框。返回 (候选列表, 并入数)。"""
+    if os.environ.get('FRAME_PARSER_NO_EDGE_STRIP') == '1':
+        return frame_like, 0
+    model_cands = [c for c in frame_like if c.get('layout') == layout_name]
+    if not model_cands or msp is None:
+        return frame_like, 0
+
+    # 收集 msp 顶层闭合 LWPOLYLINE 的 bbox（层不限——FP004 附栏画在层 0）
+    closed_boxes = []
+    for e in msp:
+        try:
+            if e.dxftype() != 'LWPOLYLINE' or not e.closed:
+                continue
+            pts = list(e.get_points('xy'))
+            if len(pts) < 3:
+                continue
+            xs = [q[0] for q in pts]
+            ys = [q[1] for q in pts]
+            # OCS/凸度简化：附栏条带均为轴对齐矩形（4 顶点），非矩形闭合框
+            # 由"条宽范围 + 纵向包含 + 贴边"三重判据自然排除
+            closed_boxes.append((min(xs), min(ys), max(xs), max(ys)))
+        except Exception:
+            continue
+    if not closed_boxes:
+        return frame_like, 0
+
+    expanded = 0
+    for c in model_cands:
+        x1, y1, x2, y2 = c['bbox']
+        w = x2 - x1
+        h = y2 - y1
+        if w <= h:
+            continue   # ① 仅横版主框
+        if min(w, h) < TITLE_STRIP_MAIN_MIN_SIDE or w >= TITLE_STRIP_MAX_W:
+            continue   # ① 小页/已含附栏口径不扩
+        for side in ('right', 'left'):
+            hits = []
+            for (bx1, by1, bx2, by2) in closed_boxes:
+                bw = bx2 - bx1
+                if not (EDGE_STRIP_W_RANGE[0] <= bw <= EDGE_STRIP_W_RANGE[1]):
+                    continue   # ③ 条宽范围
+                if side == 'right':
+                    if abs(bx1 - x2) > EDGE_STRIP_GAP:
+                        continue   # ② 贴边零间隙
+                else:
+                    if abs(bx2 - x1) > EDGE_STRIP_GAP:
+                        continue
+                if by1 < y1 - EDGE_STRIP_GAP or by2 > y2 + EDGE_STRIP_GAP:
+                    continue   # ④ 纵向不超出框高
+                hits.append((by1, by2, bw))
+            if not hits:
+                continue
+            # 合并条带纵向区间求跨度
+            spans = sorted((s[0], s[1]) for s in hits)
+            merged = []
+            for s in spans:
+                if merged and s[0] <= merged[-1][1] + EDGE_STRIP_GAP:
+                    merged[-1][1] = max(merged[-1][1], s[1])
+                else:
+                    merged.append(list(s))
+            cover = sum(m[1] - m[0] for m in merged)
+            if cover < EDGE_STRIP_COVER * h:
+                continue   # ④ 拼满框高
+            band_w = max(s[2] for s in hits)
+            if side == 'right':
+                x2 += band_w
+            else:
+                x1 -= band_w
+            w = x2 - x1
+            c['bbox'] = (x1, y1, x2, y2)
+            c['width'] = w
+            c['height'] = h
+            c['area'] = w * h
+            c['ratio'] = normalized_ratio(w, h)
+            expanded += 1
+            log_debug(f"  [贴边附栏并入] {('右' if side == 'right' else '左')}侧 "
+                      f"+{band_w:.0f} → {w:.0f}x{h:.0f}"
+                      f"（{len(hits)} 段条带拼满框高 {cover:.0f}/{h:.0f}）")
+            break   # 每框只并一侧
+    return frame_like, expanded
+
+
 def _collect_title_strips(doc):
     """从模型空间收集 J-图框/TK 层图签条 bbox 列表"""
     if doc is None:
@@ -3823,6 +3924,15 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             frame_like, _strip_expanded = _expand_frames_with_title_strips(frame_like, _strips)
             if _strip_expanded:
                 safe_log(f"  [附栏外扩] {_strip_expanded} 个主图框按主框+图签附栏整体口径外扩")
+
+        # ---------- 第50轮：贴边附栏条带并入（101600口径） ----------
+        # 自身贴边附栏形态（08，09-MW-FP004）：右侧 7000×57400 附栏由 3 段闭合
+        # 矩形拼满主框高、零间隙贴边（层 0，非 J-图框/TK）→ 按实际条宽并入。
+        # 与第23轮外扩互补：那边是"错排邻框内的图签条"（固定 21000），这边是
+        # "自身贴边分格附栏"（实际宽度）。
+        frame_like, _edge_expanded = _expand_frames_with_edge_strips(msp, frame_like)
+        if _edge_expanded:
+            safe_log(f"  [贴边附栏并入] {_edge_expanded} 个主图框并入贴边附栏条带")
 
         # ---------- 模型空间降级包围盒清洗 ----------
         # 降级路径"全实体包围盒"在无闭合矩形时把"该空间所有实体 bbox"当候选兜底，

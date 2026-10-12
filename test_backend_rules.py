@@ -1766,5 +1766,39 @@ check('R49对照: 可见表格页仍被条件I救回 (smart)',
                     and abs(c['width'] - 35950) < 5 for c in r['candidates']))
 
 
+# ---- 用例 67：R50 贴边附栏条带并入（08，09-MW-FP004 形态） ----
+# 主框 94600×57400 闭合多段线 + 右侧贴边 7000 宽附栏（3 段闭合矩形零间隙、
+# 纵向拼满框高）→ 整体口径 101600×57400。另放 1 张 84100×59400 互证防孤证。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 0, 0, 94600, 57400)               # 主框
+_edge_spans = [(0, 21800), (21800, 36600), (36600, 57400)]
+for _a, _b in _edge_spans:
+    add_closed_rect(msp, 94600, _a, 7000, _b - _a)     # 右侧贴边条带 ×3
+add_closed_rect(msp, 200000, 0, 84100, 59400)          # 互证框
+data = to_bytes(doc)
+check('R50贴边附栏: 右侧7000条带拼满框高, 94600→101600 (smart)',
+      lambda: parse(data),
+      lambda r: sum(1 for c in r['candidates']
+                    if abs(c['width'] - 101600) < 5
+                    and abs(c['height'] - 57400) < 5) == 1)
+
+
+# ---- 用例 68：R50 护栏——条带只拼半个框高，不得并入 ----
+# 同形态但条带纵向只覆盖 50%（<90% 门槛）→ 主框保持 94600 原宽。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 0, 0, 94600, 57400)
+add_closed_rect(msp, 94600, 0, 7000, 28700)            # 只拼下半段
+add_closed_rect(msp, 200000, 0, 84100, 59400)
+data = to_bytes(doc)
+check('R50护栏: 条带不满90%框高不并入, 主框保持94600 (smart)',
+      lambda: parse(data),
+      lambda r: sum(1 for c in r['candidates']
+                    if abs(c['width'] - 94600) < 5
+                    and abs(c['height'] - 57400) < 5) == 1
+      and not any(abs(c['width'] - 101600) < 5 for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)
