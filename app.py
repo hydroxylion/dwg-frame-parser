@@ -2354,6 +2354,50 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             safe_log(f"  [{layout_name}] [救援候选让位] {_n_rm} 个块内闭合线候选包住其他图框候选"
                      f"（图纸裁剪边界形态，{', '.join(f'{k[0]:.0f}x{k[1]:.0f}' for k in sorted(_revoke_keys))}）"
                      f"→ 整组撤销（候选与 rel 分母计回一并撤回）")
+            # R55 让位连坐：参照底图块的"他图页框"随整组撤销一并连坐。
+            # 场景来源：S011.dwg。巨块 北区商业街2013-05-5（底图参照，
+            #   5312482×1806446）内含 11+11 份 A0 分幅框（其中 1 份罩住本图
+            #   A2 真框 59450×42050 → 两尺寸组整组让位撤销）+ 1 份
+            #   148600×84100 加长总图框——它什么都不罩（让位幸存）、与真框
+            #   零空间交集，但它是被参照图纸集"另一张图"的页框，不属本图。
+            # 判据（全部满足才连坐该 (尺寸组, 块)）：
+            #   ① 同块存在已被让位撤销的组（证明该块是含他图页框的参照底图）；
+            #   ② 该组本块全部候选与同 layout 全部非救援候选 bbox 零交集
+            #     （既不罩也不沾。d008 守卫：其幸存 200700×126150 框罩住顶层
+            #     部件候选、有交集 → 不连坐，救援不受影响）；
+            #   ③ 同 layout 存在非救援候选（无真框无从判断归属，保守不连坐）。
+            _revoked_blocks = set()
+            for _gk in _revoke_keys:
+                _revoked_blocks |= _resc_credit_blocks.get(_gk, set())
+            if _revoked_blocks and _other_cands:
+                _lz_pairs = {}   # {(gk, block_name): [候选...]}
+                for _rc in candidates:
+                    if _rc.get('type') != '块内闭合线':
+                        continue
+                    _gk = (_rc['width'], _rc['height'])
+                    if _gk in _revoke_keys or _rc.get('block_name') not in _revoked_blocks:
+                        continue
+                    _lz_pairs.setdefault((_gk, _rc.get('block_name')), []).append(_rc)
+                _lz_keys = set()
+                for (_gk, _bn), _lst in _lz_pairs.items():
+                    if all(not (c['bbox'][2] > _oc['bbox'][0] + 1.0
+                                and _oc['bbox'][2] > c['bbox'][0] + 1.0
+                                and c['bbox'][3] > _oc['bbox'][1] + 1.0
+                                and _oc['bbox'][3] > c['bbox'][1] + 1.0)
+                           for c in _lst for _oc in _other_cands):
+                        _lz_keys.add(_gk)
+                if _lz_keys:
+                    for _gk in _lz_keys:
+                        _resc_credit.pop(_gk, None)
+                    _n_rm2 = sum(1 for c in candidates
+                                 if c.get('type') == '块内闭合线'
+                                 and (c['width'], c['height']) in _lz_keys)
+                    candidates = [c for c in candidates
+                                  if not (c.get('type') == '块内闭合线'
+                                          and (c['width'], c['height']) in _lz_keys)]
+                    safe_log(f"  [{layout_name}] [让位连坐] 同块 {_n_rm2} 个块内闭合线候选"
+                             f"（{', '.join(f'{k[0]:.0f}x{k[1]:.0f}' for k in sorted(_lz_keys))}）"
+                             f"与全部真框零空间交集，属参照底图内的他图页框 → 随让位块连坐撤销")
         if _resc_credit:
             # R43 幸存组让位：替换（非 max）关联块的计回——d008 组面积
             #   2.53e10 必须覆盖块计回 1.06e12，否则 rel 分母仍被污染。

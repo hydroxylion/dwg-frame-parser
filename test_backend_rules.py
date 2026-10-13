@@ -1846,5 +1846,83 @@ check('R52护栏: 模型非√2内容框仍被布局优先剔除, fc=6 (smart)',
       and not any(abs(c['width'] - 13423) < 5 for c in r['candidates']))
 
 
+# ---- 用例 71：R55 让位连坐——参照底图块的"他图页框"随让位块整组撤销 ----
+# 场景来源：S011.dwg。巨块（底图参照，散线撑大 bbox 被 R27 拒）内含：
+#   组A 2 份 100000×70000（其中 1 份罩住顶层真框 → 让位整组撤销）+
+#   组B 2 份 148600×84100（什么都不罩、与真框零空间交集 → 让位幸存，
+#   实为被参照图纸集"另一张图"的加长总图页框）。R55 连坐：同块剩余救援组
+#   与全部非救援候选零交集 → 一并撤销。断言：fc=1 只剩真框 59450×42050。
+doc = make_doc()
+msp = doc.modelspace()
+_blk = doc.blocks.new(name='REF_BASE')
+# 顶层真框 A2 59450×42050（块内坐标 = 模型坐标，INSERT 在原点）+ 13 条内缩横线
+# ×2 张（同尺寸互证，避免孤证复核剔除干扰断言）
+_t1x, _t1y = 0, 0
+for _tx, _ty in [(_t1x, _t1y), (_t1x, 600000)]:
+    add_closed_rect(msp, _tx, _ty, 59450, 42050)
+    for _k in range(13):
+        msp.add_line((_tx + 100, _ty + 2000 + _k * 3000),
+                     (_tx + 59450 - 100, _ty + 2000 + _k * 3000))
+# 组A：100000×70000 ×2，#1 罩住真框（面积比 35.7% ≥10% → 触发让位）
+_blk.add_lwpolyline([(-20000, -20000), (80000, -20000),
+                     (80000, 50000), (-20000, 50000)], close=True)
+_blk.add_lwpolyline([(200000, 0), (300000, 0),
+                     (300000, 70000), (200000, 70000)], close=True)
+# 组B：148600×84100 ×2，与真框/组A 全部零交集（连坐目标）
+_blk.add_lwpolyline([(500000, -200000), (648600, -200000),
+                     (648600, -115900), (500000, -115900)], close=True)
+_blk.add_lwpolyline([(900000, -200000), (1048600, -200000),
+                     (1048600, -115900), (900000, -115900)], close=True)
+# 远距离散件撑大块 bbox → R27 拒（3e6 跨度超计回上限 2.5e6，不计回分母）
+_blk.add_line((0, -500000), (3000000, -500000))
+_blk.add_line((3000000, -500000), (3000000, -400000))
+msp.add_blockref('REF_BASE', (0, 0))
+data = to_bytes(doc)
+check('R55让位连坐: 底图块他图页框零交集随连坐撤销, fc=1 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 2
+      and r['frame_counts_by_layout'] == {'模型空间': 2}
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 59450) < 5 and abs(c['height'] - 42050) < 5) == 2
+      and not any(c['type'] == '块内闭合线' for c in r['candidates']))
+
+# ---- 用例 72：R55 护栏——幸存救援组与真框有交集时不得连坐 ----
+# 同块但组B 120000×80000 之一与真框部分重叠（非包住，不触发让位；有交集，
+# 不满足零交集 → 不连坐）→ 组B 2 份全存活。守护：连坐只清"与真框完全无关"
+# 的他图页框，正常救援（如 d008 幸存框罩部件）不受影响。
+doc = make_doc()
+msp = doc.modelspace()
+_blk2 = doc.blocks.new(name='REF_BASE2')
+for _tx, _ty in [(0, 0), (0, 600000)]:      # 真框 ×2 同尺寸互证
+    add_closed_rect(msp, _tx, _ty, 59450, 42050)
+    for _k in range(13):
+        msp.add_line((_tx + 100, _ty + 2000 + _k * 3000),
+                     (_tx + 59450 - 100, _ty + 2000 + _k * 3000))
+# 组A：100000×70000 ×2，#1 罩住真框 → 让位整组撤销
+_blk2.add_lwpolyline([(-20000, -20000), (80000, -20000),
+                      (80000, 50000), (-20000, 50000)], close=True)
+_blk2.add_lwpolyline([(400000, 0), (500000, 0),
+                      (500000, 70000), (400000, 70000)], close=True)
+# 组B：120000×80000 ×2，#1 与真框角部部分重叠（交集 9450×20000 >0）
+_blk2.add_lwpolyline([(50000, -60000), (170000, -60000),
+                      (170000, 20000), (50000, 20000)], close=True)
+_blk2.add_lwpolyline([(700000, -60000), (820000, -60000),
+                      (820000, 20000), (700000, 20000)], close=True)
+_blk2.add_line((0, -500000), (3000000, -500000))
+_blk2.add_line((3000000, -500000), (3000000, -400000))
+msp.add_blockref('REF_BASE2', (0, 0))
+data = to_bytes(doc)
+check('R55护栏: 幸存救援组与真框有交集不连坐, 组B双份存活 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 4
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 120000) < 5
+              and abs(c['height'] - 80000) < 5) == 2
+      and not any(abs(c['width'] - 100000) < 5 for c in r['candidates'])
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 59450) < 5
+              and abs(c['height'] - 42050) < 5) == 2)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 sys.exit(0 if all(results) else 1)
