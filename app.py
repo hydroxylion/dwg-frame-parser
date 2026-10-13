@@ -245,6 +245,13 @@ ROT_EXEMPT_RATIO_MIN = 1.34   # 轴对齐矩形长宽比下限（与闭合多段
 ROT_EXEMPT_RATIO_MAX = 2.5    # 上限（与条件C 一致）
 ROT_EXEMPT_MIN_SHORT = 2000   # 短边下限：图框级（低于此视为内容小框，不豁免）
 
+# R56：本次解析各 layout 的全局旋转矫正参数 {layout_name: (cosθ, sinθ)}。
+# collect_candidates_from_layout 检测到整体倾斜时写入（入口先 pop 防跨图纸残留），
+# 条件 D/F 的内容证据统计（_cond_d_entity_count）用它把实体 bbox 转正到与候选
+# 同一坐标系——否则倾斜图中候选（已转正）与实体（原始坐标）相差 |p|·θ 量级，
+# 框内实体计数恒 0，条件 D/F 全废。
+_LAYOUT_ROT = {}
+
 
 def _estimate_global_rotation(entities):
     """估计图纸整体主方向并返回旋转矩阵参数 (cosθ, sinθ)（把主方向转回水平/垂直）。
@@ -1214,6 +1221,10 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     _rot = _estimate_global_rotation(visible_entities)
     if _rot:
         safe_log(f"  [{layout_name}] 检测到整体倾斜图纸，施加旋转矫正 (cos={_rot[0]:.4f}, sin={_rot[1]:.4f})")
+    # R56：记录本 layout 的旋转参数供内容证据统计同坐标系使用（入口 pop 防残留）
+    _LAYOUT_ROT.pop(layout_name, None)
+    if _rot:
+        _LAYOUT_ROT[layout_name] = _rot
 
     def _rot_pt(x, y):
         """施加全局旋转（rot 为 None 时原样返回）"""
@@ -2682,6 +2693,34 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 _rk = (_c['layout'], round(_c['width']), round(_c['height']))
                 _rect_size_count[_rk] = _rect_size_count.get(_rk, 0) + 1
 
+        # R56 纸面比例模式（paper-scale regime）：总图-排水.dwg 全模型空间按出图
+        # 比例（纸面 mm）绘制——全实体包围盒 1265×929（不足 4 m²），真图框是
+        # A3 297×420（整体旋转 3.3°，矫正后 298.43×421.51，ratio 1.4124）。模型
+        # 空间尺度的绝对门槛全部失配：A 面积占比 10.6%<15%、B 短边 298<400、
+        # C rel 7.3%<10%（分母被 R27 拒绝计回的 XRef 底图块撑大）、F 短边
+        # 298<20000 → 四通道全败 fc=0。
+        # 判定：layout 总面积 < 2000×2000 mm²（A0 纸 0.89 m²，4 m² 留足余量；
+        # 模型空间图纸面积至少数 m²）→ 纸面比例模式。此模式下条件 F 增设纸面
+        # 孤证通道：短边命中 A 系列 ±1% 代替 ≥20000，rel 窗口/ratio±2%/内容
+        # 证据 ≥12 与 F 同口径。齿轮箱(846×584)/后桥半轴(A1 840×593) 等既有
+        # 纸面基线图同步进入该模式，由全量回归守护。
+        # 开关 FRAME_PARSER_NO_PAPER_MODE=1 可关。
+        _paper_mode_layouts = set()
+        if os.environ.get('FRAME_PARSER_NO_PAPER_MODE') != '1':
+            for _ln2 in {c['layout'] for c in all_candidates}:
+                if _ln2 == '模型空间':
+                    _tot2 = msp_total
+                else:
+                    _tot2 = 0
+                    for _c2 in all_candidates:
+                        if _c2['layout'] == _ln2 and _c2['area_ratio'] > 0:
+                            _tot2 = max(_tot2, _c2['area'] / _c2['area_ratio'])
+                if 0 < _tot2 < 2000 * 2000:
+                    _paper_mode_layouts.add(_ln2)
+            if _paper_mode_layouts:
+                safe_log(f"  [纸面比例模式] layout 总面积 <4m²，按出图比例（纸面 mm）处理: "
+                         f"{', '.join(sorted(_paper_mode_layouts))}（条件F 纸面孤证通道启用）")
+
         # R30 条件D 内容证据：框内**严格内部**完全包含的实体数（惰性缓存 per layout）。
         # 口径与条件 H 的实体收集一致（同实体类型白名单），但判定窗口为边界内缩
         # COND_D_INNER_TOL——排除候选自身 4 条边线（边线 bbox 落在候选边界上，
@@ -2721,6 +2760,17 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         except Exception:
                             continue
                         if _bb is not None:
+                            # R56：倾斜图纸把实体 bbox 四角转正到与候选同坐标系
+                            # （候选顶点在收集期已转正，原始坐标相差 |p|·θ 量级）
+                            _lrt = _LAYOUT_ROT.get(_ln)
+                            if _lrt:
+                                _cs = [_bb[0], _bb[1], _bb[2], _bb[3],
+                                       _bb[0], _bb[3], _bb[2], _bb[1]]
+                                _tp = [(x * _lrt[0] + y * _lrt[1],
+                                        -x * _lrt[1] + y * _lrt[0])
+                                       for x, y in zip(_cs[0::2], _cs[1::2])]
+                                _bb = (min(p[0] for p in _tp), min(p[1] for p in _tp),
+                                       max(p[0] for p in _tp), max(p[1] for p in _tp))
                             _bbs.append(_bb)
                 _cond_d_ent_bbs[_ln] = _bbs
             _x1, _y1, _x2, _y2 = c['bbox']
@@ -2869,6 +2919,22 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     and abs(c['ratio'] - _SQRT2) / _SQRT2 <= 0.02
                     and 0.003 <= c['rel_area_ratio'] < REL_AREA_THRESHOLD
                     and c['short_side'] >= 20000
+                    and _cond_d_entity_count(c) >= COND_D_MIN_ENTITIES):
+                c['_via'] = 'F'
+                return True
+            # 条件F-纸面（R56）：纸面比例模式的孤证 A 系纸通道。
+            #   总图-排水.dwg：图框 A3 297×420（纸面 mm，整体旋转 3.3°，矫正后
+            #   298.43×421.51），rel 7.3% 过不了 C、短边 298 过不了 B/F 的模型
+            #   空间尺度门槛。纸面模式下以「短边命中 A 系列 ±1%」代替 F 的
+            #   「短边 ≥20000」，其余口径（ratio ±2%、rel∈[0.3%,10%)、内容证据
+            #   ≥12）与条件 F 一致。内框 287×403 短边偏离 A3 297 达 2.9% 不命中
+            #   （只收外框，fc=1 与用户口径一致）。
+            if (c['layout'] in _paper_mode_layouts
+                    and c['type'] in EXPLICIT_TYPES
+                    and abs(c['ratio'] - _SQRT2) / _SQRT2 <= 0.02
+                    and any(abs(c['short_side'] - _s) <= _s * 0.01
+                            for _s in A_SERIES_SHORT_SIDES)
+                    and 0.003 <= c['rel_area_ratio'] < REL_AREA_THRESHOLD
                     and _cond_d_entity_count(c) >= COND_D_MIN_ENTITIES):
                 c['_via'] = 'F'
                 return True

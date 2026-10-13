@@ -1924,5 +1924,80 @@ check('R55护栏: 幸存救援组与真框有交集不连坐, 组B双份存活 (
               and abs(c['height'] - 42050) < 5) == 2)
 
 
+# ---- 用例 73：R56 纸面比例模式——A3 图框（纸面 mm，整体倾斜）识别 ----
+# 场景来源：总图-排水.dwg。全模型空间按出图比例（纸面 mm）绘制，总包围盒
+#   1265×929（<4m² 触发纸面模式），真图框 A3 297×420 整体旋转 3.3°（全图内容
+#   同角度倾斜，触发旋转矫正）。矫正后外框 ~297×420.5（ratio 1.4124），A 面积
+#   占比 ~3.6%<15%、B 短边 297<400、C rel ~3.6%<10%（分母被 R27 拒绝计回的
+#   底图块撑大）、F 短边<20000 四通道全败 → 新增条件F-纸面通道：短边命中
+#   A 系列 ±1% 代替 ≥20000。断言 fc=1 只收外框（内框 287×403 短边偏离 A3
+#   达 2.9% 不命中）。合成要点：①全图内容（框+线+信用块）均倾斜 3.3° 触发
+#   旋转矫正；②R27 拒绝计回的内容块（散线撑大 bbox）把 rel 压到 <10%，
+#   否则外框 rel=100% 走条件 C、测不到 F-纸面通道；③框内 ≥12 个内容实体。
+import math as _math56
+
+doc = make_doc()
+msp = doc.modelspace()
+_ang = _math56.radians(3.3)
+_ca, _sa = _math56.cos(_ang), _math56.sin(_ang)
+
+
+def _rot_add_rect(lay, cx, cy, w, h):
+    """以 (cx,cy) 为中心画旋转 3.3° 的闭合矩形"""
+    _hw, _hh = w / 2, h / 2
+    _pts = []
+    for _dx, _dy in [(-_hw, -_hh), (_hw, -_hh), (_hw, _hh), (-_hw, _hh)]:
+        _pts.append((cx + _dx * _ca - _dy * _sa, cy + _dx * _sa + _dy * _ca))
+    lay.add_lwpolyline(_pts, close=True)
+
+
+# 外框 A3 297×420.5 + 内框 287×403（均旋转 3.3°，中心 (150, 210)）
+_rot_add_rect(msp, 150, 210, 297, 420.5)
+_rot_add_rect(msp, 150, 210, 287, 403)
+# 框内内容：13 条横线（倾斜系，框内局部坐标）+ 2 个小闭合框
+for _k in range(13):
+    _ly = -190 + _k * 30
+    _x1 = 150 + (-128) * _ca - _ly * _sa
+    _y1 = 210 + (-128) * _sa + _ly * _ca
+    _x2 = 150 + 128 * _ca - _ly * _sa
+    _y2 = 210 + 128 * _sa + _ly * _ca
+    msp.add_line((_x1, _y1), (_x2, _y2))
+_rot_add_rect(msp, 100, 150, 60, 40)
+_rot_add_rect(msp, 200, 260, 80, 50)
+# R27 拒绝计回的内容块（复刻 XRef 底图块撑大 rel 分母）：1500×1000 闭合框 +
+# 3200 长散线撑大 bbox（1500 < 3195×50% → R27 拒；散线 ≥30% 构件证据 → 计回
+# ~3.5e6），同角度倾斜维持主方向一致
+_blk56 = doc.blocks.new(name='CREDIT_BLK')
+_rot_add_rect(_blk56, 900, 300, 1500, 1000)
+_blk56.add_line((0, 0), (3195, 184))
+msp.add_blockref('CREDIT_BLK', (0, 0))
+data = to_bytes(doc)
+check('R56纸面比例: A3图框(纸面mm,倾斜3.3°)经F-纸面通道识别, fc=1 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and abs(r['width'] - 297) < 3 and abs(r['height'] - 420.5) < 3)
+
+# ---- 用例 74：R56 护栏——纸面模式下非 A 系短边框不收 ----
+# 同形态但外框短边 305（偏离 A3 297 达 2.7% >±1%）→ F-纸面不命中，其余通道
+# （A 占比/C rel/B 短边/F 短边）同样过不了 → fc=0。守护：纸面通道只收标准 A 系纸。
+doc = make_doc()
+msp = doc.modelspace()
+_rot_add_rect(msp, 150, 210, 305, 431)
+for _k in range(13):
+    _ly = -190 + _k * 30
+    _x1 = 150 + (-128) * _ca - _ly * _sa
+    _y1 = 210 + (-128) * _sa + _ly * _ca
+    _x2 = 150 + 128 * _ca - _ly * _sa
+    _y2 = 210 + 128 * _sa + _ly * _ca
+    msp.add_line((_x1, _y1), (_x2, _y2))
+_blk56b = doc.blocks.new(name='CREDIT_BLK2')
+_rot_add_rect(_blk56b, 900, 300, 1500, 1000)
+_blk56b.add_line((0, 0), (3195, 184))
+msp.add_blockref('CREDIT_BLK2', (0, 0))
+data = to_bytes(doc)
+check('R56护栏: 纸面模式非A系短边框不收, fc=0 (smart)',
+      lambda: expect_error_no_frame(data),
+      lambda ok: ok)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
-sys.exit(0 if all(results) else 1)
