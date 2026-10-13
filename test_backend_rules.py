@@ -2000,4 +2000,80 @@ check('R56护栏: 纸面模式非A系短边框不收, fc=0 (smart)',
       lambda ok: ok)
 
 
+# ---- 用例 75：R58 巨块救援触达 + 嵌套子块 + 内容块误报剔除（P_10#给排水平面图） ----
+# 场景复刻：模型空间 6 张内外双框图（4×59400×84100 + 84100×59400 + 59400×42000，
+# 内框同心内缩 1000）+ 巨型拼接底图块（世界 bbox ratio 远超 5.5——子块几何离散
+# 分布撑大，R58 前预筛直接剔除、R40 救援只挂 R27 拒绝分支永不触达）内含 7 张图
+# （3×84100×59400 + 4×42050×29700，内外双框）+ 嵌套子块内 1 张 A3 缩印
+# （23780×16820+23080×16420 嵌套对）+ 2 个 S-FLOOR 楼板环内容块（9 顶点非矩形环
+# bbox 恰为块尺寸 30200×47400，冒充闭合证据过 R27、rel 过 C）。R58 修复后应
+# fc=14：4+4+1+3+1+1，无 30200×47400。
+doc = make_doc()
+msp = doc.modelspace()
+# 模型空间 6 张双框图（外框 + 内框）
+for _x, _y, _w, _h in ((0, 300000, 59400, 84100), (70000, 300000, 59400, 84100),
+                       (140000, 300000, 59400, 84100), (210000, 300000, 59400, 84100),
+                       (0, 200000, 84100, 59400), (0, 100000, 59400, 42000)):
+    add_closed_rect(msp, _x, _y, _w, _h)
+    add_closed_rect(msp, _x + 1000, _y + 1000, _w - 2000, _h - 2000)
+# 巨型拼接底图块：顶层 7 张双框图 + 嵌套子块 1 张缩印 + 远端散线撑大 bbox
+_blk_big = doc.blocks.new(name='BIG_XREF')
+for _x, _y, _w, _h in ((0, 0, 84100, 59400), (90000, 0, 84100, 59400),
+                       (180000, 0, 84100, 59400),
+                       (0, 70000, 42050, 29700), (90000, 70000, 42050, 29700),
+                       (180000, 70000, 42050, 29700), (270000, 70000, 42000, 29700)):
+    add_closed_rect(_blk_big, _x, _y, _w, _h)
+    add_closed_rect(_blk_big, _x + 1000, _y + 1000, _w - 2000, _h - 2000)
+_blk_sub = doc.blocks.new(name='SUB_SHEET')
+add_closed_rect(_blk_sub, 0, 0, 23780, 16820)
+add_closed_rect(_blk_sub, 350, 200, 23080, 16420)
+for _k in range(15):   # 缩印框内内容（虽走嵌套对豁免，保持真实感）
+    _blk_sub.add_line((1000, 1000 + _k * 900), (22000, 1000 + _k * 900))
+_blk_big.add_blockref('SUB_SHEET', (360000, 0))
+_blk_big.add_line((800000, 5000), (800000, 120000))   # 散线撑大 bbox（ratio≈8 >5.5 触发预筛剔除）
+msp.add_blockref('BIG_XREF', (1000000, 0))
+# 2 个楼板环内容块（9 顶点非矩形环 bbox = 块尺寸，R27 旧口径全尺寸闭合证据）
+for _i, _bn in enumerate(('SLAB_A', 'SLAB_B')):
+    _blk = doc.blocks.new(name=_bn)
+    _ox = _i * 40000
+    _blk.add_lwpolyline([
+        (_ox, 0), (_ox, 15000), (_ox + 5000, 15000), (_ox + 5000, 47400),
+        (_ox + 30200, 47400), (_ox + 30200, 5000), (_ox + 25000, 5000),
+        (_ox + 25000, 0),
+    ], close=True)
+    for _k in range(20):   # 块内平面图内容
+        _blk.add_line((_ox + 2000, 2000 + _k * 2000), (_ox + 28000, 2000 + _k * 2000))
+    msp.add_blockref(_bn, (2000000 + _i * 50000, 50000))
+data = to_bytes(doc)
+check('R58巨块救援+嵌套子块+楼板环误报剔除: fc=14 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 14
+      and sum(1 for c in r['candidates'] if abs(c['width'] - 59400) < 5 and abs(c['height'] - 84100) < 5) == 4
+      and sum(1 for c in r['candidates'] if abs(c['width'] - 84100) < 5 and abs(c['height'] - 59400) < 5) == 4
+      and sum(1 for c in r['candidates'] if abs(c['width'] - 42050) < 5) == 3
+      and sum(1 for c in r['candidates'] if abs(c['width'] - 42000) < 5) == 1
+      and sum(1 for c in r['candidates'] if abs(c['width'] - 23780) < 5) == 1
+      and sum(1 for c in r['candidates'] if abs(c['width'] - 59400) < 5 and abs(c['height'] - 42000) < 5) == 1
+      and not any(abs(c['width'] - 30200) < 5 for c in r['candidates']))
+
+# ---- 用例 76：R58 护栏——普通预筛（ratio 失配但非巨型）仍剔除 ----
+# 60000×8000 内容块（ratio 7.5 >5.5，长边 <200000）维持预筛剔除，不放行 R27，
+# 守护 R58 放行门槛（≥200000）不外溢。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 0, 0, 84100, 59400)
+add_closed_rect(msp, 1000, 1000, 82100, 57400)
+_blk_n = doc.blocks.new(name='NARROW_STRIP')
+add_closed_rect(_blk_n, 0, 0, 60000, 8000)
+for _k in range(10):
+    _blk_n.add_line((2000, 1000 + _k * 600), (58000, 1000 + _k * 600))
+msp.add_blockref('NARROW_STRIP', (200000, 0))
+data = to_bytes(doc)
+check('R58护栏: 非巨型ratio失配块仍预筛剔除, fc=1 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and abs(r['width'] - 84100) < 5 and abs(r['height'] - 59400) < 5
+      and not any(abs(c['width'] - 60000) < 5 for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

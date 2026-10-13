@@ -1810,11 +1810,20 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             _w_ratio = (max(_w, _h) / _w_short) if _w_short > 0 else 0
             _is_a_series_short = any(abs(_w_short - _s) <= 1.0 for _s in _A_SERIES_SHORT_SIDES)
             _is_grid_rescued = _key in _rescued_keys
+            _ratio_fail = not (FRAME_RATIO_MIN <= _w_ratio <= FRAME_RATIO_MAX)
             if ((_w_short < INSERT_MIN_SHORT_SIDE and not _is_a_series_short
-                    and not _is_grid_rescued) or
-                    not (FRAME_RATIO_MIN <= _w_ratio <= FRAME_RATIO_MAX)):
-                _insert_filtered += 1
-                continue
+                    and not _is_grid_rescued) or _ratio_fail):
+                # R58：巨型拼接底图块放行——bbox 被块内离散分布的子块几何撑大
+                #   （P_10#给排水平面图.dwg：10#商业－平面图-20130627-3_t3 世界
+                #   bbox 3767322×118204、ratio 31.9），预筛直接 continue 导致
+                #   R40 救援永不触达（救援只挂在 R27 拒绝分支）→ 块内 8 张真
+                #   图框（7 张顶层 + 1 张嵌套子块）全部漏检。放行到 R27：巨型
+                #   块的闭合证据必然 < 块长边 50% 被拒 → 救援扫描块内（含一层
+                #   嵌套子块）真图框。小尺寸 ratio 失配块维持原预筛剔除（成本
+                #   与回归风险不动）。
+                if not (_ratio_fail and max(_w, _h) >= 200000 and _bn in doc.blocks):
+                    _insert_filtered += 1
+                    continue
             # R26/R27 图框块「边框证据」校验（双通道）：
             #   主判（R27 闭合边框证据）：真图框块必有闭合矩形边框；内容块
             #     （如 拼接图.dwg 的 9ZZZW：最长构件 63% 块长但无闭合矩形）剔除。
@@ -1848,8 +1857,14 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 #   真框 rel 全部压死，fc 崩）。
                 if _bb_len > 0:
                     _member_len_r27 = _block_max_member_len(_bn)
+                    # R58：ratio 失配的巨型块（预筛放行进来的）不计回——R26 时代
+                    #   它们被预筛直接剔除、从未进过分母，计回 = 凭空膨胀分母
+                    #   （1号2号楼 A$C97b860f1 259500×2400000 边长擦 R30 上限
+                    #   2.5e6 以内、member 证据因嵌套子块达标 → 计回 6.2e11，
+                    #   分母 ×2.2 → 5 个真图框 rel 跌破 10%，fc 11→6）。
                     if (_member_len_r27 >= _bb_len * _BLOCK_EVIDENCE_RATIO
-                            and max(_w, _h) <= _R27_CREDIT_MAX_SIDE):
+                            and max(_w, _h) <= _R27_CREDIT_MAX_SIDE
+                            and not (_ratio_fail and max(_w, _h) >= 200000)):
                         # R43：按块记账（同块多实例取 max），末尾统一让位/合并
                         _prev_credit = _r27_credit_by_block.get(_bn, 0)
                         if _w * _h > _prev_credit:
@@ -1882,70 +1897,140 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                     _resc_groups = {}
                     _resc_all = []    # R43：全部过门槛闭合矩形实例（嵌套对判定用）
                     _tol_p_res = max(1.0, _bb_len * 0.002)
-                    for _ent_in in doc.blocks[_bn]:
-                        try:
-                            if _ent_in.dxftype() != 'LWPOLYLINE':
+                    _resc_scanned = set()   # R58：已扫描块名+实例指纹（防重复/爆炸）
+
+                    def _resc_tf(_s_ip, _s_xs, _s_ys, _s_rot, _s_bpx, _s_bpy, _outer_tf):
+                        """R58 子块级变换工厂：p_sub → _outer_tf(insert + R·S·(p − base))"""
+                        def _f(_p):
+                            _qx = (_p[0] - _s_bpx) * _s_xs
+                            _qy = (_p[1] - _s_bpy) * _s_ys
+                            if _s_rot:
+                                _rad_r = _math.radians(_s_rot)
+                                _cr_r = _math.cos(_rad_r)
+                                _sr_r = _math.sin(_rad_r)
+                                _qx, _qy = (_qx * _cr_r - _qy * _sr_r,
+                                            _qx * _sr_r + _qy * _cr_r)
+                            return _outer_tf((_qx + _s_ip[0], _qy + _s_ip[1]))
+                        return _f
+
+                    def _resc_tf_top(_p):
+                        # 顶层实例变换：p = insert + R(rot)·S·(p − base)，再做全局旋转矫正
+                        _qx = (_p[0] - _bpx) * _xs
+                        _qy = (_p[1] - _bpy) * _ys
+                        if _ins_rot:
+                            _rad_r = _math.radians(_ins_rot)
+                            _cr_r = _math.cos(_rad_r)
+                            _sr_r = _math.sin(_rad_r)
+                            _qx, _qy = (_qx * _cr_r - _qy * _sr_r,
+                                        _qx * _sr_r + _qy * _cr_r)
+                        _qx += _ip[0]
+                        _qy += _ip[1]
+                        if _rot is not None:
+                            _qx, _qy = _rot_pt(_qx, _qy)
+                        return (_qx, _qy)
+
+                    def _resc_scan(_blk_name, _depth, _tf, _fp=()):
+                        # R58：递归扫描闭合矩形（depth≤1 下探一层嵌套子块——拼接底图块
+                        #   把单张图打成子块，如 P_10# 的 A$C59977FB9 内
+                        #   23780×16820 + 23080×16420，只扫顶层漏检）。
+                        #   同名块同实例指纹只扫一次（741 个 INSERT 实例多为重复块）；
+                        #   同名块不同插入位置（指纹不同）分别扫描。
+                        _scan_key = (_blk_name, _fp)
+                        if _scan_key in _resc_scanned:
+                            return
+                        _resc_scanned.add(_scan_key)
+                        for _ent_in in doc.blocks[_blk_name]:
+                            try:
+                                if _ent_in.dxftype() == 'INSERT':
+                                    if _depth >= 1:
+                                        continue
+                                    _sub_bb = _get_block_world_bbox(_ent_in.dxf.name)
+                                    if _sub_bb is None:
+                                        continue
+                                    _sx = abs(getattr(_ent_in.dxf, 'xscale', 1) or 1)
+                                    _sy = abs(getattr(_ent_in.dxf, 'yscale', 1) or 1)
+                                    _sub_len = max(_sub_bb[2] - _sub_bb[0], _sub_bb[3] - _sub_bb[1]) * max(_sx, _sy)
+                                    if _sub_len < 20000:
+                                        continue
+                                    try:
+                                        _nb = doc.blocks[_ent_in.dxf.name].block.dxf.base_point
+                                        _nbx, _nby = _nb.x, _nb.y
+                                    except Exception:
+                                        _nbx = _nby = 0.0
+                                    _resc_scan(
+                                        _ent_in.dxf.name, _depth + 1,
+                                        _resc_tf(_ent_in.dxf.insert,
+                                                 getattr(_ent_in.dxf, 'xscale', 1) or 1,
+                                                 getattr(_ent_in.dxf, 'yscale', 1) or 1,
+                                                 getattr(_ent_in.dxf, 'rotation', 0),
+                                                 _nbx, _nby, _tf),
+                                        (_ent_in.dxf.name, round(_ent_in.dxf.insert.x, 3),
+                                         round(_ent_in.dxf.insert.y, 3),
+                                         round(getattr(_ent_in.dxf, 'xscale', 1) or 1, 6),
+                                         round(getattr(_ent_in.dxf, 'yscale', 1) or 1, 6),
+                                         round(getattr(_ent_in.dxf, 'rotation', 0), 3)))
+                                    continue
+                                if _ent_in.dxftype() != 'LWPOLYLINE':
+                                    continue
+                                if not is_polyline_closed(_ent_in):
+                                    continue
+                                if _closed_polyline_rect_len(_ent_in, _tol_p_res) <= 0:
+                                    continue
+                                _pv = get_polyline_vertices(_ent_in)
+                                if len(_pv) < 3:
+                                    continue
+                                _wl = [_tf(_p) for _p in _pv]
+                                _rxs = [p[0] for p in _wl]
+                                _rys = [p[1] for p in _wl]
+                                _rx1, _ry1 = min(_rxs), min(_rys)
+                                _rx2, _ry2 = max(_rxs), max(_rys)
+                                _rw = _rx2 - _rx1
+                                _rh = _ry2 - _ry1
+                                if _rw <= 0 or _rh <= 0:
+                                    continue
+                                _rshort = min(_rw, _rh)
+                                # R58：下限 20000→15000——嵌套子块内的 A3 缩印框
+                                #   （23780×16820，短边 16820）被旧门槛拦截漏检；
+                                #   ratio∈[1.30,5.5] + "≥2 份同尺寸 / 嵌套对" 判据
+                                #   仍然兜底。
+                                if _rshort < 15000:
+                                    continue
+                                # ratio 下限 1.30（R40 回归修正）：近方形 1.0~1.1 的
+                                #   "多份同尺寸闭合矩形"是建筑轮廓/平面图边界/表格边界
+                                #   形态（北区商业街拼接底图块 137089×145635×11 等
+                                #   ratio 1.055~1.063），绝不可能是 A 系图框（最扁
+                                #   A 竖 1.414，历史图框 ratio 观测下限 1.343）。
+                                #   初版下限 1.05 放它们进来：S010 假阳性 +1（条件I
+                                #   表格救援救回 1 份）、一层.dwg 分母被计回 2e10
+                                #   膨胀 187 倍 → 家具候选 rel 全崩 → fc 11→0 抛错。
+                                _rratio = max(_rw, _rh) / _rshort
+                                if not (1.30 <= _rratio <= FRAME_RATIO_MAX):
+                                    continue
+                                _rarea = polygon_area(_wl)
+                                if _rarea <= 0 or _rw * _rh <= 0:
+                                    continue
+                                _rgk = (round(_rw), round(_rh))
+                                _lbxs = [p[0] for p in _pv]
+                                _lbys = [p[1] for p in _pv]
+                                _resc_groups.setdefault(_rgk, []).append({
+                                    'bbox': (_rx1, _ry1, _rx2, _ry2),
+                                    'area': _rw * _rh,
+                                    'rect': _rarea / (_rw * _rh),
+                                    # R58：源子块名 + 块定义局部 bbox（块内内容证据计数用）
+                                    'src_block': _blk_name,
+                                    'local_bbox': (min(_lbxs), min(_lbys),
+                                                   max(_lbxs), max(_lbys)),
+                                })
+                                _resc_all.append({
+                                    'bbox': (_rx1, _ry1, _rx2, _ry2),
+                                    'area': _rw * _rh,
+                                })
+                            except Exception:
                                 continue
-                            if not is_polyline_closed(_ent_in):
-                                continue
-                            if _closed_polyline_rect_len(_ent_in, _tol_p_res) <= 0:
-                                continue
-                            _pv = get_polyline_vertices(_ent_in)
-                            if len(_pv) < 3:
-                                continue
-                            # 块内坐标 → 世界坐标：p = insert + R(rot)·S·(p − base)
-                            _wl = []
-                            for (_px, _py) in _pv:
-                                _qx = (_px - _bpx) * _xs
-                                _qy = (_py - _bpy) * _ys
-                                if _ins_rot:
-                                    _rad_r = _math.radians(_ins_rot)
-                                    _cr_r = _math.cos(_rad_r)
-                                    _sr_r = _math.sin(_rad_r)
-                                    _qx, _qy = (_qx * _cr_r - _qy * _sr_r,
-                                                _qx * _sr_r + _qy * _cr_r)
-                                _qx += _ip[0]
-                                _qy += _ip[1]
-                                if _rot is not None:
-                                    _qx, _qy = _rot_pt(_qx, _qy)
-                                _wl.append((_qx, _qy))
-                            _rxs = [p[0] for p in _wl]
-                            _rys = [p[1] for p in _wl]
-                            _rx1, _ry1 = min(_rxs), min(_rys)
-                            _rx2, _ry2 = max(_rxs), max(_rys)
-                            _rw = _rx2 - _rx1
-                            _rh = _ry2 - _ry1
-                            if _rw <= 0 or _rh <= 0:
-                                continue
-                            _rshort = min(_rw, _rh)
-                            if _rshort < 20000:
-                                continue
-                            # ratio 下限 1.30（R40 回归修正）：近方形 1.0~1.1 的
-                            #   "多份同尺寸闭合矩形"是建筑轮廓/平面图边界/表格边界
-                            #   形态（北区商业街拼接底图块 137089×145635×11 等
-                            #   ratio 1.055~1.063），绝不可能是 A 系图框（最扁
-                            #   A 竖 1.414，历史图框 ratio 观测下限 1.343）。
-                            #   初版下限 1.05 放它们进来：S010 假阳性 +1（条件I
-                            #   表格救援救回 1 份）、一层.dwg 分母被计回 2e10
-                            #   膨胀 187 倍 → 家具候选 rel 全崩 → fc 11→0 抛错。
-                            _rratio = max(_rw, _rh) / _rshort
-                            if not (1.30 <= _rratio <= FRAME_RATIO_MAX):
-                                continue
-                            _rarea = polygon_area(_wl)
-                            if _rarea <= 0 or _rw * _rh <= 0:
-                                continue
-                            _rgk = (round(_rw), round(_rh))
-                            _resc_groups.setdefault(_rgk, []).append({
-                                'bbox': (_rx1, _ry1, _rx2, _ry2),
-                                'area': _rw * _rh,
-                                'rect': _rarea / (_rw * _rh),
-                            })
-                            _resc_all.append({
-                                'bbox': (_rx1, _ry1, _rx2, _ry2),
-                                'area': _rw * _rh,
-                            })
-                        except Exception:
-                            continue
+                    _resc_scan(_bn, 0, _resc_tf_top,
+                               (_bn, round(_ip[0], 3), round(_ip[1], 3),
+                                round(_xs, 6), round(_ys, 6),
+                                round(_ins_rot, 3)))   # R58：顶层 + 一层嵌套子块
                     # R43 嵌套图框对救援：块内仅 1 份外框 + 1 份内框（同层
                     #   标题栏嵌套体系，外框=图框、内框=装订边/内框线），
                     #   两份尺寸各只有 1 份 → R40 "≥2 份同尺寸" 判据不命中
@@ -2007,6 +2092,9 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                                 'layout': layout_name,
                                 'rectangularity': _rm['rect'],
                                 'block_name': _bn,
+                                # R58：源子块（框架实际所在层，可能深一层）+ 局部 bbox
+                                'src_block': _rm.get('src_block', _bn),
+                                'local_bbox': _rm.get('local_bbox'),
                                 'insert_layer': _entity.dxf.layer,
                                 'block_def_w': 0.0,
                                 'block_def_h': 0.0,
@@ -2732,6 +2820,58 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
 
         def _cond_d_entity_count(c):
             _ln = c['layout']
+            # R58：救援候选（块内闭合线）的内容证据在源子块定义内计数——
+            #   嵌套子块内的图框（P_10# 23780×16820）其内容全在块定义里，
+            #   布局顶层实体计数恒 0。用候选携带的 src_block + local_bbox
+            #   在块定义坐标系内做严格内部包含计数（递归取嵌套 INSERT 的
+            #   定义 bbox，与 _block_max_member_len 同口径）。
+            if c.get('type') == '块内闭合线' and c.get('src_block') and c.get('local_bbox'):
+                _sb = c['src_block']
+                _ck = ('blk', _sb)
+                if _ck not in _cond_d_ent_bbs:
+                    _bbs = []
+                    if _sb in doc.blocks:
+                        for ent in doc.blocks[_sb]:
+                            try:
+                                _t = ent.dxftype()
+                                if _t == 'LINE':
+                                    _bb = (min(ent.dxf.start.x, ent.dxf.end.x),
+                                           min(ent.dxf.start.y, ent.dxf.end.y),
+                                           max(ent.dxf.start.x, ent.dxf.end.x),
+                                           max(ent.dxf.start.y, ent.dxf.end.y))
+                                elif _t == 'LWPOLYLINE':
+                                    _ps = ent.get_points('xy')
+                                    if not _ps:
+                                        continue
+                                    _bx = [p[0] for p in _ps]; _by = [p[1] for p in _ps]
+                                    _bb = (min(_bx), min(_by), max(_bx), max(_by))
+                                elif _t == 'INSERT':
+                                    _sbb = _get_block_world_bbox(ent.dxf.name)
+                                    if _sbb is None:
+                                        continue
+                                    _sx = getattr(ent.dxf, 'xscale', 1) or 1
+                                    _sy = getattr(ent.dxf, 'yscale', 1) or 1
+                                    _bb = (_sbb[0], _sbb[1], _sbb[2], _sbb[3])
+                                    if _sx != 1 or _sy != 1:
+                                        _bb = (_sbb[0] * _sx, _sbb[1] * _sy,
+                                               _sbb[2] * _sx, _sbb[3] * _sy)
+                                else:
+                                    continue
+                            except Exception:
+                                continue
+                            if _bb is not None:
+                                _bbs.append(_bb)
+                    _cond_d_ent_bbs[_ck] = _bbs
+                _lx1, _ly1, _lx2, _ly2 = c['local_bbox']
+                _ltol = COND_D_INNER_TOL
+                _nb = 0
+                for _bx1, _by1, _bx2, _by2 in _cond_d_ent_bbs[_ck]:
+                    if (_bx1 >= _lx1 + _ltol and _by1 >= _ly1 + _ltol and
+                            _bx2 <= _lx2 - _ltol and _by2 <= _ly2 - _ltol):
+                        _nb += 1
+                        if _nb >= COND_D_MIN_ENTITIES:
+                            break
+                return _nb
             if _ln not in _cond_d_ent_bbs:
                 if _ln == '模型空间':
                     _lay = msp
@@ -2850,6 +2990,23 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     and c['ratio'] <= 2.5
                     and ((c['type'] == '直线矩形' and c['ratio'] >= LINE_RECT_C_RATIO_MIN)
                          or (c['type'] != '直线矩形' and _at_least_sqrt2))):
+                # R58：块参照候选过 C 需矩形闭合证据——内容块冒充图框的最后的门。
+                #   场景（P_10#给排水平面图.dwg）：10haolouerceng/103层22 结构平
+                #   面内容块（30200×47400，ratio 1.57）内 9 顶点 S-FLOOR 楼板环
+                #   bbox 恰为块尺寸 → R27 旧口径"任何闭合环 bbox 都算证据"放行
+                #   → rel 28.7% 过 C 冒充图框。要求块内存在**矩形**闭合证据
+                #   （矩形闭合多段线 / LINE 横竖簇配对环，_rect_only 口径）长边
+                #   ≥ 块长边×50%（与 R27 同比例）——真图框块必为矩形边框画法，
+                #   不受影响；R36 非矩形范围线块（ratio 1.238 <1.343）本就过不了
+                #   C、走条件I，亦不受影响（回归用例 57/58 守护）。
+                if c['type'] == '块参照插入':
+                    _cbl_def = max(abs(c.get('block_def_w', 0.0)),
+                                   abs(c.get('block_def_h', 0.0)))
+                    # block_rect_len = R36 已预计算的 _rect_only 闭合矩形证据
+                    #   （collect 阶段 _block_closed_frame_len(..., _rect_only=True)）
+                    if (_cbl_def <= 0
+                            or c.get('block_rect_len', 0.0) < _cbl_def * 0.5):
+                        return False
                 c['_via'] = 'C'
                 return True
             # 条件B：显式检测 + 短边在合理范围（绕过面积占比，适用于密集几何场景）
@@ -2915,11 +3072,26 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #   （内容证据 ≥12 本身已是强证据，无需再复核）。
             #   开关 FRAME_PARSER_NO_COND_F=1 可关（回退旧行为）。
             if (os.environ.get('FRAME_PARSER_NO_COND_F') != '1'
-                    and c['type'] in EXPLICIT_TYPES
+                    and (c['type'] in EXPLICIT_TYPES
+                         # R58：块内闭合线（救援提升候选）也走 F——其矩形度/ratio
+                         #   已在救援判据前置把关，这里补 ratio±2% + rel 窗口 +
+                         #   内容证据（或嵌套对豁免）。
+                         or c['type'] == '块内闭合线')
                     and abs(c['ratio'] - _SQRT2) / _SQRT2 <= 0.02
                     and 0.003 <= c['rel_area_ratio'] < REL_AREA_THRESHOLD
-                    and c['short_side'] >= 20000
-                    and _cond_d_entity_count(c) >= COND_D_MIN_ENTITIES):
+                    and (c['short_side'] >= 20000
+                         # R58：救援来源的块内闭合线放宽到 15000——嵌套子块内的
+                         #   A3 缩印框（P_10# 23780×16820，短边 16820）rel 8% 过
+                         #   不了 C、短边 <20000 过不了 F 本门槛 → 漏检。救援本身
+                         #   已有 ratio∈[1.30,5.5] + "≥2 份同尺寸/嵌套对" 判据 +
+                         #   矩形度前置，放宽安全。
+                         or (c['short_side'] >= 15000 and c['type'] == '块内闭合线'))
+                    and (_cond_d_entity_count(c) >= COND_D_MIN_ENTITIES
+                         # R58：嵌套对提升的块内闭合线豁免内容计数——其内容在
+                         #   深层子块里计数困难（P_10# 23780 框内仅 1 个实体=内框
+                         #   兄弟），而 R43 嵌套对判据（严格嵌套 + 面积比
+                         #   [0.85,0.995]）本身已是强证据（d008 同款提升路径）。
+                         or (c['type'] == '块内闭合线' and c.get('nested_pair')))):
                 c['_via'] = 'F'
                 return True
             # 条件F-纸面（R56）：纸面比例模式的孤证 A 系纸通道。
