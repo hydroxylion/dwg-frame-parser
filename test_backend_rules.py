@@ -2076,4 +2076,40 @@ check('R58护栏: 非巨型ratio失配块仍预筛剔除, fc=1 (smart)',
       and not any(abs(c['width'] - 60000) < 5 for c in r['candidates']))
 
 
+# ---- 用例 77：R59 闭合多段线条件C上限收窄（X-11号平面.dwg 4→0） ----
+# 场景复刻：图中无任何图框，但 4 个"完美矩形"闭合多段线冒充图框——
+# 1× 49000×21500（填充层大框，框内 92 实体）+ 3× 19600×8600（A-WALL 墙轮廓，
+# 框内仅 3~4 实体），全部 4 顶点矩形度 1.000、ratio 2.2791。原 2.5 上限放行
+# 过条件 C（大框 rel=100%、小框 rel≈16%）→ fc=4 误报。R59 将闭合多段线
+# 条件 C 上限收到 2.15（合法观测上限 2.124）→ 4 个全部拒绝，fc=0。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, -35852, -14758, 49000, 21500)
+for _k in range(20):   # 大框内内容（填充边界周边几何，保持真实感）
+    msp.add_line((-34000, -13000 + _k * 900), (10000, -13000 + _k * 900))
+for _i, _x0 in enumerate((95389, 188941, 286218)):
+    _dy = -33358 + _i * 640
+    add_closed_rect(msp, _x0, _dy, 19600, 8600)
+    for _k in range(3):   # 墙轮廓内稀疏内容
+        msp.add_line((_x0 + 2000, _dy + 2000 + _k * 1500), (_x0 + 17000, _dy + 2000 + _k * 1500))
+data = to_bytes(doc)
+check('R59闭合多段线C上限收窄: 墙轮廓矩形(2.28)全部拒绝, fc=0 (smart)',
+      lambda: expect_error_no_frame(data),
+      lambda ok: ok)
+
+# ---- 用例 78：R59 护栏——合法加长比例闭合多段线图框不受收窄影响 ----
+# 126150×59409（ratio 2.124 ≤ 2.15，回归中合法观测上限）闭合多段线图框
+# 仍应经条件 C 正常识别，守护收窄边界不误杀临界合法图框。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 0, 0, 126150, 59409)
+for _k in range(15):
+    msp.add_line((2000, 2000 + _k * 3500), (124000, 2000 + _k * 3500))
+data = to_bytes(doc)
+check('R59护栏: 合法ratio 2.124闭合多段线图框仍识别, fc=1 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and abs(r['width'] - 126150) < 5 and abs(r['height'] - 59409) < 5)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

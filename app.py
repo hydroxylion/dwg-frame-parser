@@ -2647,6 +2647,15 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         #   矩形 ratio 1.174 → 1.343 下限漏 2 张）→ 直线矩形下限放到 1.10（仍高于
         #   真·近正方形 1.0x，且须同时满足 rel≥10% 与 ratio≤2.5）。
         LINE_RECT_C_RATIO_MIN = 1.10
+        # 条件 C 对「闭合多段线」单独收窄的长宽比上限（2026-09-30，X-11号平面.dwg 4→0）：
+        #   原与其它类型共用 2.5 上限，但闭合多段线"内容区/墙体轮廓画成完美矩形"
+        #   无形状差异可辨——X-11号平面 4 个误报（49000×21500 填充层大框 +
+        #   3× 19600×8600 A-WALL 墙轮廓，全部 4 顶点矩形度 1.000）ratio 2.2791
+        #   正是钻了 2.5 的余量。54 张回归基线中，(2.15, 2.5] 区间不存在任何
+        #   合法闭合多段线图框（合法观测上限 2.124 = 126150×59409；两个 >2.15
+        #   的合法图框 84100×29700=2.832、237369×89610=2.649 均 >2.5，本就不经
+        #   条件 C 通过）→ 闭合多段线上限收到 2.15，直线矩形/块类维持 2.5。
+        _CLOSED_POLY_C_RATIO_MAX = 2.15
 
         for c in all_candidates:
             c['ratio'] = normalized_ratio(c['width'], c['height'])
@@ -2987,7 +2996,8 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #   仍拦不住"内容区/平面外框画成闭合矩形"（世欧澜山 45641×55212 ratio 1.21
             #   闭合多段线曾作 layout 最大候选包裹剔除 2 个真页框，fc 15→14）。
             if (c['rel_area_ratio'] >= REL_AREA_THRESHOLD
-                    and c['ratio'] <= 2.5
+                    and c['ratio'] <= (2.5 if c['type'] != '闭合多段线'
+                                       else _CLOSED_POLY_C_RATIO_MAX)
                     and ((c['type'] == '直线矩形' and c['ratio'] >= LINE_RECT_C_RATIO_MIN)
                          or (c['type'] != '直线矩形' and _at_least_sqrt2))):
                 # R58：块参照候选过 C 需矩形闭合证据——内容块冒充图框的最后的门。
