@@ -2177,4 +2177,46 @@ check('R61块内页框豁免旋转: 斜线主导+块内轴对齐页框不旋转,
               for c in r['candidates']))
 
 
+# ---- 用例 82：R62 形态A——单页图框块免被底图包络巨框「留大剔小」 ----
+# 场景复刻（1#,8#住宅0721出图_t5）：单页模板块（块定义 84100×59400+内框）实例
+# 通过特征检查后，被顶层闭合多段线巨框（底图包络，rel=100%，面积 ≥4×、比例差
+# >10%）按去重规则 1 嵌套剔小。R62 保护后块实例候选保留。
+doc = make_doc()
+msp = doc.modelspace()
+_blk_spb = doc.blocks.new(name='TMP_SPB')
+add_closed_rect(_blk_spb, 0, 0, 84100, 59400)
+add_closed_rect(_blk_spb, 1000, 1000, 80600, 57400)
+msp.add_blockref('TMP_SPB', (0, 0))
+add_closed_rect(msp, 0, -200000, 280000, 95000)   # 底图包络巨框（面积 5.3×、ratio 2.95）
+data = to_bytes(doc)
+check('R62形态A去重保护: 单页图框块免被包络巨框剔小, 块候选保留 (smart)',
+      lambda: parse(data),
+      lambda r: any(abs(c['width'] - 84100) < 5 and abs(c['height'] - 59400) < 5
+                    for c in r['candidates']))
+
+
+# ---- 用例 83：R62 形态B——同尺寸表格页互证救援块参照加长页框 ----
+# 场景复刻（wetwetwt 块）：加长页框 16820×32700（ratio 1.944 非 √2）以两种形态
+# 存在——顶层闭合多段线 1 张（框内 30 横+6 竖表格 LINE，条件I 主判据救）+ 模板
+# 块 2 实例（块内表格是 LWPOLYLINE 单元格，无 LINE → 横竖线计数 0）。R62 前块
+# 实例漏检；互证通道：与已确认表格页同尺寸（±2%）→ 放行，fc=3。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 0, 0, 16820, 32700)            # 顶层表格页（闭合多段线）
+for _k in range(30):                                 # 表格行线（横）
+    msp.add_line((1000, 2000 + _k * 1000), (15800, 2000 + _k * 1000))
+for _k in range(6):                                  # 列分隔线（竖）
+    msp.add_line((2000 + _k * 2500, 1000), (2000 + _k * 2500, 31700))
+_blk_tp = doc.blocks.new(name='TMP_TBLPEER')
+add_closed_rect(_blk_tp, 0, 0, 16820, 32700)         # 页框（块内表格为 LWPOLYLINE 单元格，非 LINE）
+msp.add_blockref('TMP_TBLPEER', (200000, 0))
+msp.add_blockref('TMP_TBLPEER', (200000, -100000))
+data = to_bytes(doc)
+check('R62形态B同尺寸表格页互证: 块参照加长页框×2 放行, fc=3 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 3
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 16820) < 340 and abs(c['height'] - 32700) < 660) == 3)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

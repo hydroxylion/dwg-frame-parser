@@ -3638,6 +3638,86 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         _nv += 1
                 return _nh, _nv
 
+            # R62 形态B：块参照候选展开块定义计数表格线。块内表格线对
+            #   _table_lines_in（只扫 layout 顶层 LINE）不可见——1#,8#住宅
+            #   wetwetwt 块（16820×32700 加长页框，2 LWPOLYLINE + 5 子块表格）
+            #   实例周边无顶层散线，横竖线计 0，条件I 无法救援。
+            #   实例无旋转（全局旋转矫正未触发且候选非 tilted）时，块定义
+            #   局部 bbox 内的线经缩放平移映射后必然落入实例世界 bbox，
+            #   可在块定义局部坐标系直接计数。结果按块名缓存。
+            _blk_tl_cache = {}
+
+            def _table_lines_in_block_def(_bn):
+                if _bn in _blk_tl_cache:
+                    return _blk_tl_cache[_bn]
+                _res = (0, 0)
+                try:
+                    _bb = _get_block_world_bbox(_bn)
+                    _blk = doc.blocks.get(_bn)
+                    if _bb is not None and _blk is not None:
+                        _lx1, _ly1, _lx2, _ly2 = _bb
+                        _ltol = max(_lx2 - _lx1, _ly2 - _ly1) * 0.005
+                        _bh = _bv = 0
+
+                        def _acc(_sx, _sy, _ex, _ey):
+                            nonlocal _bh, _bv
+                            if not (_lx1 <= _sx <= _lx2 and _lx1 <= _ex <= _lx2 and
+                                    _ly1 <= _sy <= _ly2 and _ly1 <= _ey <= _ly2):
+                                return
+                            if abs(_sy - _ey) <= _ltol:
+                                _bh += 1
+                            elif abs(_sx - _ex) <= _ltol:
+                                _bv += 1
+
+                        for _e in _blk:
+                            try:
+                                if _e.dxftype() == 'LINE':
+                                    _acc(_e.dxf.start.x, _e.dxf.start.y,
+                                         _e.dxf.end.x, _e.dxf.end.y)
+                                elif _e.dxftype() == 'INSERT':
+                                    # 一层子块：p = s_ip − s_bp + R(rot)·S·p
+                                    _sbn = _e.dxf.name
+                                    _sblk = doc.blocks.get(_sbn)
+                                    if _sblk is None:
+                                        continue
+                                    try:
+                                        _sbp = _sblk.block.dxf.base_point
+                                        _sbx, _sby = _sbp.x, _sbp.y
+                                    except Exception:
+                                        _sbx, _sby = 0.0, 0.0
+                                    _sx0 = _e.dxf.insert.x - _sbx
+                                    _sy0 = _e.dxf.insert.y - _sby
+                                    _sxs = getattr(_e.dxf, 'xscale', 1) or 1
+                                    _sys_ = getattr(_e.dxf, 'yscale', 1) or 1
+                                    _srot = getattr(_e.dxf, 'rotation', 0) or 0
+                                    _rad_s = _math.radians(_srot)
+                                    _cr_s = _math.cos(_rad_s)
+                                    _sr_s = _math.sin(_rad_s)
+                                    for _se in _sblk:
+                                        if _se.dxftype() != 'LINE':
+                                            continue
+                                        try:
+                                            _ax, _ay = _se.dxf.start.x, _se.dxf.start.y
+                                            _bx2, _by2 = _se.dxf.end.x, _se.dxf.end.y
+                                            _qxa = _ax * _sxs
+                                            _qya = _ay * _sys_
+                                            _qxb = _bx2 * _sxs
+                                            _qyb = _by2 * _sys_
+                                            _wxa = _qxa * _cr_s - _qya * _sr_s + _sx0
+                                            _wya = _qxa * _sr_s + _qya * _cr_s + _sy0
+                                            _wxb = _qxb * _cr_s - _qyb * _sr_s + _sx0
+                                            _wyb = _qxb * _sr_s + _qyb * _cr_s + _sy0
+                                            _acc(_wxa, _wya, _wxb, _wyb)
+                                        except Exception:
+                                            continue
+                            except Exception:
+                                continue
+                        _res = (_bh, _bv)
+                except Exception:
+                    _res = (0, 0)
+                _blk_tl_cache[_bn] = _res
+                return _res
+
             _in_fl_i = {id(c) for c in frame_like}
             _i_added = []
             # R49：块候选可见性前置（08，09-MW-FP006 误检 3 实际 2）。块 DOTE
@@ -3687,7 +3767,16 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                        _c['bbox'][2] <= _f['bbox'][2] + 1 and _c['bbox'][3] <= _f['bbox'][3] + 1
                        for _f in frame_like):
                     continue   # 被已入选框包住：是内部内容，不救
+                # R62 形态B：块参照候选（无旋转实例）在顶层计数之外**合并**块定义
+                #   局部坐标计数（不能替换——1#,8#住宅 1051×594 组的块参照候选
+                #   依赖顶层散线救援，替换会误伤；块内表格线是增量证据）
                 _nh, _nv = _table_lines_in(_c['bbox'], _c['layout'])
+                if (_c['type'] == '块参照插入' and _c.get('block_name')
+                        and _LAYOUT_ROT.get(_c['layout']) is None
+                        and not _c.get('tilted')):
+                    _bh2, _bv2 = _table_lines_in_block_def(_c['block_name'])
+                    _nh += _bh2
+                    _nv += _bv2
                 if _nh >= 30 and _nv >= 6:
                     _c['rescued_by'] = 'table_page'
                     frame_like.append(_c)
@@ -3696,6 +3785,50 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     safe_log(f"   [条件I·表格内容页救援] {_c['type']} "
                              f"{_c['width']:.0f}×{_c['height']:.0f}"
                              f"（框内横线 {_nh} 条 / 竖线 {_nv} 条，判为表格页）")
+
+            # R62 形态B：同尺寸表格页互证（第二轮 pass）。块参照形态的表格页
+            #   （1#,8#住宅 wetwetwt：16820×32700 加长页框，块内表格是
+            #   LWPOLYLINE 单元格而非 LINE）框内横竖 LINE 计数达不到 30/6，
+            #   无法被条件I 主判据救援；但同一尺寸组已有 ≥1 张被条件I 确认的
+            #   表格页（顶层闭合多段线同款，横线 353/506/582 条）——同模板
+            #   同尺寸页互证放行。判据（全部满足才救）：
+            #   ① 与某张 rescued_by='table_page' 的已入选框尺寸一致（±2%）；
+            #   ② 未被任何已入选图框完全包住（同主循环判据③）；
+            #   ③ R49 隐形块护栏（块内实体全部 off/frozen 图层 → 跳过）。
+            #   开关 FRAME_PARSER_NO_TABLE_PEER=1 回退。
+            if os.environ.get('FRAME_PARSER_NO_TABLE_PEER') != '1' and _i_added:
+                _peer_added = []
+                for _c in all_candidates:
+                    if id(_c) in _in_fl_i:
+                        continue
+                    if _c['width'] < 5000 or _c['height'] < 5000:
+                        continue
+                    if not (FRAME_RATIO_MIN <= _c['ratio'] <= FRAME_RATIO_MAX):
+                        continue
+                    if _c['type'] == '块参照插入' and _c.get('block_name') \
+                            and _block_all_invisible(_c['block_name']):
+                        continue
+                    if any(_c['bbox'][0] >= _f['bbox'][0] - 1 and _c['bbox'][1] >= _f['bbox'][1] - 1 and
+                           _c['bbox'][2] <= _f['bbox'][2] + 1 and _c['bbox'][3] <= _f['bbox'][3] + 1
+                           for _f in frame_like):
+                        continue
+                    _hit = None
+                    for _f in _i_added:
+                        if (abs(_c['width'] - _f['width']) <= 0.02 * max(_c['width'], _f['width'])
+                                and abs(_c['height'] - _f['height']) <= 0.02 * max(_c['height'], _f['height'])):
+                            _hit = _f
+                            break
+                    if _hit is not None:
+                        _c['rescued_by'] = 'table_peer'
+                        frame_like.append(_c)
+                        _in_fl_i.add(id(_c))
+                        _peer_added.append(_c)
+                        safe_log(f"   [条件I·同尺寸表格页互证] {_c['type']} "
+                                 f"{_c['width']:.0f}×{_c['height']:.0f}"
+                                 f"（与已确认表格页 {_hit['width']:.0f}×{_hit['height']:.0f}"
+                                 f" 同尺寸同模板，互证放行）")
+                if _peer_added:
+                    pass_feature_count = len(frame_like)
             if _i_added:
                 pass_feature_count = len(frame_like)
 
@@ -4337,6 +4470,44 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             _off_y = abs((c['bbox'][1] + c['bbox'][3]) - (outer['bbox'][1] + outer['bbox'][3])) / 2.0
             return max(_off_x, _off_y) / _mx >= 0.05
 
+        def _single_page_block_protect(c, outer):
+            """R62 形态A：单页图框块免被巨型包裹框「留大剔小」。
+
+            场景（1#,8#住宅0721出图_t5）：块 qwetwetwtt（块定义 133800×84100
+            单页模板）2 个实例的 134300×84600 候选通过特征检查后，被顶层
+            闭合多段线巨框 388331×215417（整个底图的包络，rel=100%）按
+            嵌套规则 1 剔小。包裹框剔除未剔巨框（inners 仅 1 组×2 份，
+            MIN_WRAPPED_FRAMES/MIN_WRAPPED_SAME_SIZE/_dom_hit 均不满足）。
+            判据（全部满足才保护）：
+            ① 小候选类型为「块参照插入」且带块定义尺寸；
+            ② 块定义比例 ≈ 候选比例（±5%）——块定义本身是一张页框，不是
+               多页拼版容器（拼版块 bbox 是合并外接框，比例会偏离单页），
+               斜放/各向异性缩放实例也过不了本条（bbox 比例会偏离块定义）；
+            ③ 候选与外框比例差 >10%——排除同框重复画法（重复画法比例必
+               与外框一致，照旧剔小）；
+            ④ 外框面积 ≥4× 候选——真·标题栏嵌套体系（内框⊂外框）面积比
+               通常 ∈ [0.85, 0.995]，远达不到 1/4。
+            """
+            if c.get('type') != '块参照插入':
+                return False
+            bdw, bdh = c.get('block_def_w') or 0, c.get('block_def_h') or 0
+            if bdw <= 0 or bdh <= 0:
+                return False
+            cw_, ch_ = c['width'], c['height']
+            ow_, oh_ = outer['width'], outer['height']
+            if min(cw_, ch_) <= 0 or min(ow_, oh_) <= 0:
+                return False
+            if outer['area'] < c['area'] * 4:
+                return False
+            _cr = max(cw_, ch_) / min(cw_, ch_)
+            _br = max(bdw, bdh) / min(bdw, bdh)
+            _or = max(ow_, oh_) / min(ow_, oh_)
+            if abs(_br - _cr) / _cr > 0.05:
+                return False
+            if abs(_cr - _or) / _or <= 0.10:
+                return False
+            return True
+
         def deduplicate_candidates(cands):
             """按 layout 分组，组内去除嵌套候选和高度重叠候选，保留面积最大者"""
             if len(cands) <= 1:
@@ -4369,9 +4540,14 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                 cx1 >= ox1 - NESTED_EPS and cy1 >= oy1 - NESTED_EPS and
                                 cx2 <= ox2 + NESTED_EPS and cy2 <= oy2 + NESTED_EPS and
                                 c['area'] < outer['area'] * NESTED_AREA_RATIO):
-                            should_remove = True
-                            hit_outer = outer
-                            break
+                            # R62 形态A：单页图框块保护（见 _single_page_block_protect）
+                            if _single_page_block_protect(c, outer):
+                                log_debug(f"    [去重保护] {c['width']:.0f}x{c['height']:.0f}@{c['layout']} "
+                                          f"单页图框块，免被 {outer['width']:.0f}x{outer['height']:.0f} 底图包络剔除")
+                            else:
+                                should_remove = True
+                                hit_outer = outer
+                                break
                         # 规则2：IoU 重叠——c 与 outer 重叠度 > 阈值，且面积不大于 outer
                         #   <= 而非 <：面积完全相等的重叠矩形（同一图框被画两遍/检测两次）
                         #   也必须去重，否则同一图框会被重复计数（IoU=1.0 却因面积相等被跳过）
