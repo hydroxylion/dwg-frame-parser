@@ -253,7 +253,7 @@ ROT_EXEMPT_MIN_SHORT = 2000   # 短边下限：图框级（低于此视为内容
 _LAYOUT_ROT = {}
 
 
-def _estimate_global_rotation(entities):
+def _estimate_global_rotation(entities, _blocks=None):
     """估计图纸整体主方向并返回旋转矩阵参数 (cosθ, sinθ)（把主方向转回水平/垂直）。
     参与线段：LINE 方向 + LWPOLYLINE 相邻边方向（无向角，归约到 [0, π)），按长度加权。
     判定（全部满足才旋转）：
@@ -267,6 +267,36 @@ def _estimate_global_rotation(entities):
     _total_len = 0.0
     _seg_cnt = 0
     _axis_frame_seen = False   # 豁免探测：图中存在轴对齐图框级闭合矩形
+
+    def _axis_rect_check(_ent):
+        """轴对齐图框级闭合矩形判定（豁免探测共用）：closed（或首尾重合）
+        LWPOLYLINE，去重端点后恰 4 顶点、x/y 各 ≤2 个不同值（1mm 容差），
+        比例与短边图框级才计"存在"（内容小矩形不豁免）。
+        返回命中矩形的周长（不命中返回 0）。"""
+        _pts = list(_ent.get_points('xy'))
+        if len(_pts) < 4 or not (_ent.closed or _m.hypot(
+                _pts[0][0] - _pts[-1][0], _pts[0][1] - _pts[-1][1]) <= 1.0):
+            return 0
+        _pp = _pts[:-1] if (not _ent.closed and len(_pts) == 5) else _pts
+        if len(_pp) != 4:
+            return 0
+        _xs = sorted(p[0] for p in _pp)
+        _ys = sorted(p[1] for p in _pp)
+        _nx = 1 + sum(1 for _a, _b in zip(_xs, _xs[1:]) if _b - _a > 1.0)
+        _ny = 1 + sum(1 for _a, _b in zip(_ys, _ys[1:]) if _b - _a > 1.0)
+        if _nx > 2 or _ny > 2:
+            return 0
+        _w = _xs[-1] - _xs[0]
+        _h = _ys[-1] - _ys[0]
+        if _w > 0 and _h > 0:
+            _rr = max(_w, _h) / min(_w, _h)
+            if (ROT_EXEMPT_RATIO_MIN <= _rr <= ROT_EXEMPT_RATIO_MAX
+                    and min(_w, _h) >= ROT_EXEMPT_MIN_SHORT):
+                return 2 * (_w + _h)
+        return 0
+
+    _blk_axis_len = {}   # R61b：块名 -> 块定义内轴对齐页框周长合计（局部坐标）
+    _axis_weighted = 0.0  # R61b：页框周长按实例数×缩放加权累计
     for _ent in entities:
         try:
             _t = _ent.dxftype()
@@ -277,26 +307,32 @@ def _estimate_global_rotation(entities):
                 _pts = list(_ent.get_points('xy'))
                 _segs = [((a[0], a[1]), (b[0], b[1]))
                          for a, b in zip(_pts, _pts[1:] + _pts[:1])]
-                # 豁免探测：closed（或首尾重合）LWPOLYLINE，去重端点后恰 4 顶点、
-                # x/y 各 ≤2 个不同值（1mm 容差）→ 轴对齐矩形；比例与短边图框级
-                # 才计"存在"（内容小矩形不豁免）。
-                if not _axis_frame_seen and len(_pts) >= 4 and (
-                        _ent.closed or _m.hypot(_pts[0][0] - _pts[-1][0],
-                                                _pts[0][1] - _pts[-1][1]) <= 1.0):
-                    _pp = _pts[:-1] if (not _ent.closed and len(_pts) == 5) else _pts
-                    if len(_pp) == 4:
-                        _xs = sorted(p[0] for p in _pp)
-                        _ys = sorted(p[1] for p in _pp)
-                        _nx = 1 + sum(1 for _a, _b in zip(_xs, _xs[1:]) if _b - _a > 1.0)
-                        _ny = 1 + sum(1 for _a, _b in zip(_ys, _ys[1:]) if _b - _a > 1.0)
-                        if _nx <= 2 and _ny <= 2:
-                            _w = _xs[-1] - _xs[0]
-                            _h = _ys[-1] - _ys[0]
-                            if _w > 0 and _h > 0:
-                                _rr = max(_w, _h) / min(_w, _h)
-                                if (ROT_EXEMPT_RATIO_MIN <= _rr <= ROT_EXEMPT_RATIO_MAX
-                                        and min(_w, _h) >= ROT_EXEMPT_MIN_SHORT):
-                                    _axis_frame_seen = True
+                # 豁免探测：顶层轴对齐图框级闭合矩形
+                if not _axis_frame_seen and _axis_rect_check(_ent) > 0:
+                    _axis_frame_seen = True
+            elif _t == 'INSERT':
+                # R61 豁免探测扩展（美立方-说明.dwg）：模板块内的页框也是
+                #   图框——顶层无任何图框级几何、页框全在块内时，旧探测扫不
+                #   到 → 误施加 ~93.5° 旋转矫正，84100×59400 页框被转成膨胀
+                #   外接框 64423×87569（AABB 膨胀 ≈ cos3.5°/sin3.5° 混合）。
+                #   R61b 支配性门槛：块内轴对齐页框周长（按实例数加权）须
+                #   ≥ 顶层线段总长 ×10 才豁免——真斜图（总图-排水 3.3°）里
+                #   零星内容块（格栅井大样）也可能含轴对齐矩形（比值仅 2.45），
+                #   无支配性即豁免会破坏真斜图的矫正（298×422→1265×929 回归）；
+                #   美立方比值 52.9（页框周长压倒性主导）。
+                _blk_inst_cnt = _blk_axis_len.get(_ent.dxf.name)
+                if _blk_inst_cnt is None:
+                    _blk_inst_cnt = 0
+                    try:
+                        for _be in _blocks.get(_ent.dxf.name):
+                            if _be.dxftype() == 'LWPOLYLINE':
+                                _blk_inst_cnt += _axis_rect_check(_be)
+                    except Exception:
+                        pass
+                    _blk_axis_len[_ent.dxf.name] = _blk_inst_cnt
+                _axis_weighted += (_blk_inst_cnt
+                                   * abs(getattr(_ent.dxf, 'xscale', 1) or 1))
+                continue
             else:
                 continue
             for (_x1, _y1), (_x2, _y2) in _segs:
@@ -338,6 +374,13 @@ def _estimate_global_rotation(entities):
                  f"但图中存在轴对齐的图框级闭合矩形（短边≥{ROT_EXEMPT_MIN_SHORT}、"
                  f"比例 {ROT_EXEMPT_RATIO_MIN}~{ROT_EXEMPT_RATIO_MAX}）——图框本已轴对齐，"
                  f"跳过旋转（避免把正图框转斜，D011_t3 场景）")
+        return None
+    # R61b：块内轴对齐页框支配性豁免（按实例数×缩放加权，≥ 顶层线段总长 ×10）
+    if _axis_weighted >= _total_len * 10:
+        safe_log(f"  [旋转矫正豁免] 主方向 {_theta / _m.pi * 180:.1f}° 虽触发旋转条件，"
+                 f"但块内轴对齐图框级页框周长（按实例加权 {_axis_weighted:,.0f}）"
+                 f"≥ 顶层线段总长（{_total_len:,.0f}）×10——图框（在块内）本已轴对齐，"
+                 f"跳过旋转（美立方-说明 场景）")
         return None
     return (_m.cos(_theta), _m.sin(_theta))  # 旋转矩阵参数，使主方向转回 0°
 
@@ -1218,7 +1261,7 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         safe_log(f"  [{layout_name}] " + " | ".join(log_parts))
     # 全局旋转矫正：图纸在自定义 UCS 下整体倾斜绘制（实体坐标斜存 WCS）时，
     # 先估计主方向并"转正"，使图框变为轴对齐，矩形度/水平垂直检测恢复有效。
-    _rot = _estimate_global_rotation(visible_entities)
+    _rot = _estimate_global_rotation(visible_entities, getattr(doc, 'blocks', None))
     if _rot:
         safe_log(f"  [{layout_name}] 检测到整体倾斜图纸，施加旋转矫正 (cos={_rot[0]:.4f}, sin={_rot[1]:.4f})")
     # R56：记录本 layout 的旋转参数供内容证据统计同坐标系使用（入口 pop 防残留）

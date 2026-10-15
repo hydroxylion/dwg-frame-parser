@@ -2150,4 +2150,31 @@ check('R60护栏: 单页模板块不拆分, fc=2 (smart)',
       and sum(1 for c in r['candidates'] if abs(c['width'] - 84100) < 5 and abs(c['height'] - 59400) < 5) == 2)
 
 
+# ---- 用例 81：R61 旋转豁免探测扩展到块内页框（美立方-说明 尺寸 64423x87569→84100x59400） ----
+# 场景复刻：顶层无图框级几何、仅大量 10° 斜线主导方向直方图（触发旋转条件），
+# 页框全在模板块内且轴对齐。R61 前豁免探测只扫顶层 → 误施加旋转矫正，页框
+# 外接框膨胀（84100×59400 转 10° → ≈94000×71000）；R61 块内页框同样豁免 →
+# 不旋转，尺寸精确 84100×59400。
+doc = make_doc()
+msp = doc.modelspace()
+_blk_2q = doc.blocks.new(name='TMP_2PAGE_ROT')
+add_closed_rect(_blk_2q, 0, 0, 84100, 59400)
+add_closed_rect(_blk_2q, 1000, 1000, 80600, 57400)
+add_closed_rect(_blk_2q, 0, -65900, 84100, 59400)
+add_closed_rect(_blk_2q, 1000, -64900, 80600, 57400)
+msp.add_blockref('TMP_2PAGE_ROT', (0, 0))
+_math81 = __import__('math')
+for _k in range(20):   # 10° 斜线主导直方图（总长 20×1500=30k ≪ 页框周长 574k → 支配性豁免触发）
+    _x0 = _k * 3000.0
+    _dx = 1500.0 * _math81.cos(_math81.radians(10))
+    _dy = 1500.0 * _math81.sin(_math81.radians(10))
+    msp.add_line((_x0, -800000 + _k * 500), (_x0 + _dx, -800000 + _k * 500 + _dy))
+data = to_bytes(doc)
+check('R61块内页框豁免旋转: 斜线主导+块内轴对齐页框不旋转, fc=2 尺寸精确 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 2
+      and all(abs(c['width'] - 84100) < 5 and abs(c['height'] - 59400) < 5
+              for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
