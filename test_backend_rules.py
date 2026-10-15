@@ -2112,4 +2112,42 @@ check('R59护栏: 合法ratio 2.124闭合多段线图框仍识别, fc=1 (smart)'
       and abs(r['width'] - 126150) < 5 and abs(r['height'] - 59409) < 5)
 
 
+# ---- 用例 79：R60 多页拼版块拆分（美立方-说明.dwg 9→18） ----
+# 场景复刻：说明模板块内含 2 张互不嵌套的 84100×59400 页框（上下排布）
+# + 各 1 张 80600×57400 嵌套内框。块本体合并 bbox 84100×125300（ratio 1.49）
+# 形状合格 → 旧代码把整个块当 1 个图框（2 实例 fc=2，18 张页漏 9 张）。
+# R60 拆分后：2 实例 × 2 页 = fc=4，且无 84100×125300 块本体候选。
+doc = make_doc()
+msp = doc.modelspace()
+_blk_2p = doc.blocks.new(name='TMP_2PAGE')
+add_closed_rect(_blk_2p, 0, 0, 84100, 59400)         # 页框 1
+add_closed_rect(_blk_2p, 1000, 1000, 80600, 57400)   # 嵌套内框 1
+add_closed_rect(_blk_2p, 0, -65900, 84100, 59400)    # 页框 2（上下排布，不嵌套）
+add_closed_rect(_blk_2p, 1000, -64900, 80600, 57400) # 嵌套内框 2
+msp.add_blockref('TMP_2PAGE', (0, 0))
+msp.add_blockref('TMP_2PAGE', (200000, 0))
+data = to_bytes(doc)
+check('R60多页拼版块拆分: 块内2页框×2实例, fc=4 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 4
+      and sum(1 for c in r['candidates'] if abs(c['width'] - 84100) < 5 and abs(c['height'] - 59400) < 5) == 4
+      and not any(abs(c['width'] - 84100) < 5 and abs(c['height'] - 125300) < 5 for c in r['candidates']))
+
+# ---- 用例 80：R60 护栏——单页模板块（外框+嵌套内框）不受拆分影响 ----
+# 块内仅 1 个极大页框（嵌套内框被极大框过滤）→ 不拆分，块本体照常入库。
+# 2 个实例 → fc=2，尺寸=块 bbox 84100×59400。
+doc = make_doc()
+msp = doc.modelspace()
+_blk_1p = doc.blocks.new(name='TMP_1PAGE')
+add_closed_rect(_blk_1p, 0, 0, 84100, 59400)
+add_closed_rect(_blk_1p, 1000, 1000, 80600, 57400)
+msp.add_blockref('TMP_1PAGE', (0, 0))
+msp.add_blockref('TMP_1PAGE', (200000, 0))
+data = to_bytes(doc)
+check('R60护栏: 单页模板块不拆分, fc=2 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 2
+      and sum(1 for c in r['candidates'] if abs(c['width'] - 84100) < 5 and abs(c['height'] - 59400) < 5) == 2)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

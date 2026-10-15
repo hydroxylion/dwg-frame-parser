@@ -1740,6 +1740,63 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     # 分母被污染 1833 倍，真图框（105100×59400）rel 仅 0.054%，条件 C 永远
     # 拒之门外 → fc=0 漏检（前端 force_max 降级显示"尺寸对但图框数 0"）。
     _R27_CREDIT_MAX_SIDE = 2_500_000
+    # R60 多页拼版块拆分：块定义内 ≥2 个互不嵌套的图框级闭合矩形页框
+    #   （美立方-说明.dwg：X-美立方说明模板 块内 2 张 84100×59400 页框上下
+    #   排布 + 各 1 张 80600×57400 嵌套内框，9 个实例 → 18 张说明页；块本体
+    #   合并 bbox 125709×91318 ratio 1.3766 形状合格被当单个图框接受——R40
+    #   救援只挂 R27 拒绝分支，接受路径内部扫描永不触达 → 18 识别成 9）。
+    #   按块定义扫描一次（缓存），页框=顶层闭合矩形 LWPOLYLINE（短边≥15000、
+    #   ratio∈[1.30, FRAME_RATIO_MAX]、矩形判据 _closed_polyline_rect_len>0），
+    #   嵌套内框由"极大框"过滤（bbox 被其它页框包含者剔除）。
+    _mp_cache = {}   # block_name -> None(未扫) / [](单页或无页框) / [页框dict]
+
+    def _scan_block_max_page_rects(_bn):
+        """扫描块定义顶层的图框级闭合矩形，返回极大（互不嵌套）页框列表。"""
+        _blk = doc.blocks.get(_bn)
+        if _blk is None:
+            return []
+        _raw = []
+        for _e2 in _blk:
+            try:
+                if _e2.dxftype() != 'LWPOLYLINE':
+                    continue
+                if not is_polyline_closed(_e2):
+                    continue
+                if _closed_polyline_rect_len(_e2, 1.0) <= 0:
+                    continue
+                _pv2 = get_polyline_vertices(_e2)
+                if len(_pv2) < 3:
+                    continue
+                _lx = [p[0] for p in _pv2]
+                _ly = [p[1] for p in _pv2]
+                _lw = max(_lx) - min(_lx)
+                _lh = max(_ly) - min(_ly)
+                if _lw <= 0 or _lh <= 0:
+                    continue
+                _ls = min(_lw, _lh)
+                _lr = max(_lw, _lh) / _ls
+                if _ls < 15000 or not (1.30 <= _lr <= FRAME_RATIO_MAX):
+                    continue
+                _raw.append((min(_lx), min(_ly), max(_lx), max(_ly)))
+            except Exception:
+                continue
+        # 极大框过滤：bbox 被其它页框严格包含的（嵌套内框体系）剔除
+        _maximal = []
+        for _a in _raw:
+            _contained = False
+            for _b in _raw:
+                if _a == _b:
+                    continue
+                _aa = (_a[2] - _a[0]) * (_a[3] - _a[1])
+                _ab = (_b[2] - _b[0]) * (_b[3] - _b[1])
+                if (_ab > _aa and _a[0] >= _b[0] - 1.0 and _a[1] >= _b[1] - 1.0
+                        and _a[2] <= _b[2] + 1.0 and _a[3] <= _b[3] + 1.0):
+                    _contained = True
+                    break
+            if not _contained:
+                _maximal.append(_a)
+        return _maximal
+
     for _entity in visible_entities:
         if _entity.dxftype() != 'INSERT':
             continue
@@ -2116,6 +2173,90 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                                      f"（图框族证据）→ 提升 {_n_up} 份为候选，面积 "
                                      f"{_rgrp[0]['area']:,.0f} 计回 rel 分母")
                 continue
+            # R60 多页拼版块拆分：块本体通过 R26/R27 后，若块定义内含 ≥2 个
+            #   互不嵌套的图框级页框（R58 前形态：救援只挂 R27 拒绝分支，
+            #   形状合格的拼版容器块被整体当作一个图框），改按内部页框计数
+            #   ——每实例逐页框变换到世界坐标提升为 '块内闭合线' 候选，块本体
+            #   不再入库（其 bbox 是多页合并外接框，非任何真实图框）。嵌套
+            #   内框已在 _scan_block_max_page_rects 的极大框过滤中剔除；实例
+            #   变换 p = insert + R(rot)·S·(p − base) + 全局旋转矫正（与 R40
+            #   救援 _resc_tf_top 同口径）。开关
+            #   FRAME_PARSER_NO_MULTI_PAGE_SPLIT=1 回退。
+            if (os.environ.get('FRAME_PARSER_NO_MULTI_PAGE_SPLIT') != '1'
+                    and _bn in doc.blocks):
+                if _bn not in _mp_cache:
+                    _mp_cache[_bn] = _scan_block_max_page_rects(_bn)
+                _mp_pages = _mp_cache[_bn]
+                if len(_mp_pages) >= 2:
+                    _mp_world = []   # (bbox, w, h) 世界坐标
+                    for _pb in _mp_pages:
+                        _pw = []
+                        for _cx, _cy in ((_pb[0], _pb[1]), (_pb[2], _pb[1]),
+                                         (_pb[2], _pb[3]), (_pb[0], _pb[3])):
+                            _qx = (_cx - _bpx) * _xs
+                            _qy = (_cy - _bpy) * _ys
+                            if _ins_rot:
+                                _rad_m = _math.radians(_ins_rot)
+                                _cr_m = _math.cos(_rad_m)
+                                _sr_m = _math.sin(_rad_m)
+                                _qx, _qy = (_qx * _cr_m - _qy * _sr_m,
+                                            _qx * _sr_m + _qy * _cr_m)
+                            _qx += _ip[0]
+                            _qy += _ip[1]
+                            if _rot is not None:
+                                _qx, _qy = _rot_pt(_qx, _qy)
+                            _pw.append((_qx, _qy))
+                        _pxs = [p[0] for p in _pw]
+                        _pys = [p[1] for p in _pw]
+                        _pw1, _py1 = min(_pxs), min(_pys)
+                        _pw2, _py2 = max(_pxs), max(_pys)
+                        _pw_len = _pw2 - _pw1
+                        _ph_len = _py2 - _py1
+                        if _pw_len <= 0 or _ph_len <= 0:
+                            continue
+                        if min(_pw_len, _ph_len) < 15000:
+                            continue   # 实例缩放后过小 → 该页不计
+                        _mp_world.append((_pw1, _py1, _pw2, _py2,
+                                          _pw_len, _ph_len))
+                    if len(_mp_world) >= 2:
+                        _mp_added = 0
+                        for (_pw1, _py1, _pw2, _py2, _pw_len, _ph_len), _pb in zip(
+                                _mp_world, _mp_pages):
+                            _pk = (round(_pw1, 3), round(_py1, 3),
+                                   round(_pw2, 3), round(_py2, 3))
+                            if _pk in seen_bbox:
+                                continue
+                            seen_bbox.add(_pk)
+                            candidates.append({
+                                'type': '块内闭合线',
+                                'area': _pw_len * _ph_len,
+                                'bbox': (_pw1, _py1, _pw2, _py2),
+                                'width': round(_pw_len),
+                                'height': round(_ph_len),
+                                'layout': layout_name,
+                                'rectangularity': 1.0,
+                                'block_name': _bn,
+                                'src_block': _bn,
+                                'local_bbox': _pb,
+                                'insert_layer': _entity.dxf.layer,
+                                'block_def_w': 0.0,
+                                'block_def_h': 0.0,
+                                'tilted': _tilted,
+                                'block_rect_len': max(_pw_len, _ph_len),
+                                'nested_pair': False,
+                                'inst_pos': (round(_ip[0], 1), round(_ip[1], 1)),
+                                'inst_sx_neg': _xs < 0,
+                                'inst_sy_neg': _ys < 0,
+                                'inst_abs': (round(abs(_xs), 6), round(abs(_ys), 6)),
+                            })
+                            _mp_added += 1
+                        if _mp_added:
+                            _insert_kept += 1
+                            safe_log(f"  [多页拼版块拆分] 块 {_bn} 内含 "
+                                     f"{len(_mp_pages)} 个互不嵌套页框 → 本实例提升 "
+                                     f"{_mp_added} 页为候选，块本体（{_w:.0f}×{_h:.0f} 合并"
+                                     f"外接框）不再作为图框")
+                        continue
             if _key in seen_bbox:
                 continue
             seen_bbox.add(_key)
