@@ -1314,6 +1314,9 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                                 'height': bbox[3] - bbox[1],
                                 'layout': layout_name,
                                 'rectangularity': rectangularity,
+                                # R63：图层信息——TTLB（图签层）是图框强证据，
+                                # 供条件I 护栏与相邻单元格剔除使用
+                                'insert_layer': entity.dxf.layer,
                             })
     # 1.5. 块参照 INSERT：插入点 + 块定义 bbox × xscale/yscale(+ rotation) = 真实图框 bbox。
     #    建筑图纸图框常用 INSERT 块参照插入（澜山"12fas" 块 ×15 个，每块缩放 1.0714 后真实
@@ -3831,6 +3834,23 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                              f"{_c['width']:.0f}×{_c['height']:.0f}：块内无闭合矩形边框（表格/内容块），"
                              f"不判表格页")
                     continue
+                # R63：显式类型候选（闭合多段线/直线矩形）救援加图层护栏——
+                #   图纸深化0722 修改云线框 EABBF（"修改1"层，单线无内框）被
+                #   条件I 误救成 10572×27787"表格页"（用户确认非图框）。改/审
+                #   图标注层（图层名含"修改"/REV）上的闭合框是变更范围线而非
+                #   图纸页。基线真表格页分别在 A-ANNO-TTLB（6、10号楼
+                #   84100×29700、0722 16820×29720）与 0 层（泛悦国际
+                #   237369×89610 总平图框），不受影响。
+                #   开关 FRAME_PARSER_NO_I_REV_LAYER=1 回退。
+                if (_c['type'] in EXPLICIT_TYPES
+                        and os.environ.get('FRAME_PARSER_NO_I_REV_LAYER') != '1'):
+                    _lay_i = (_c.get('insert_layer') or '')
+                    if ('修改' in _lay_i
+                            or 'REV' in _lay_i.upper()
+                            or ' revise' in _lay_i.lower()):
+                        safe_log(f"   [条件I·跳过] 闭合线 {_c['width']:.0f}×{_c['height']:.0f}："
+                                 f"位于修改/审图标注层「{_lay_i}」，判为变更范围线，不判表格页")
+                        continue
                 if any(_c['bbox'][0] >= _f['bbox'][0] - 1 and _c['bbox'][1] >= _f['bbox'][1] - 1 and
                        _c['bbox'][2] <= _f['bbox'][2] + 1 and _c['bbox'][3] <= _f['bbox'][3] + 1
                        for _f in frame_like):
@@ -4115,7 +4135,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             lay_objs: {layout_name: layout 对象}，惰性收集线段用。
             """
             if len(cands) <= 2:
-                return cands, 0
+                return cands, 0, []
             # 主导模板比例（2026-09-14，春风公寓2）：同 layout 内 ≥3 个候选共享的
             # ratio（±1% 聚类）。用途：见下方"主导比例内容区边界"判定。
             _wrap_dominant = {}
@@ -4442,9 +4462,10 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         inner_desc = "; ".join(f"{g[0]['width']:.0f}x{g[0]['height']:.0f}×{g[1]}" for g in groups)
                         safe_log(f"  [包裹框剔除] {big['layout']} | {big['width']:.1f}x{big['height']:.1f} | 独立尺寸组{len(groups)} | bbox={big['bbox']} | 组: {inner_desc}")
             if not remove_set:
-                return cands, 0
+                return cands, 0, []
             kept = [c for k, c in enumerate(cands) if k not in remove_set]
-            return kept, len(remove_set)
+            removed_items = [c for k, c in enumerate(cands) if k in remove_set]
+            return kept, len(remove_set), removed_items
 
         # R34：构造空壳判定的辅助数据（全量候选 bbox 认领集合 + layout 对象惰性表）
         _all_bboxes_by_layout = {}
@@ -4457,10 +4478,132 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     _lay_objs_wrap[_lname] = doc.layouts.get(_lname.strip('"').strip('“”'))
                 except Exception:
                     pass
-        frame_like, wrap_removed = strip_wrapping_frames(frame_like, _all_bboxes_by_layout, _lay_objs_wrap)
+        frame_like, wrap_removed, _wrap_removed_items = strip_wrapping_frames(
+            frame_like, _all_bboxes_by_layout, _lay_objs_wrap)
         wrap_stripped_count = len(frame_like)
         if wrap_removed:
             safe_log(f"🧹 [包裹框识别] 剔除外层包裹框 {wrap_removed} 个（各含 ≥{MIN_WRAPPED_FRAMES} 个图框候选）")
+
+        # ---------- R63：包裹框内同尺寸互证补捞 ----------
+        # 场景（图纸深化0722）：第二份 16820 家族（5D8E4 16820×29720、5D95E
+        #   16820×23780，含户型内容的真页框）位于底图包络 178527（118894×55784，
+        #   A-ELEV-2 层）内部。条件I 主循环的"被已入选框包住"护栏在包裹框剔除
+        #   **之前**执行——当时包络仍在 frame_like 里，两框被误判"内部内容"跳过
+        #   救援；随后包络被剔除，两框成了永远无法入选的孤儿（fc 26→24）。
+        #   修复：包裹框剔除后，对"完全位于被剔包裹框内 + 未入选"的全量候选做
+        #   一次补捞——若其尺寸（±2%）与同 layout 某 frame_like 成员一致（同
+        #   模板互证，与 R62 形态B 同尺寸互证同口径），救回。内框兄弟（面积
+        #   0.85~0.995×）也会被捞回，由后续嵌套去重自然剔小，无害。
+        #   开关 FRAME_PARSER_NO_WRAP_PEER=1 回退。
+        if wrap_removed and os.environ.get('FRAME_PARSER_NO_WRAP_PEER') != '1':
+            _wp_in_fl = {id(c) for c in frame_like}
+            _wp_recovered = []
+            for _w in _wrap_removed_items:
+                _wx1, _wy1, _wx2, _wy2 = _w['bbox']
+                for _c in all_candidates:
+                    if id(_c) in _wp_in_fl or _c['layout'] != _w['layout']:
+                        continue
+                    if _c['type'] not in EXPLICIT_TYPES:
+                        continue
+                    if _c['width'] < 5000 or _c['height'] < 5000:
+                        continue
+                    if not (FRAME_RATIO_MIN <= _c['ratio'] <= FRAME_RATIO_MAX):
+                        continue
+                    if not (_c['bbox'][0] >= _wx1 - 1 and _c['bbox'][1] >= _wy1 - 1 and
+                            _c['bbox'][2] <= _wx2 + 1 and _c['bbox'][3] <= _wy2 + 1):
+                        continue
+                    _hit = any(abs(_c['width'] - _f['width']) <= 0.02 * max(_c['width'], _f['width'])
+                               and abs(_c['height'] - _f['height']) <= 0.02 * max(_c['height'], _f['height'])
+                               for _f in frame_like if _f['layout'] == _c['layout'])
+                    if _hit:
+                        _c['rescued_by'] = 'wrap_peer'
+                        _wp_recovered.append(_c)
+                        _wp_in_fl.add(id(_c))
+            if _wp_recovered:
+                frame_like.extend(_wp_recovered)
+                safe_log(f"  [R63·包裹框内补捞] 救回 {len(_wp_recovered)} 个被包裹框"
+                         f"罩住的漏检候选（与已入选框同尺寸互证）: "
+                         + ', '.join(f"{c['width']:.0f}x{c['height']:.0f}" for c in _wp_recovered))
+
+        # ---------- R63：相邻同尺寸共边单元格剔除（表格页/户型表拆分格） ----------
+        # 场景（图纸深化0722）：AA2A0/AB841 两个 23938×34315 闭合多段线（层 0，
+        #   无内框、无图签）左右共边拼成一张户型汇总表格页（图中红标注 65454×34315
+        #   的大表的分格），条件F（ratio 1.4335 落 √2±2% + 框内内容丰富）把
+        #   分格各自误收为独立图框。与真图框相邻拼版的区别：真图框画在图签层
+        #   （59450×42050 ×12 相邻拼版全在 A-ANNO-TTLB）、带双线内框、或为
+        #   LINE 直线矩形画法（LINE 并排双图框回归用例守护）。故限闭合多段线。
+        #   判据（全部满足才成对剔除）：
+        #   ① 同 layout 两个「闭合多段线」候选尺寸一致（±1%）；
+        #   ② 共边：水平贴合（|a.x2−b.x1|≤2mm 或 |b.x2−a.x1|≤2mm）且 y 区间
+        #      重叠 ≥90%×短者（或垂直贴合同理）；
+        #   ③ 双方均不在 TTLB 类图层；
+        #   ④ 双方均无嵌套内框（同 layout 面积 0.85~0.995× 且被包住的候选）；
+        #   ⑤ 同 layout 同尺寸（±1%）组恰为 2 份——≥3 份是刻意网格拼版图纸页
+        #      （江南铭庭 12600×8910×15、R52 网格页），与 MIN_WRAPPED_SAME_SIZE
+        #      同哲学；恰 2 份且共边才是大表拆分格（0722 户型表 23938×34315×2）。
+        #   开关 FRAME_PARSER_NO_ADJ_CELL=1 回退。
+        if os.environ.get('FRAME_PARSER_NO_ADJ_CELL') != '1':
+            _adj_ids = set()
+            _adj_size_cnt = {}
+            for _c in frame_like:
+                if _c['type'] == '闭合多段线':
+                    _k = (round(_c['width'] / 100), round(_c['height'] / 100))
+                    _adj_size_cnt[_k] = _adj_size_cnt.get(_k, 0) + 1
+
+            def _has_inner_border(_c):
+                _cx1, _cy1, _cx2, _cy2 = _c['bbox']
+                for _o in all_candidates:
+                    if (_o is _c or _o['layout'] != _c['layout']
+                            or _o['type'] not in EXPLICIT_TYPES):
+                        continue
+                    if _c['area'] <= 0 or not (0.85 <= _o['area'] / _c['area'] <= 0.995):
+                        continue
+                    if (_o['bbox'][0] >= _cx1 - 1 and _o['bbox'][1] >= _cy1 - 1 and
+                            _o['bbox'][2] <= _cx2 + 1 and _o['bbox'][3] <= _cy2 + 1):
+                        return True
+                return False
+
+            for _ia in range(len(frame_like)):
+                _a = frame_like[_ia]
+                if id(_a) in _adj_ids or _a['type'] != '闭合多段线':
+                    continue
+                if 'TTLB' in (_a.get('insert_layer') or '').upper():
+                    continue
+                if _has_inner_border(_a):
+                    continue
+                for _ib in range(_ia + 1, len(frame_like)):
+                    _b = frame_like[_ib]
+                    if (id(_b) in _adj_ids or _b is _a
+                            or _b['layout'] != _a['layout']
+                            or _b['type'] != '闭合多段线'):
+                        continue
+                    if 'TTLB' in (_b.get('insert_layer') or '').upper():
+                        continue
+                    if _has_inner_border(_b):
+                        continue
+                    if (abs(_b['width'] - _a['width']) > 0.01 * max(_a['width'], _b['width'])
+                            or abs(_b['height'] - _a['height']) > 0.01 * max(_a['height'], _b['height'])):
+                        continue
+                    # ⑤ 同尺寸组恰 2 份（≥3 份是网格拼版页，豁免）
+                    if _adj_size_cnt.get((round(_a['width'] / 100), round(_a['height'] / 100)), 0) != 2:
+                        continue
+                    ax1, ay1, ax2, ay2 = _a['bbox']
+                    bx1, by1, bx2, by2 = _b['bbox']
+                    _vert = ((abs(ax2 - bx1) <= 2 or abs(bx2 - ax1) <= 2)
+                             and min(ay2, by2) - max(ay1, by1) >= 0.9 * min(ay2 - ay1, by2 - by1))
+                    _horz = ((abs(ay2 - by1) <= 2 or abs(by2 - ay1) <= 2)
+                             and min(ax2, bx2) - max(ax1, bx1) >= 0.9 * min(ax2 - ax1, bx2 - bx1))
+                    if _vert or _horz:
+                        _adj_ids.add(id(_a))
+                        _adj_ids.add(id(_b))
+                        safe_log(f"  [R63·相邻单元格剔除] {_a['layout']} | "
+                                 f"{_a['width']:.0f}x{_a['height']:.0f} @({ax1:.0f},{ay1:.0f}) 与 "
+                                 f"{_b['width']:.0f}x{_b['height']:.0f} @({bx1:.0f},{by1:.0f}) "
+                                 f"同尺寸共边、非图签层、无内框 → 判为表格/户型表分格剔除")
+                        break
+            if _adj_ids:
+                frame_like = [c for c in frame_like if id(c) not in _adj_ids]
+                all_candidates = [c for c in all_candidates if id(c) not in _adj_ids]
 
         # ---------- R36：非矩形边界块「让位」内含真框（d012.dwg 尺寸口径修复） ----------
         # 场景：hfzxhx 块定义内仅 1 条 38 顶点闭合不规则边界多段线（3 段圆弧、宽

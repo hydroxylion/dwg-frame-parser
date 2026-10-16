@@ -2284,5 +2284,62 @@ check('R62c单页图框块尺寸: 用图框边框而非含溢出bbox, 84100x5940
       and abs(r['candidates'][0]['width'] - 84100) < 5
       and abs(r['candidates'][0]['height'] - 59400) < 5)
 
+# ---- 用例 87：R63 包裹框内同尺寸互证补捞（图纸深化0722 场景） ----
+# 底图包络（闭合多段线 90000×40000，ratio 2.25）内含 1 个主导尺寸真框
+# （40000×28284，主导 ratio 1.414 由框外 3 份同款确立）+ 2 个 16820×29720
+# 孤儿页框。孤儿因"被已入选框（包络）包住"被条件I 跳过救援；包络被剔除后
+# 沦为漏检。R63：包络剔除后按"与已入选框同尺寸 ±2% 互证"补捞孤儿。
+# 框外 2 张 16820×29720 带表格线（横 ≥30/竖 ≥6）经条件I 入选提供互证锚。
+doc = make_doc()
+msp = doc.modelspace()
+for _i in range(3):                                   # 主导尺寸组（确立主导比例）
+    add_line_rect(msp, _i * 45000, 0, 40000, 28284)
+for _i, _ox in enumerate((120000, 145000)):           # 条件I 表格页 ×2（互证锚）
+    add_closed_rect(msp, _ox, 0, 16820, 29720)
+    for _k in range(32):
+        _yy = 200 + _k * 900
+        msp.add_line((_ox + 150, _yy), (_ox + 16820 - 150, _yy))
+    for _k in range(7):
+        _xx = _ox + 2400 + _k * 1800
+        msp.add_line((_xx, 150), (_xx, 29720 - 150))
+add_closed_rect(msp, 400000, 0, 90000, 40000)         # 底图包络（ratio 2.25）
+add_line_rect(msp, 410000, 5000, 40000, 28284)        # 包络内的主导尺寸真框
+add_closed_rect(msp, 410000, 35000, 16820, 29720)     # 孤儿 1（无表格线）
+add_closed_rect(msp, 460000, 35000, 16820, 29720)     # 孤儿 2（无表格线）
+data = to_bytes(doc)
+check('R63包裹框内补捞: 包络剔除后孤儿按同尺寸互证救回, fc=8 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 8
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 16820) < 5 and abs(c['height'] - 29720) < 5) == 4
+      and not any(abs(c['width'] - 90000) < 5 for c in r['candidates']))
+
+# ---- 用例 88：R63 相邻同尺寸共边单元格剔除（0722 户型表分格） ----
+# 两个 23938×34315 闭合多段线左右共边（层 0、无内框、无图签、同尺寸组恰 2 份）
+# → 大表拆分格，成对剔除（fc=0 报未检测到图框）。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 0, 0, 23938, 34315)
+add_closed_rect(msp, 23938, 0, 23938, 34315)
+data = to_bytes(doc)
+ok = expect_error_no_frame(data)
+results.append(ok)
+print(('PASS' if ok else 'FAIL') + '  R63相邻单元格: 同尺寸共边分格成对剔除 (smart)')
+
+# ---- 用例 89：R63 护栏——≥3 份同尺寸网格拼版页豁免（江南铭庭场景） ----
+# 2×2 网格 4 张 14100×10000 闭合多段线页框（同尺寸组 4 份 ≥3）→ 是刻意拼版
+# 图纸页而非分格，不受相邻单元格剔除影响，fc=4。
+doc = make_doc()
+msp = doc.modelspace()
+for _i in range(2):
+    for _j in range(2):
+        add_closed_rect(msp, _i * 14100, _j * 10000, 14100, 10000)
+data = to_bytes(doc)
+check('R63护栏: 同尺寸≥3份网格拼版页豁免, fc=4 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 4
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 14100) < 5 and abs(c['height'] - 10000) < 5) == 4)
+
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
