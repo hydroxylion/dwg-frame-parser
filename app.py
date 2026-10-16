@@ -2606,6 +2606,21 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         import itertools as _it
         _resc_cands = [c for c in candidates if c.get('type') == '块内闭合线']
         _other_cands = [c for c in candidates if c.get('type') != '块内闭合线']
+        # R62b：被罩候选须是「真图框」（块定义内含闭合 LWPOLYLINE 边框）才构成
+        #   「裁剪边界罩真图框」撤销。真图框罩住图内门窗表/表格内容块（块定义
+        #   仅 LINE 网格/代理实体，无闭合 LWPOLYLINE）是正常图框行为——
+        #   1#,8#住宅 ewtewtwey 户型图框 52550×29700 内嵌门窗表 qewrwetqrqwtqr
+        #   32143×20725（占图框 42.7% ≥10%），被旧判据误当裁剪边界 → 3 张户型
+        #   图框被整组撤销。修复：被罩候选无闭合 LWPOLYLINE → 跳过（不撤销）。
+        def _block_has_lwpoly_closed(_bn):
+            try:
+                for _e in (doc.blocks.get(_bn) or ()):
+                    if _e.dxftype() == 'LWPOLYLINE' and is_polyline_closed(_e):
+                        return True
+            except Exception:
+                pass
+            return False
+
         _revoke_keys = set()
         for _rc in _resc_cands:
             _rb = _rc['bbox']
@@ -2614,6 +2629,9 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 if not (_rb[0] <= _ob[0] + 1.0 and _rb[1] <= _ob[1] + 1.0
                         and _rb[2] >= _ob[2] - 1.0 and _rb[3] >= _ob[3] - 1.0):
                     continue
+                if _oc.get('type') == '块参照插入' and _oc.get('block_name') \
+                        and not _block_has_lwpoly_closed(_oc.get('block_name')):
+                    continue   # 被罩候选是内容块（无闭合 LWPOLYLINE），非真图框
                 # R43 面积比门槛：被罩候选 ≥ 救援候选 10% 才算"裁剪边界罩
                 #   真图框"形态。正常图框罩住图内小部件（表格/家具闭合线）
                 #   通常远小于 10%（d008：10500×26406 / 200700×126150 =
@@ -3750,6 +3768,29 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     _blk_invisible_cache[_bn] = _all_inv
                 return _blk_invisible_cache[_bn]
 
+            # R62b：块参照候选须有「闭合矩形边框」证据才可被条件I 当表格页救援。
+            #   表格/门窗表内容块（1#,8#住宅 qewrwetqrqwtqr：块定义 33 LINE 横竖
+            #   网格 + 12 代理实体，无任何闭合 LWPOLYLINE 边框）bbox 恰好罩住户型
+            #   内容散线（182 横/170 竖），条件I 数线把它误判为"表格页"→ 误报
+            #   32143×20725。真图框块（wetwtwytwt 52550×29700、wetwetwt
+            #   16820×32700）块定义内有闭合 LWPOLYLINE 外框 + 内框 → 放行。
+            #   判据：块定义内存在闭合 LWPOLYLINE（is_polyline_closed），矩形度
+            #   不苛求（表格块根本没有闭合线，区分度已足够）。
+            _blk_closed_cache = {}
+
+            def _block_has_closed_frame(_bn):
+                if _bn not in _blk_closed_cache:
+                    _has = False
+                    try:
+                        for _e in (doc.blocks.get(_bn) or ()):
+                            if _e.dxftype() == 'LWPOLYLINE' and is_polyline_closed(_e):
+                                _has = True
+                                break
+                    except Exception:
+                        _has = False
+                    _blk_closed_cache[_bn] = _has
+                return _blk_closed_cache[_bn]
+
             for _c in all_candidates:
                 if id(_c) in _in_fl_i:
                     continue
@@ -3762,6 +3803,12 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     safe_log(f"   [条件I·跳过] 块 {_c['block_name']} "
                              f"{_c['width']:.0f}×{_c['height']:.0f}：块内实体全部位于关闭/冻结图层"
                              f"（CAD 中不可见），不判表格页")
+                    continue
+                if _c['type'] == '块参照插入' and _c.get('block_name') \
+                        and not _block_has_closed_frame(_c['block_name']):
+                    safe_log(f"   [条件I·跳过] 块 {_c['block_name']} "
+                             f"{_c['width']:.0f}×{_c['height']:.0f}：块内无闭合矩形边框（表格/内容块），"
+                             f"不判表格页")
                     continue
                 if any(_c['bbox'][0] >= _f['bbox'][0] - 1 and _c['bbox'][1] >= _f['bbox'][1] - 1 and
                        _c['bbox'][2] <= _f['bbox'][2] + 1 and _c['bbox'][3] <= _f['bbox'][3] + 1
@@ -3807,6 +3854,9 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         continue
                     if _c['type'] == '块参照插入' and _c.get('block_name') \
                             and _block_all_invisible(_c['block_name']):
+                        continue
+                    if _c['type'] == '块参照插入' and _c.get('block_name') \
+                            and not _block_has_closed_frame(_c['block_name']):
                         continue
                     if any(_c['bbox'][0] >= _f['bbox'][0] - 1 and _c['bbox'][1] >= _f['bbox'][1] - 1 and
                            _c['bbox'][2] <= _f['bbox'][2] + 1 and _c['bbox'][3] <= _f['bbox'][3] + 1
@@ -4341,9 +4391,32 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                     and abs(_gr - _big_r) / _big_r > 0.10):
                                 _dom_hit = True
                                 break
+                    # R62b：底图包络（顶层闭合多段线）内含 ≥2 个「单页图框块」→ 包裹框。
+                    #   1#,8#住宅 巨框 388331×215417（顶层闭合多段线，rel=100%）内包
+                    #   2 个 qwetwetwtt 134300×84600 单页图框块（块定义 133800×84100
+                    #   ≈ 候选尺寸），仅 1 个尺寸组×2 份——MIN_WRAPPED_SAME_SIZE=3
+                    #   够不到 → 巨框漏剔被当图框（与形态A 单页图框块保护互为镜像：
+                    #   那边保住被包小框，这边剔掉包裹巨框）。判据：inners 中「块参照
+                    #   插入 + 块定义比例≈候选比例（±5%，单页图框块而非多页拼版容器）」
+                    #   累计 ≥2 份。
+                    _single_page_cnt = 0
+                    for g in groups:
+                        _rep = g[0]
+                        if _rep.get('type') == '块参照插入':
+                            _bdw = _rep.get('block_def_w') or 0
+                            _bdh = _rep.get('block_def_h') or 0
+                            if _bdw > 0 and _bdh > 0:
+                                _cw = _rep['width']; _ch = _rep['height']
+                                if min(_cw, _ch) > 0:
+                                    _cr = max(_cw, _ch) / min(_cw, _ch)
+                                    _br = max(_bdw, _bdh) / min(_bdw, _bdh)
+                                    if abs(_br - _cr) / _cr <= 0.05:
+                                        _single_page_cnt += g[1]
+                    _single_page_wrap = (big.get('type') == '闭合多段线'
+                                         and _single_page_cnt >= 2)
                     if (len(groups) >= MIN_WRAPPED_FRAMES or
                             any(g[1] >= MIN_WRAPPED_SAME_SIZE for g in groups) or
-                            _dom_hit):
+                            _dom_hit or _single_page_wrap):
                         remove_set.add(i)
                         inner_desc = "; ".join(f"{g[0]['width']:.0f}x{g[0]['height']:.0f}×{g[1]}" for g in groups)
                         safe_log(f"  [包裹框剔除] {big['layout']} | {big['width']:.1f}x{big['height']:.1f} | 独立尺寸组{len(groups)} | bbox={big['bbox']} | 组: {inner_desc}")

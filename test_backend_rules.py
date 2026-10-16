@@ -2219,4 +2219,51 @@ check('R62形态B同尺寸表格页互证: 块参照加长页框×2 放行, fc=3
               if abs(c['width'] - 16820) < 340 and abs(c['height'] - 32700) < 660) == 3)
 
 
+# ---- 用例 84：R62b 表格块误报——块参照无闭合边框不被条件I 当表格页救援 ----
+# 场景复刻（1#,8#住宅 qewrwetqrqwtqr）：门窗表内容块（块定义 33 条 LINE 横竖
+# 网格、无闭合 LWPOLYLINE 边框）bbox 恰好罩住户型内容散线 → 条件I 数线（顶层
+# 散线 ≥30/6）误判为"表格页"→ 误报 32143×20725。R62b 加护栏：块定义内无闭合
+# LWPOLYLINE → 完全跳过条件I 救援。真图框（84100×59400）照常识别，fc=1。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 0, 0, 84100, 59400)            # 真图框（rel 分母 + 真框）
+_blk_tbl = doc.blocks.new(name='TMP_TABLE')
+for _k in range(30):                                 # 块内表格横线（无 LWPOLYLINE）
+    _blk_tbl.add_line((0, _k * 400), (20000, _k * 400))
+for _k in range(6):                                  # 块内表格竖线
+    _blk_tbl.add_line((_k * 3500, 0), (_k * 3500, 11600))
+msp.add_blockref('TMP_TABLE', (200000, 0))           # 表格块实例（远离真图框）
+for _k in range(30):                                 # 顶层散线（落入表格块 bbox）
+    msp.add_line((200100, _k * 400 + 50), (219900, _k * 400 + 50))
+for _k in range(6):
+    msp.add_line((200000 + _k * 3500 + 100, 100), (200000 + _k * 3500 + 100, 11500))
+data = to_bytes(doc)
+check('R62b表格块误报护栏: 块内无闭合边框不被条件I救援, fc=1 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and all(abs(c['width'] - 84100) < 5 and abs(c['height'] - 59400) < 5
+              for c in r['candidates']))
+
+
+# ---- 用例 85：R62b 底图包络巨框剔除——内含 ≥2 个单页图框块 → 包裹框 ----
+# 场景复刻（1#,8#住宅 巨框 388331×215417 内包 2 个 qwetwetwtt 单页图框块）：
+# 顶层闭合多段线巨框（ratio 非标准）内包 2 个单页图框块（块定义≈候选尺寸），
+# 仅 1 组×2 份达不到 MIN_WRAPPED_SAME_SIZE=3 → 旧代码漏剔巨框。R62b 判据：
+# 闭合多段线内 ≥2 个「块参照插入 + 块定义比例≈候选比例」→ 巨框包裹框剔除。
+doc = make_doc()
+msp = doc.modelspace()
+_blk_spb2 = doc.blocks.new(name='TMP_SPB2')
+add_closed_rect(_blk_spb2, 0, 0, 84100, 59400)
+add_closed_rect(_blk_spb2, 1000, 1000, 80600, 57400)
+msp.add_blockref('TMP_SPB2', (0, 0))
+msp.add_blockref('TMP_SPB2', (100000, 0))
+add_closed_rect(msp, 0, -20000, 200000, 90000)   # 底图包络巨框（ratio 1.818，包住 2 图框块）
+data = to_bytes(doc)
+check('R62b底图包络巨框剔除: 内包2个单页图框块, 巨框被剔 fc=2 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 2
+      and all(abs(c['width'] - 84100) < 5 and abs(c['height'] - 59400) < 5
+              for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
