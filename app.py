@@ -2306,6 +2306,27 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             # R36：块内闭合环的「矩形证据」长边（_rect_only 判据）。闭合成环但
             # 非矩形（范围线/红线形态）的块，后续"让位"给 bbox 内的显式矩形真框。
             _rect_len36 = _block_closed_frame_len(_bn, _bb_len, _rect_only=True)
+            # R62c：单页图框块的候选尺寸用「块内图框边框」（极大页框）而非「块定义
+            #   bbox」——块 bbox 含内容溢出（1#,8#住宅 qwetwetwtt 134300×84600 vs
+            #   图框 133800×84100、wetwetwt 16920×32800 vs 16820×32700、
+            #   ewryeutuuuuu 42300×29950 vs 42050×29700），用户口径是图框边框尺寸。
+            #   仅在块内恰有 1 个极大页框（单页图框块，非多页拼版容器）且页框尺寸
+            #   ≈ 块 bbox（≥95%，防内容块误用）时，用页框尺寸×缩放替代 _w/_h；
+            #   bbox 保留含溢出的真实位置（空间关系不变）。斜放块 _w/_h 已是去旋转
+            #   真实图幅，跳过。
+            if not _tilted:
+                _mp1 = _mp_cache.get(_bn)
+                if _mp1 is None:
+                    _mp1 = _scan_block_max_page_rects(_bn)
+                    _mp_cache[_bn] = _mp1
+                if len(_mp1) == 1:
+                    _fb = _mp1[0]
+                    _fw = (_fb[2] - _fb[0]) * abs(_xs)
+                    _fh = (_fb[3] - _fb[1]) * abs(_ys)
+                    if (_fw > 0 and _fh > 0
+                            and _fw >= _w * 0.95 and _fh >= _h * 0.95):
+                        _w = _fw
+                        _h = _fh
             candidates.append({
                 'type': '块参照插入',
                 'area': _w * _h,
@@ -4800,9 +4821,11 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         best = valid_candidates[0]
         safe_log(f"✅ 选中: {best['type']} | 布局: {best['layout']} | 尺寸: {best['width']:.2f} x {best['height']:.2f}")
 
-        x1, y1, x2, y2 = best['bbox']
-        width = x2 - x1
-        height = y2 - y1
+        # 主框尺寸用候选的 width/height（已含 R62c 图框边框尺寸修复、斜放块
+        # 去旋转真实图幅），而非 bbox 宽高——bbox 可能含内容溢出（单页图框块
+        # bbox 84600×59400 vs 图框 84100×59400）或斜放膨胀，不是用户口径的图框尺寸。
+        width = best['width']
+        height = best['height']
 
         if unit.lower() == 'inch':
             width *= 25.4

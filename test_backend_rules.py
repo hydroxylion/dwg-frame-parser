@@ -2266,4 +2266,23 @@ check('R62b底图包络巨框剔除: 内包2个单页图框块, 巨框被剔 fc=
               for c in r['candidates']))
 
 
+# ---- 用例 86：R62c 单页图框块尺寸——用图框边框而非含溢出的块 bbox ----
+# 场景复刻（1#,8#住宅 qwetwetwtt 块 134300×84600→133800×84100、wetwetwt
+# 16920×32800→16820×32700、ewryeutuuuuu 42300×29950→42050×29700）：单页
+# 图框块的块 bbox 被内容溢出撑大，用户口径是图框边框尺寸。R62c：块内恰有
+# 1 个极大页框（图框边框）且 ≥块 bbox 95% → 用页框尺寸×缩放作为候选尺寸。
+doc = make_doc()
+msp = doc.modelspace()
+_blk_fs = doc.blocks.new(name='TMP_FRAMESIZE')
+add_closed_rect(_blk_fs, 0, 0, 84100, 59400)            # 图框边框
+_blk_fs.add_line((84100, 29700), (84600, 29700))        # 内容溢出 500mm（右伸）
+msp.add_blockref('TMP_FRAMESIZE', (0, 0))
+data = to_bytes(doc)
+check('R62c单页图框块尺寸: 用图框边框而非含溢出bbox, 84100x59400 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and abs(r['candidates'][0]['width'] - 84100) < 5
+      and abs(r['candidates'][0]['height'] - 59400) < 5)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
