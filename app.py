@@ -4049,6 +4049,104 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             if _ttlblk_added:
                 pass_feature_count = len(frame_like)
 
+        # ---------- R66：共边网格链剔除（房间/防火分区/设备分格阵列） ----------
+        # 场景（地下室接地6.12 fc 16→2）：模型空间 20 个直线矩形（7197~8401 ×
+        #   11300~17800）是配电房分格阵列——x 起点严格等距（266848→274648→…→
+        #   320848，步距 ≈7800）、相邻共边、尺寸彼此仅差 1~6mm。rel 10.4~16% 全过
+        #   条件C；孤证复核的"同比例兄弟 ±1%"（②）与"同尺寸副本"（①）被阵列集体
+        #   利用——阵列本身就是重复矩形，每个成员 score ≥1 逃过复核。
+        #   真图框与分格阵列的本质区别：真图框页（拼版）是**同尺寸组 ≥3 份**或
+        #   **TTLB 图签层**或**带内框**；而分格阵列尺寸各异（手工画边界，组内
+        #   各 1~2 份）。判据：frame_like 中 _via=='C' 的 EXPLICIT_TYPES 候选按
+        #   "相邻共边"（水平贴合 ≤2mm 且 y 重叠 ≥90%×短者，或垂直贴合同理）
+        #   建图，连通分量 ≥3 → 整分量剔除。豁免（分量内）：
+        #   ① 任一同尺寸组 ≥3 份（江南铭庭 12600×8910×15 网格拼版页）；
+        #   ② 成员位于 TTLB 图签层（0722 59450×42050×12 拼版）；
+        #   ③ 成员带嵌套内框（双线框画法，逐成员保留）。
+        #   开关 FRAME_PARSER_NO_GRID_CHAIN=1 回退。
+        if os.environ.get('FRAME_PARSER_NO_GRID_CHAIN') != '1' and frame_like:
+            _gc_pool = [c for c in frame_like
+                        if c.get('_via') == 'C' and c['type'] in EXPLICIT_TYPES]
+            if len(_gc_pool) >= 3:
+                _gc_adj = {id(c): [] for c in _gc_pool}
+                for _ia in range(len(_gc_pool)):
+                    _a = _gc_pool[_ia]
+                    _ax1, _ay1, _ax2, _ay2 = _a['bbox']
+                    for _ib in range(_ia + 1, len(_gc_pool)):
+                        _b = _gc_pool[_ib]
+                        if _b['layout'] != _a['layout']:
+                            continue
+                        _bx1, _by1, _bx2, _by2 = _b['bbox']
+                        _h_touch = ((abs(_ax2 - _bx1) <= 2 or abs(_bx2 - _ax1) <= 2)
+                                    and min(_ay2, _by2) - max(_ay1, _by1)
+                                    >= 0.9 * min(_ay2 - _ay1, _by2 - _by1))
+                        _v_touch = ((abs(_ay2 - _by1) <= 2 or abs(_by2 - _ay1) <= 2)
+                                    and min(_ax2, _bx2) - max(_ax1, _bx1)
+                                    >= 0.9 * min(_ax2 - _ax1, _bx2 - _bx1))
+                        if _h_touch or _v_touch:
+                            _gc_adj[id(_a)].append(_b)
+                            _gc_adj[id(_b)].append(_a)
+                # 连通分量
+                _gc_seen = set()
+                _gc_drop = set()
+                _gc_keep = set()
+                for _c in _gc_pool:
+                    if id(_c) in _gc_seen:
+                        continue
+                    _comp = []
+                    _stack = [_c]
+                    _gc_seen.add(id(_c))
+                    while _stack:
+                        _u = _stack.pop()
+                        _comp.append(_u)
+                        for _v in _gc_adj[id(_u)]:
+                            if id(_v) not in _gc_seen:
+                                _gc_seen.add(id(_v))
+                                _stack.append(_v)
+                    if len(_comp) < 3:
+                        continue
+                    # 豁免①：分量内任一同尺寸组 ≥3 份（拼版页）
+                    _sz_cnt = {}
+                    for _u in _comp:
+                        _k = (round(_u['width']), round(_u['height']))
+                        _sz_cnt[_k] = _sz_cnt.get(_k, 0) + 1
+                    if _sz_cnt and max(_sz_cnt.values()) >= 3:
+                        continue
+                    for _u in _comp:
+                        # 豁免②：TTLB 图签层成员
+                        if 'TTLB' in (_u.get('insert_layer') or '').upper():
+                            _gc_keep.add(id(_u))
+                            continue
+                        # 豁免③：带嵌套内框成员（双线框画法）
+                        _ux1, _uy1, _ux2, _uy2 = _u['bbox']
+                        _has_border = False
+                        for _o in _gc_pool:
+                            if _o is _u or _o['layout'] != _u['layout']:
+                                continue
+                            if _u['area'] <= 0 or not (
+                                    0.85 <= _o['area'] / _u['area'] <= 0.995):
+                                continue
+                            _ob = _o['bbox']
+                            if (_ob[0] >= _ux1 - 1 and _ob[1] >= _uy1 - 1 and
+                                    _ob[2] <= _ux2 + 1 and _ob[3] <= _uy2 + 1):
+                                _has_border = True
+                                break
+                        if _has_border:
+                            _gc_keep.add(id(_u))
+                        else:
+                            _gc_drop.add(id(_u))
+                if _gc_drop:
+                    _gc_drop_desc = ', '.join(
+                        '%.0fx%.0f' % (c['width'], c['height'])
+                        for c in _gc_pool if id(c) in _gc_drop)
+                    frame_like = [c for c in frame_like if id(c) not in _gc_drop]
+                    all_candidates = [c for c in all_candidates
+                                      if id(c) not in _gc_drop]
+                    pass_feature_count = len(frame_like)
+                    safe_log(f"  [R66·共边网格链剔除] 剔除 {len(_gc_drop)} 个分格阵列"
+                             f"候选（相邻共边连通分量 ≥3、无同尺寸组≥3/图签层/内框豁免）: "
+                             f"{_gc_drop_desc}")
+
         # ---------- 孤证复核（2026-09-14，一层.dwg 0 图框误检 4 个） ----------
         # 场景：整张图没有任何图框（纯平面图 + 大样标注）。条件C 的 rel 分母是
         # "layout 内最大候选"——当最大候选本身就是标注块（一层.dwg 电梯井道大样

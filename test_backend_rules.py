@@ -2415,5 +2415,50 @@ check('R65开关回退: NO_I_TTLB_BLOCK=1 时横版块漏检, fc=3 (smart)',
       lambda r: r['frame_count'] == 3
       and not any(abs(c['width'] - 63050) < 5 for c in r['candidates']))
 
+# ---- 用例 93：R66 共边网格链剔除（地下室接地 分格阵列场景） ----
+# 模型空间 5×2 分格阵列（相邻共边、尺寸微差 7802/7803/7798/7797——手工画边界）+
+# 2 个失去互证的散块。rel 10~16% 全过条件C、互证评分 ≥1 逃过孤证复核。
+# R66：相邻共边连通分量 ≥3 → 整分量剔除（无同尺寸组≥3/图签层/内框豁免）；
+# 散块随之失去"同比例兄弟"互证 → 孤证复核收掉。加 1 张 TTLB 真图框守护豁免。
+doc = make_doc()
+msp = doc.modelspace()
+doc.layers.add('A-ANNO-TTLB')
+_xs = [266848, 274648, 281845, 289647, 297445, 305248, 313045]
+for _i, _x in enumerate(_xs):                         # 下行 7 个共边分格
+    _w = (7803, 7197, 7802, 7798, 7803, 7797, 7803)[_i]
+    add_line_rect(msp, _x, 39308, _w, 12992)
+for _i, _x in enumerate(_xs[:5]):                     # 上行 5 个共边分格
+    _w = (7550, 7197, 7802, 7798, 7803)[_i]
+    add_line_rect(msp, _x, 175950, _w, 16000)
+add_line_rect(msp, 259295, 79977, 15353, 8490)        # 散块（互证靠下行分格）
+add_line_rect(msp, 259295, 88467, 15353, 7483)
+_pl = msp.add_lwpolyline(                             # TTLB 真图框（豁免守护）
+    [(600000, 0), (684100, 0), (684100, 59400), (600000, 59400)], close=True)
+_pl.dxf.layer = 'A-ANNO-TTLB'
+data = to_bytes(doc)
+check('R66共边网格链: 分格阵列整分量剔除, fc=1 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and any(abs(c['width'] - 84100) < 5 for c in r['candidates'])
+      and not any(abs(c['width'] - 7803) < 100 for c in r['candidates']))
+
+# 开关回退对照：无 TTLB 框时（分母=阵列自身最大者）关掉链剔除 →
+# 阵列经条件C 全部混入（fc>1）；链剔除开启则 fc=0 报未检测到图框。
+doc2 = make_doc()
+msp2 = doc2.modelspace()
+for _i, _x in enumerate(_xs):
+    _w = (7803, 7197, 7802, 7798, 7803, 7797, 7803)[_i]
+    add_line_rect(msp2, _x, 39308, _w, 12992)
+for _i, _x in enumerate(_xs[:5]):
+    _w = (7550, 7197, 7802, 7798, 7803)[_i]
+    add_line_rect(msp2, _x, 175950, _w, 16000)
+data2 = to_bytes(doc2)
+ok = expect_error_no_frame(data2)
+results.append(ok)
+print(('PASS' if ok else 'FAIL') + '  R66链剔除: 纯阵列图 fc=0 (smart)')
+check('R66开关回退: NO_GRID_CHAIN=1 时纯阵列混入, fc>1 (smart)',
+      lambda: _parse_env(data2, FRAME_PARSER_NO_GRID_CHAIN='1'),
+      lambda r: r['frame_count'] > 1)
+
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
