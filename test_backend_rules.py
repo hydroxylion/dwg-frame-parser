@@ -2460,5 +2460,30 @@ check('R66开关回退: NO_GRID_CHAIN=1 时纯阵列混入, fc>1 (smart)',
       lambda: _parse_env(data2, FRAME_PARSER_NO_GRID_CHAIN='1'),
       lambda r: r['frame_count'] > 1)
 
+# ---- 用例 94：R67 独立双页外包络剔除（美立方结施平面图8.1 场景） ----
+# R 层大框 146990×201938（√2 偏差 2.9% ≤10%）受"√2 纸张边框保护"跳过包裹剔除，
+# 罩住并排独立页 84100×59400×2 + 126200×59400×1 → 嵌套去重"留大剔小"吃掉 3 张
+# 真图框。R67：√2 保护大框内存在同尺寸、bbox 分离的候选对（并排独立页，区别于
+# 同心重复画法）→ 破例判外包络剔除。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 700571, -239325, 146990, 201938)   # √2 保护大框（ratio 1.374）
+add_closed_rect(msp, 708063, -169001, 84100, 59400)     # 独立页 1
+add_closed_rect(msp, 708063, -109001, 84100, 59400)     # 独立页 2（y 分离）
+add_closed_rect(msp, 708063, -229001, 126200, 59400)    # 独立页 3（不同尺寸）
+data = to_bytes(doc)
+check('R67独立双页: √2保护大框罩并排独立页仍被剔, fc=3 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 3
+      and not any(abs(c['width'] - 146990) < 5 for c in r['candidates'])
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 84100) < 5) == 2)
+
+# 开关回退对照：关掉 R67 后大框幸存 → 嵌套去重吃掉独立页
+check('R67开关回退: NO_WRAP_SEP=1 时大框幸存吃掉独立页, fc=1 (smart)',
+      lambda: _parse_env(data, FRAME_PARSER_NO_WRAP_SEP='1'),
+      lambda r: r['frame_count'] == 1
+      and any(abs(c['width'] - 146990) < 5 for c in r['candidates']))
+
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

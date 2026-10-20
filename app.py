@@ -3573,6 +3573,14 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         #   1.455 在 1.4444±1% 内），随后由嵌套去重"留大剔小"收掉，不影响计数。
         # 与条件G 的分工：G 靠"标题栏条纹"结构签名（条纹带+横向分隔线），H 靠
         #   "比例指纹+框内内容量"——两签名互补，覆盖标题栏画法不同的套图。
+        if os.environ.get('FRAME_PARSER_DBG_R67') == '1':
+            for _c in frame_like:
+                if (abs(_c['width'] - 84100) < 100 and abs(_c['height'] - 59400) < 100
+                        and _c['bbox'][0] in (708063, 1123948, 508063)):
+                    safe_log(f"   [DBG-R67] 特征筛选后在册: {_c['type']} "
+                             f"{_c['width']:.0f}x{_c['height']:.0f} "
+                             f"at ({_c['bbox'][0]:.0f},{_c['bbox'][1]:.0f}) "
+                             f"via={_c.get('_via')} rel={_c['rel_area_ratio']:.3%}")
         _COND_H_ENABLED = os.environ.get('FRAME_PARSER_NO_COND_H') != '1'
         COND_H_MIN_ENTITIES = 12   # 框内完全包含实体数下限（春风公寓2: 真框 52+ vs decoy ≤11）
         COND_H_DOMINANT_MIN = 3    # 主导比例至少 shared by 3 个已入选图框
@@ -4398,6 +4406,57 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     _bs = min(big['width'], big['height'])
                     if (_bs > 0 and big.get('type') in EXPLICIT_TYPES
                             and abs(_bw / _bs - 2 ** 0.5) / (2 ** 0.5) <= 0.10):
+                        # R67「独立双页破例」：√2 保护的大框内若存在 ≥2 份同尺寸、
+                        #   bbox 相互分离（并排）的内部候选 → 是"罩住多张独立图纸页
+                        #   的外包络"而非"纸张边框"，仍剔除。场景（美立方结施平面图
+                        #   8.1 识别 16 实际 19）：R 层大框 146990×201938（√2 偏差
+                        #   2.9% 受 √2 保护）罩住列2 的 84100×59400×2 + 126200×59400×1
+                        #   → 幸存大框被嵌套去重"留大剔小"吃掉 3 张真图框（列4 的
+                        #   150731×210580 同理，√2 偏差 1.2%）。真图框的"同尺寸重复
+                        #   画法"是同心内框（雅安 43031×49000/42724×48700 重叠），
+                        #   并排独立页 bbox 分离——以"存在任意分离对"区分。
+                        #   开关 FRAME_PARSER_NO_WRAP_SEP=1 回退。
+                        _sep_big_drop = False
+                        if os.environ.get('FRAME_PARSER_NO_WRAP_SEP') != '1':
+                            _sep_inners = [cands[j] for j in indices
+                                           if j != i and _is_contained(cands[j], big)
+                                           and cands[j]['area'] < big['area'] * WRAP_INNER_AREA_RATIO]
+                            _sep_groups = []
+                            for _sic in _sep_inners:
+                                _placed = False
+                                for _sg in _sep_groups:
+                                    if (abs(_sic['width'] - _sg[0]['width']) / max(_sic['width'], _sg[0]['width'], 1) < WRAP_SIZE_EPS
+                                            and abs(_sic['height'] - _sg[0]['height']) / max(_sic['height'], _sg[0]['height'], 1) < WRAP_SIZE_EPS):
+                                        _sg[1] += 1
+                                        _placed = True
+                                        break
+                                if not _placed:
+                                    _sep_groups.append([_sic, 1])
+                            for _sg in _sep_groups:
+                                if _sg[1] < 2:
+                                    continue
+                                _mems = [_sic for _sic in _sep_inners
+                                         if abs(_sic['width'] - _sg[0]['width']) / max(_sic['width'], _sg[0]['width'], 1) < WRAP_SIZE_EPS
+                                         and abs(_sic['height'] - _sg[0]['height']) / max(_sic['height'], _sg[0]['height'], 1) < WRAP_SIZE_EPS]
+                                for _m1i in range(len(_mems)):
+                                    for _m2i in range(_m1i + 1, len(_mems)):
+                                        _b1 = _mems[_m1i]['bbox']
+                                        _b2 = _mems[_m2i]['bbox']
+                                        if (_b1[2] < _b2[0] - 1 or _b2[2] < _b1[0] - 1
+                                                or _b1[3] < _b2[1] - 1 or _b2[3] < _b1[1] - 1):
+                                            _sep_big_drop = True
+                                            break
+                                    if _sep_big_drop:
+                                        break
+                                if _sep_big_drop:
+                                    break
+                        if _sep_big_drop:
+                            remove_set.add(i)
+                            safe_log(f"  [R67·独立双页外包络剔除] {big['layout']} | "
+                                     f"{big['width']:.0f}×{big['height']:.0f}"
+                                     f"（√2 偏差 {abs(_bw / _bs - 2 ** 0.5) / (2 ** 0.5) * 100:.1f}% 本受保护）"
+                                     f"框内存在同尺寸并排独立页 → 判外包络剔除")
+                            continue
                         # R34「空壳范围框」破例（d012.dwg 3 实际 4 检出）：
                         # BZ 层 518495×335087（ratio 1.5473，偏离 √2 仅 9.41% ≤10%
                         # 擦线进本保护）罩住真图框 321093×259386 的 91.6% 面积但底边
@@ -4679,9 +4738,45 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                         _single_page_cnt += g[1]
                     _single_page_wrap = (big.get('type') == '闭合多段线'
                                          and _single_page_cnt >= 2)
+                    # R67：独立双页分离判据——某组 ≥2 份且成员 bbox 两两分离
+                    #   （水平或垂直区间不重叠）→ 是"并排独立图纸页"而非"同框
+                    #   重复画法"，big 是外包络。场景（美立方结施平面图8.1 缺 3）：
+                    #   R 层大框 146990×201938 罩列2 的 126200×59400×1 +
+                    #   84100×59400×2（并排，bbox 分离）——组数 2 ≥2 本应剔，
+                    #   但 dom_hit 排除条款（"同框重复画法比例必与外框一致"）
+                    #   因外框比例 1.374 与主导 1.416 差仅 3.1% <10% 而拒绝触发
+                    #   → 大框幸存 → 嵌套去重"留大剔小"吃掉列2 全部 3 张真图框
+                    #   （列4 的 150731×210580 同理）。同心重复画法（雅安内外框
+                    #   43031×49000/42724×48700）bbox 重叠，不触发，不受影响。
+                    #   开关 FRAME_PARSER_NO_WRAP_SEP=1 回退。
+                    _sep_hit = False
+                    if os.environ.get('FRAME_PARSER_NO_WRAP_SEP') != '1':
+                        for g in groups:
+                            if g[1] < 2:
+                                continue
+                            _mems = [ic for ic in inners
+                                     if abs(ic['width'] - g[0]['width']) / max(ic['width'], g[0]['width'], 1) < WRAP_SIZE_EPS
+                                     and abs(ic['height'] - g[0]['height']) / max(ic['height'], g[0]['height'], 1) < WRAP_SIZE_EPS]
+                            if len(_mems) < 2:
+                                continue
+                            _all_sep = True
+                            for _i1 in range(len(_mems)):
+                                for _i2 in range(_i1 + 1, len(_mems)):
+                                    _b1 = _mems[_i1]['bbox']
+                                    _b2 = _mems[_i2]['bbox']
+                                    _x_sep = (_b1[2] < _b2[0] - 1 or _b2[2] < _b1[0] - 1)
+                                    _y_sep = (_b1[3] < _b2[1] - 1 or _b2[3] < _b1[1] - 1)
+                                    if not (_x_sep or _y_sep):
+                                        _all_sep = False
+                                        break
+                                if not _all_sep:
+                                    break
+                            if _all_sep:
+                                _sep_hit = True
+                                break
                     if (len(groups) >= MIN_WRAPPED_FRAMES or
                             any(g[1] >= MIN_WRAPPED_SAME_SIZE for g in groups) or
-                            _dom_hit or _single_page_wrap):
+                            _dom_hit or _single_page_wrap or _sep_hit):
                         remove_set.add(i)
                         inner_desc = "; ".join(f"{g[0]['width']:.0f}x{g[0]['height']:.0f}×{g[1]}" for g in groups)
                         safe_log(f"  [包裹框剔除] {big['layout']} | {big['width']:.1f}x{big['height']:.1f} | 独立尺寸组{len(groups)} | bbox={big['bbox']} | 组: {inner_desc}")
