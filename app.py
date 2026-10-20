@@ -5011,6 +5011,82 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                          + ', '.join(f"{c['width']:.0f}x{c['height']:.0f}"
                                      for c in _cliff))
 
+        # ---------- R72：跨框重叠夹缝框剔除 ----------
+        # 场景（地下室柱平面布置0816 fc 12→10）：三组"上下双大框"排版
+        #   （178350×126150 ×6 / 173100×123150 ×2）的组内拼接缝上各有一个
+        #   竖长闭合多段线（129555×241435、117348×228659）——bbox 横跨上下
+        #   两框，与每框的交集占对方 61~72%、占自己 51%（错位半包含形态）。
+        #   真图纸页排布**互不重叠**。判据（关键在"伙伴数"而非"重叠对"——
+        #   夹缝框与真框互相大面积重叠，双向都会命中简单判据）：
+        #   候选 C 的"重叠伙伴"（交集 ≥ 双方面积 ×40%/30%，且互不包含 ×95%）
+        #   中存在 ≥2 个**彼此不相交**（交集 < 双方 ×5%）的成员 → C 是罩框
+        #   剔除。真框的重叠伙伴只有夹缝框 1 个 → 不剔。
+        #   开关 FRAME_PARSER_NO_OVERLAP_EVICT=1 回退。
+        if (os.environ.get('FRAME_PARSER_NO_OVERLAP_EVICT') != '1'
+                and len(frame_like) >= 3):
+
+            def _ovl_pair(a, b):
+                """重叠对：交集 ≥ 双方面积 40%/30%，且互不包含（×95%）"""
+                ax1, ay1, ax2, ay2 = a['bbox']
+                bx1, by1, bx2, by2 = b['bbox']
+                ix = min(ax2, bx2) - max(ax1, bx1)
+                iy = min(ay2, by2) - max(ay1, by1)
+                if ix <= 0 or iy <= 0:
+                    return False
+                inter = ix * iy
+                aa = a['width'] * a['height']
+                ba = b['width'] * b['height']
+                if aa <= 0 or ba <= 0:
+                    return False
+                if inter < aa * 0.30 or inter < ba * 0.40:
+                    return False
+                if inter >= aa * 0.95 or inter >= ba * 0.95:
+                    return False
+                return True
+
+            def _ovl_sep(a, b):
+                """可忽略重叠（交集 < 双方面积 ×15%——上下真框排版误差级，
+                实测 178350×126150 上下对重叠 5.8%）"""
+                ax1, ay1, ax2, ay2 = a['bbox']
+                bx1, by1, bx2, by2 = b['bbox']
+                ix = min(ax2, bx2) - max(ax1, bx1)
+                iy = min(ay2, by2) - max(ay1, by1)
+                if ix <= 0 or iy <= 0:
+                    return True
+                inter = ix * iy
+                aa = a['width'] * a['height']
+                ba = b['width'] * b['height']
+                return inter < aa * 0.15 and inter < ba * 0.15
+
+            _ovl_drop = set()
+            for _c in frame_like:
+                _partners = [o for o in frame_like
+                             if o is not _c and o['layout'] == _c['layout']
+                             and _ovl_pair(_c, o)]
+                if len(_partners) < 2:
+                    continue
+                # 伙伴中存在 ≥2 个彼此分离的成员 → C 罩在多张独立页上
+                _found = False
+                for _i1 in range(len(_partners)):
+                    for _i2 in range(_i1 + 1, len(_partners)):
+                        if _ovl_sep(_partners[_i1], _partners[_i2]):
+                            _found = True
+                            break
+                    if _found:
+                        break
+                if _found:
+                    _ovl_drop.add(id(_c))
+            if _ovl_drop:
+                _ovl_desc = ', '.join(
+                    f"{c['width']:.0f}x{c['height']:.0f}"
+                    for c in frame_like if id(c) in _ovl_drop)
+                frame_like = [c for c in frame_like if id(c) not in _ovl_drop]
+                all_candidates = [c for c in all_candidates
+                                  if id(c) not in _ovl_drop]
+                safe_log(f"  [R72·跨框重叠夹缝框剔除] 剔除 {len(_ovl_drop)} 个"
+                         f"罩在 ≥2 张互不重叠图框上的候选（错位半包含）: "
+                         + _ovl_desc)
+
         # ---------- R63：相邻同尺寸共边单元格剔除（表格页/户型表拆分格） ----------
         # 场景（图纸深化0722）：AA2A0/AB841 两个 23938×34315 闭合多段线（层 0，
         #   无内框、无图签）左右共边拼成一张户型汇总表格页（图中红标注 65454×34315

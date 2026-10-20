@@ -2611,5 +2611,30 @@ check('R70开关回退: NO_GIANT_PAGE=1 时 89100 页框全灭, fc=2 (smart)',
       lambda r: r['frame_count'] == 2
       and not any(abs(c['width'] - 89100) < 5 for c in r['candidates']))
 
+# ---- 用例 98：R72 跨框重叠夹缝框剔除（地下室柱平面布置0816 场景） ----
+# 三组"上下双大框"排版（上下真框排版重叠 5.8%），组内拼接缝上各有一个竖长
+# 闭合多段线罩在两框之间——与每框交集占对方 61~72%、占自己 51%。R72：
+# 候选的重叠伙伴中存在 ≥2 个"彼此可忽略重叠"（交集 < 双方 ×15%）的成员
+# → 罩框剔除；真框的重叠伙伴只有夹缝框 1 个 → 不剔。
+doc = make_doc()
+msp = doc.modelspace()
+for _j, _y in enumerate((0, 130000)):                 # 左组上下双框（重叠 4370≈3.5%）
+    add_closed_rect(msp, 0, _y, 173100, 123150)
+add_closed_rect(msp, 8000, 20000, 117348, 228659)     # 夹缝框（罩两框）
+for _j, _y in enumerate((0, 130000)):                 # 右组上下双框
+    add_closed_rect(msp, 200000, _y, 178350, 126150)
+add_closed_rect(msp, 208000, 20000, 129555, 241435)   # 夹缝框
+data = to_bytes(doc)
+check('R72跨框重叠: 拼接缝夹缝框剔除, fc=4 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 4
+      and not any(abs(c['width'] - 117348) < 5 or abs(c['width'] - 129555) < 5
+                  for c in r['candidates']))
+
+# 开关回退对照：夹缝框幸存（fc=6，夹缝框与双框互为重叠对）
+check('R72开关回退: NO_OVERLAP_EVICT=1 时夹缝框幸存, fc=6 (smart)',
+      lambda: _parse_env(data, FRAME_PARSER_NO_OVERLAP_EVICT='1'),
+      lambda r: r['frame_count'] == 6)
+
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
