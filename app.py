@@ -2961,6 +2961,83 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         return True
             return False
 
+        # R70 判据④：巨型页面外包络踢出 rel 分母（近√2 巨框版，补判据③盲区）
+        #   场景（g001、g003~g017 缺 9）：A-ANNO-DOTE 层 922979×625427（ratio
+        #   1.4756，√2 偏差 4.4%）全图外包络罩住全部页面——面积是真框
+        #   （89100×42000=3.74e9）的 15 万倍。R64 判据③只踢"近正方形"
+        #   （ratio<√2×0.95≈1.343），此框比例恰好近 √2 逃过 → rel 分母被霸占
+        #   （真框 rel 0.00065%）→ 89100×42000×4 条件C/F 全拒漏检；该巨框后由
+        #   R67 独立双页判据在 frame_like 层面剔除——但 rel 分母早已在剔除前
+        #   计算、污染已成。
+        #   判据（全部满足才踢）：
+        #   ① G 是同 layout 面积最大候选，且 ≥ 第二大候选 × 10（面积断层）；
+        #   ② G 严格内部包含同尺寸（±5%）、ratio 近√2（±10%）的候选 ≥2 份，
+        #      且组内存在 bbox 分离对——"并排独立页"证据（与 R67 同哲学，
+        #      区别于雅安式同心内框；内框 80600×57400 与外框 84100×59400 差
+        #      4.2% 聚同组，但组内 9 张外框两两分离 → 存在分离对 ✓）。
+        #   S015 保护：其内部内容矩形 4941×2582 ratio 1.913 非 √2±10%，
+        #   无"页面形态分离对" → 不踢 ✓。
+        #   开关 FRAME_PARSER_NO_GIANT_PAGE=1 回退。
+        _lay_top2 = {}      # layout -> [最大面积, 次大面积]
+        for _c in all_candidates:
+            if _c['area_ratio'] > 1.0:
+                continue
+            _ln = _c['layout']
+            _a = _c['area']
+            _t2 = _lay_top2.setdefault(_ln, [0.0, 0.0])
+            if _a > _t2[0]:
+                _t2[1] = _t2[0]
+                _t2[0] = _a
+            elif _a > _t2[1]:
+                _t2[1] = _a
+
+        def _giant_page_envelope_kick(c):
+            if os.environ.get('FRAME_PARSER_NO_GIANT_PAGE') == '1':
+                return False
+            _ln = c['layout']
+            _t2 = _lay_top2.get(_ln)
+            if not _t2 or _t2[1] <= 0:
+                return False
+            # ① 面积断层：G 是最大候选且 ≥ 次大 ×10
+            if c['area'] != _t2[0] or c['area'] < _t2[1] * 10:
+                return False
+            _cx1, _cy1, _cx2, _cy2 = c['bbox']
+            # ② 内部同尺寸（±5%）近√2 候选组，组内存在 bbox 分离对
+            _mems = []
+            for _f in all_candidates:
+                if _f is c or _f['layout'] != _ln or _f['area'] > c['area'] * 0.5:
+                    continue
+                if abs(_f['ratio'] / (2 ** 0.5) - 1) > 0.10:
+                    continue
+                _fb = _f['bbox']
+                if (_fb[0] >= _cx1 - 1 and _fb[1] >= _cy1 - 1 and
+                        _fb[2] <= _cx2 + 1 and _fb[3] <= _cy2 + 1):
+                    _mems.append(_f)
+            if len(_mems) < 2:
+                return False
+            _grp = []
+            for _m in _mems:
+                _placed = False
+                for _g2 in _grp:
+                    if (abs(_m['width'] - _g2[0]['width']) / max(_m['width'], _g2[0]['width'], 1) < 0.05
+                            and abs(_m['height'] - _g2[0]['height']) / max(_m['height'], _g2[0]['height'], 1) < 0.05):
+                        _g2[1].append(_m)
+                        _placed = True
+                        break
+                if not _placed:
+                    _grp.append([_m, [_m]])
+            for _g2 in _grp:
+                if len(_g2[1]) < 2:
+                    continue
+                for _i1 in range(len(_g2[1])):
+                    for _i2 in range(_i1 + 1, len(_g2[1])):
+                        _b1 = _g2[1][_i1]['bbox']
+                        _b2 = _g2[1][_i2]['bbox']
+                        if (_b1[2] < _b2[0] - 1 or _b2[2] < _b1[0] - 1
+                                or _b1[3] < _b2[1] - 1 or _b2[3] < _b1[1] - 1):
+                            return True
+            return False
+
         for c in all_candidates:
             if c['area_ratio'] > 1.0:
                 continue  # 异常候选不作为相对面积参考
@@ -2985,7 +3062,8 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     and c['area_ratio'] >= 0.5
                     and abs(c['ratio'] / (2 ** 0.5) - 1) > 0.10) or \
                (c['area_ratio'] >= 0.15 and c['ratio'] > 2.5) or \
-               _near_square_envelope_kick(c):
+               _near_square_envelope_kick(c) or \
+               _giant_page_envelope_kick(c):
                 _ln = c['layout']
                 if _ln not in layout_excluded_big or c['area'] > layout_excluded_big[_ln]['area']:
                     layout_excluded_big[_ln] = c

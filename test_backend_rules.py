@@ -72,6 +72,26 @@ def expect_error_no_frame(data):
         return '未检测到图框' in str(e)
 
 
+def expect_error_no_frame_env(data, **switches):
+    """带环境开关的"未检测到图框"断言（用后恢复）"""
+    import os as _os
+    _saved = {k: _os.environ.get(k) for k in switches}
+    for _k, _v in switches.items():
+        _os.environ[_k] = _v
+    try:
+        try:
+            parse(data)
+            return False
+        except RuntimeError as e:
+            return '未检测到图框' in str(e)
+    finally:
+        for _k, _v in _saved.items():
+            if _v is None:
+                _os.environ.pop(_k, None)
+            else:
+                _os.environ[_k] = _v
+
+
 # ---- 用例 1：竖版 A0 图框（841 x 1189），旧逻辑 ratio 得分 0.5 会被拒 ----
 doc = make_doc()
 add_closed_rect(doc.modelspace(), 0, 0, 841, 1189)
@@ -2554,6 +2574,42 @@ check('R69量级断层: 三小框短边<20%被撤, fc=3 (smart)',
 check('R69开关回退: NO_SCALE_CLIFF=1 时小框混入, fc>3 (smart)',
       lambda: _parse_env(data, FRAME_PARSER_NO_SCALE_CLIFF='1'),
       lambda r: r['frame_count'] > 3)
+
+# ---- 用例 97：R70 判据④——巨型页面外包络踢出 rel 分母（g001、g003~g017 场景） ----
+# 全图外包络 200000×135000（ratio 1.4815，√2 偏差 4.7% 恰好近 √2 逃过判据③的
+# "近正方形"窗口），面积是真框 89100×42000 的 7.6 倍（断层 ≥10 倍），内部含
+# 2 张并排独立页（89100×42000，ratio 2.1214）+ 各自内框（85600×40000 与外框
+# 聚同组但同心重叠——组内存在分离对即可）。判据④：踢出 rel 分母 → 页面框
+# rel=100% 过条件C。远端散点撑大 total 压低 area_ratio 复刻真实场景。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 0, 0, 400000, 270000)            # 全图外包络（ratio 1.4815，
+                                                      #   面积=页框 28.9 倍 → rel 3.5%）
+add_closed_rect(msp, 5000, 5000, 89100, 42000)        # 页 1（ratio 2.1214 走C）
+add_closed_rect(msp, 5000, 50000, 89100, 42000)       # 页 2（y 分离）
+add_closed_rect(msp, 7000, 7000, 85600, 40000)        # 页 1 内框（与外框聚同组）
+add_closed_rect(msp, 7000, 52000, 85600, 40000)       # 页 2 内框
+add_closed_rect(msp, 100000, 5000, 59400, 42000)      # 近√2 页 ×2（判据②触发源）
+add_closed_rect(msp, 100000, 50000, 59400, 42000)
+for _k in range(14):                                  # 近√2 页内容 ≥12（F 通道用）
+    msp.add_line((101000 + _k * 400, 6000), (101000 + _k * 400, 46000))
+for _k in range(14):
+    msp.add_line((101000 + _k * 400, 51000), (101000 + _k * 400, 91000))
+msp.add_line((3000000, 3000000), (3100000, 3000000))  # 离群实体撑大 total
+data = to_bytes(doc)
+check('R70巨框分母: 近√2全图外包络踢出rel分母, fc=4 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 4
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 89100) < 5) == 2
+      and not any(abs(c['width'] - 400000) < 5 for c in r['candidates']))
+
+# 开关回退对照：关掉判据④ → 分母被巨框霸占 → 89100 页框 rel 3.5% 全灭
+# （59400 页框 ratio 1.4143 走条件F 幸存）
+check('R70开关回退: NO_GIANT_PAGE=1 时 89100 页框全灭, fc=2 (smart)',
+      lambda: _parse_env(data, FRAME_PARSER_NO_GIANT_PAGE='1'),
+      lambda r: r['frame_count'] == 2
+      and not any(abs(c['width'] - 89100) < 5 for c in r['candidates']))
 
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
