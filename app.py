@@ -4883,6 +4883,56 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                          + ', '.join(f"{c['width']:.0f}x{c['height']:.0f}"
                                      for c in _h_evict))
 
+        # ---------- R69：救援候选量级断层撤销 ----------
+        # 场景（1#8#平面、墙、柱 fc 27→24）：三个小详图框 5950×8200（条件I
+        #   table_page）、5919×8200（table_peer 互证）、3100×6600（条件H）聚集
+        #   在图框网格外 34 万 mm 的角落——同图 24 张真框短边全部 ≥40000，三框
+        #   短边仅 3100~5950（7.8%~14.9%），量级断层。救援通道（比例/互证/内容）
+        #   天然不校验绝对量级，同模板缩放套图（春风公寓2 最小/最大短边差 41%）
+        #   又决定了不能用绝对尺寸一刀切——以「同 layout 非救援已入选图框最小
+        #   短边 × 20%」为断层线（短边×5 < 最小短边，乘法形式规避 20% 整的
+        #   浮点边界——用例33 的 3600×5=18000 恰等于 s_min 须保留）：低于它
+        #   的救援候选是异类详图轮廓。历史场景验算：0721 救援 16820（56.6%）、
+        #   52550（100%）；R65 救援 42050×29700（47.1%）；春风公寓2 救援
+        #   10735×7432（41.3%）；香槟半岛目录 15700（80%）——全部 >20% 不受影响。
+        #   开关 FRAME_PARSER_NO_SCALE_CLIFF=1 回退。
+        if os.environ.get('FRAME_PARSER_NO_SCALE_CLIFF') != '1' and frame_like:
+            _resc_tags = ('cond_h', 'table_page', 'table_peer')
+            _nonresc_min = {}   # layout -> 非救援已入选图框最小短边
+            for _c in frame_like:
+                if _c.get('rescued_by') in _resc_tags:
+                    continue
+                # 排除位于被剔包裹框内部的候选——它们是被剔外框的内部结构
+                #   （内框/内容框，随后会被嵌套去重收掉），短边不可作参照系。
+                #   实测：1#8# 图 39848×27561（70800×40000 被剔包裹框内的孤立
+                #   内容框）把 s_min 从 42000 拉低到 27561，使 5950×8200
+                #   （×5=29750）逃过断层线。
+                if _wrap_removed_items and any(
+                        _is_contained(_c, _w) for _w in _wrap_removed_items):
+                    continue
+                _ln = _c.get('layout', '')
+                _ss = min(_c['width'], _c['height'])
+                if _ln not in _nonresc_min or _ss < _nonresc_min[_ln]:
+                    _nonresc_min[_ln] = _ss
+            _cliff = []
+            for _c in frame_like:
+                if _c.get('rescued_by') not in _resc_tags:
+                    continue
+                _ln = _c.get('layout', '')
+                if _ln not in _nonresc_min:
+                    continue
+                if min(_c['width'], _c['height']) * 5 < _nonresc_min[_ln]:
+                    _cliff.append(_c)
+            if _cliff:
+                _cliff_ids = {id(c) for c in _cliff}
+                frame_like = [c for c in frame_like if id(c) not in _cliff_ids]
+                all_candidates = [c for c in all_candidates
+                                  if id(c) not in _cliff_ids]
+                safe_log(f"  [R69·救援候选量级断层撤销] 撤销 {len(_cliff)} 个"
+                         f"短边低于非救援图框最小短边 20% 的救援候选: "
+                         + ', '.join(f"{c['width']:.0f}x{c['height']:.0f}"
+                                     for c in _cliff))
+
         # ---------- R63：相邻同尺寸共边单元格剔除（表格页/户型表拆分格） ----------
         # 场景（图纸深化0722）：AA2A0/AB841 两个 23938×34315 闭合多段线（层 0，
         #   无内框、无图签）左右共边拼成一张户型汇总表格页（图中红标注 65454×34315

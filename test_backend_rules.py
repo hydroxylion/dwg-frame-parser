@@ -2516,11 +2516,44 @@ check('R68被剔外包络内H候选: 边线框内孤立小框撤销, fc=3 (smart
       lambda r: r['frame_count'] == 3
       and not any(abs(c['width'] - 11221) < 5 for c in r['candidates']))
 
-# 开关回退对照
+# 开关回退对照：关掉 R68（R69 量级断层在 20% 阈值下覆盖本场景——11221 短边
+# 7961×5=39805 < 59400 同样被撤），须双开关全关才能看到 R68 单独行为（fc=4）
 check('R68开关回退: NO_H_EVICT=1 时小框幸存, fc=4 (smart)',
-      lambda: _parse_env(data, FRAME_PARSER_NO_H_EVICT='1'),
+      lambda: _parse_env(data, FRAME_PARSER_NO_H_EVICT='1',
+                         FRAME_PARSER_NO_SCALE_CLIFF='1'),
       lambda r: r['frame_count'] == 4
       and any(abs(c['width'] - 11221) < 5 for c in r['candidates']))
+
+# ---- 用例 96：R69 救援候选量级断层撤销（1#8#平面、墙、柱 场景） ----
+# 三个小详图框 5950×8200（条件I table_page）、5919×8200（table_peer 互证）、
+# 3100×6600（条件H）聚集在图框网格外角落——同图 24 张真框短边全部 ≥40000，
+# 三框短边仅 3100~5950（7.8%~14.9%）。R69：救援候选短边 ×5 < 同 layout 非救援
+# 已入选图框最小短边 → 撤销（20% 断层线，乘法形式规避浮点边界）。
+doc = make_doc()
+msp = doc.modelspace()
+for _i in range(3):                                   # 真框网格（短边 42000）
+    add_closed_rect(msp, _i * 80000, 0, 74300, 42000)
+add_closed_rect(msp, -100000, -50000, 5950, 8200)     # 小框 1（条件I 锚：表格线）
+for _k in range(32):
+    msp.add_line((-99800, -49000 + _k * 250), (-94200, -49000 + _k * 250))
+for _k in range(10):
+    msp.add_line((-99000 + _k * 500, -49500), (-99000 + _k * 500, -39000))
+add_closed_rect(msp, -60000, -50000, 5919, 8200)      # 小框 2（peer 互证）
+_hx, _hy = -130000, -60000
+add_line_rect(msp, _hx, _hy, 4000, 7076)              # 小框 3（ratio 1.769 命中主导，条件H）
+for _k in range(14):
+    msp.add_line((_hx + 100 + _k * 250, _hy + 100),
+                 (_hx + 100 + _k * 250, _hy + 300 + (_k % 3) * 200))
+data = to_bytes(doc)
+check('R69量级断层: 三小框短边<20%被撤, fc=3 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 3
+      and not any(c['width'] < 10000 for c in r['candidates']))
+
+# 开关回退对照
+check('R69开关回退: NO_SCALE_CLIFF=1 时小框混入, fc>3 (smart)',
+      lambda: _parse_env(data, FRAME_PARSER_NO_SCALE_CLIFF='1'),
+      lambda r: r['frame_count'] > 3)
 
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
