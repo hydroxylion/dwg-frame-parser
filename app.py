@@ -3971,6 +3971,84 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             if _i_added:
                 pass_feature_count = len(frame_like)
 
+        # ---------- 条件H2：TTLB 图签层嵌套双框块救援（R65，10#商业平面图 8→9） ----------
+        # 场景：A$C7E572868 标准图框块（63050×29700 横版，ratio 2.1229）——块定义
+        #   内 TTLB 图签层画双线框（外 63050×29700 + 内 61300×28700，面积比 0.941）
+        #   + 图签块 $西南院$00000011 + 4 个对齐标记。与同图其余 8 张（竖版
+        #   ratio 1.414~1.416）比例完全不同 → 条件H 主导比例指纹不命中；rel 5.1%
+        #   <10%（分母被 135478×270275 包裹框抬高）→ 条件C 拒；块参照插入不在
+        #   条件F 范围 → 四通道全败漏检。
+        # 判据（全部满足才救援）：
+        #   ① 块定义内存在 TTLB 图签层闭合 LWPOLYLINE 嵌套对（严格内缩 + 面积比
+        #      [0.85,0.995]，与 R43 嵌套对同口径）——图签层是图框专用层，双线框
+        #      是图框标准画法，内容块极难伪造；
+        #   ② ratio ∈ [√2×0.95, 2.15]（图框形态窗，上限与闭合多段线条件C 同）；
+        #   ③ rel_area_ratio ≥ 1%（排除空间里众多小矩形之一）。
+        #   不加"被已入选框包住"护栏——包裹框（条件I 表格页）剔除在后续环节，
+        #   R63 教训：此处跳过救援会产生孤儿。
+        #   开关 FRAME_PARSER_NO_I_TTLB_BLOCK=1 回退。
+        if os.environ.get('FRAME_PARSER_NO_I_TTLB_BLOCK') != '1' and frame_like:
+            _ttlblk_cache = {}
+
+            def _block_ttlb_nested_pair(_bn):
+                if _bn in _ttlblk_cache:
+                    return _ttlblk_cache[_bn]
+                _pair = False
+                try:
+                    _rects = []
+                    for _e in (doc.blocks.get(_bn) or ()):
+                        if _e.dxftype() != 'LWPOLYLINE' or not is_polyline_closed(_e):
+                            continue
+                        if 'TTLB' not in (_e.dxf.layer or '').upper():
+                            continue
+                        _pts = list(_e.get_points())
+                        if len(_pts) < 3:
+                            continue
+                        _xs = [p[0] for p in _pts]
+                        _ys = [p[1] for p in _pts]
+                        _bb = (min(_xs), min(_ys), max(_xs), max(_ys))
+                        _ar = (_bb[2] - _bb[0]) * (_bb[3] - _bb[1])
+                        if _ar > 0:
+                            _rects.append((_bb, _ar))
+                    for _ia in range(len(_rects)):
+                        for _ib in range(len(_rects)):
+                            if _ia == _ib:
+                                continue
+                            _ob, _oa = _rects[_ia]
+                            _nb, _na = _rects[_ib]
+                            if not (0.85 <= _na / _oa <= 0.995):
+                                continue
+                            if (_nb[0] >= _ob[0] and _nb[1] >= _ob[1] and
+                                    _nb[2] <= _ob[2] and _nb[3] <= _ob[3]):
+                                _pair = True
+                                break
+                        if _pair:
+                            break
+                except Exception:
+                    _pair = False
+                _ttlblk_cache[_bn] = _pair
+                return _pair
+
+            _SQRT2_H2 = 2 ** 0.5
+            _ttlblk_added = False
+            for _c in all_candidates:
+                if _c['type'] != '块参照插入' or not _c.get('block_name'):
+                    continue
+                if not (_SQRT2_H2 * 0.95 <= _c['ratio'] <= 2.15):
+                    continue
+                if _c['rel_area_ratio'] < 0.01:
+                    continue
+                if not _block_ttlb_nested_pair(_c['block_name']):
+                    continue
+                _c['rescued_by'] = 'ttl_block'
+                frame_like.append(_c)
+                _ttlblk_added = True
+                safe_log(f"  [条件H2·图签层双框块救援] 块 {_c['block_name']} "
+                         f"{_c['width']:.0f}×{_c['height']:.0f}"
+                         f"（块内 TTLB 图签层嵌套双线框，标准图框画法，救援入选）")
+            if _ttlblk_added:
+                pass_feature_count = len(frame_like)
+
         # ---------- 孤证复核（2026-09-14，一层.dwg 0 图框误检 4 个） ----------
         # 场景：整张图没有任何图框（纯平面图 + 大样标注）。条件C 的 rel 分母是
         # "layout 内最大候选"——当最大候选本身就是标注块（一层.dwg 电梯井道大样

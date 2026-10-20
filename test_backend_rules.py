@@ -2380,5 +2380,40 @@ check('R64条件F图签层豁免: TTLB层16820x23780短边16820按F入选, fc=2 
       and any(abs(c['width'] - 16820) < 5 and abs(c['height'] - 23780) < 5
               for c in r['candidates']))
 
+# ---- 用例 92：R65 条件H2——TTLB 图签层嵌套双框块救援（10#商业平面图场景） ----
+# 标准图框块（63050×29700 横版 ratio 2.1229，块内 TTLB 层双线框 63050×29700 +
+# 61300×28700 面积比 0.941）：与同图竖版主导框（ratio 1.414）比例完全不同 →
+# 条件H 不命中；rel 4.2% <10%（分母被 300000×150000 包裹框抬高，该包裹框随后
+# 被包裹框剔除收掉）→ 条件C 拒；块参照不在条件F 范围 → 漏检。H2：块内 TTLB
+# 嵌套双框 = 标准图框画法，救援入选。
+doc = make_doc()
+msp = doc.modelspace()
+doc.layers.add('A-ANNO-TTLB')
+add_closed_rect(msp, 0, 0, 300000, 150000)            # 大地板候选（ratio 2.0 过C
+msp.add_line((5000000, 5000000), (5100000, 5000000))  #   后作包裹框被剔；远端离群
+for _i in range(3):                                   #   实体撑大 total 使其
+    add_closed_rect(msp, 5000 + _i * 70000, 5000, 63000, 89100)  #   area_ratio<50%
+_blk = doc.blocks.new(name='TTLB_FRAME_BLK')          #   不触发判据①踢分母，
+_p1 = _blk.add_lwpolyline(
+    [(0, 0), (63050, 0), (63050, 29700), (0, 29700)], close=True)
+_p1.dxf.layer = 'A-ANNO-TTLB'
+_p2 = _blk.add_lwpolyline(
+    [(875, 500), (62175, 500), (62175, 29200), (875, 29200)], close=True)
+_p2.dxf.layer = 'A-ANNO-TTLB'
+msp.add_blockref('TTLB_FRAME_BLK', (230000, 0))
+data = to_bytes(doc)
+check('R65条件H2: TTLB嵌套双框块横版图框救援, fc=4 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 4
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 63050) < 5 and abs(c['height'] - 29700) < 5) == 1
+      and not any(abs(c['width'] - 300000) < 5 for c in r['candidates']))
+
+# 开关回退对照：关掉 H2 后横版块回到漏检状态（fc=3）
+check('R65开关回退: NO_I_TTLB_BLOCK=1 时横版块漏检, fc=3 (smart)',
+      lambda: _parse_env(data, FRAME_PARSER_NO_I_TTLB_BLOCK='1'),
+      lambda r: r['frame_count'] == 3
+      and not any(abs(c['width'] - 63050) < 5 for c in r['candidates']))
+
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
