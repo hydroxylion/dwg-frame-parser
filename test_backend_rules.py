@@ -2485,5 +2485,42 @@ check('R67开关回退: NO_WRAP_SEP=1 时大框幸存吃掉独立页, fc=1 (smar
       lambda r: r['frame_count'] == 1
       and any(abs(c['width'] - 146990) < 5 for c in r['candidates']))
 
+# ---- 用例 95：R68 被剔外包络内的条件H 孤立候选撤销（美立方结施 11221×7961） ----
+# 条件H 候选（主导比例擦线命中 + 内容丰富）位于"边线"层范围框内部：该大框经
+# 条件I 入选后被包裹剔除，但 H 救援发生在条件I 之前、护栏看不到未入选的大框
+# → 孤立 H 候选幸存成多余图框。R68：被剔外包络内、无同尺寸副本的 cond_h 候选撤销。
+# 构造：主导比例真框 ×3（确立主导 1.414）+ 边线层范围框（ratio 2.45 经条件I+包裹
+# 剔除）内 1 个 11221×7961 H 候选（框内内容 ≥12）。
+doc = make_doc()
+msp = doc.modelspace()
+doc.layers.add('边线')
+for _i in range(3):
+    add_closed_rect(msp, _i * 90000, 0, 84100, 59400)
+_pl = msp.add_lwpolyline(
+    [(400000, 0), (400000 + 191760, 0), (400000 + 191760, 78166), (400000, 78166)],
+    close=True)
+_pl.dxf.layer = '边线'
+msp.add_line((3000000, 3000000), (3100000, 3000000))  # 离群实体撑大 total：
+for _k in range(40):                                  # 191760 的 ar<15% 不过 A
+    msp.add_line((401000, 2000 + _k * 1900), (590000, 2000 + _k * 1900))
+for _k in range(8):                                   # （与真实场景同时序：H 先跑
+    msp.add_line((402000 + _k * 23000, 500), (402000 + _k * 23000, 77000))
+_pl2 = msp.add_lwpolyline(
+    [(450000, 20000), (450000 + 11221, 20000),
+     (450000 + 11221, 20000 + 7961), (450000, 20000 + 7961)], close=True)
+for _k in range(14):                                  # 小框内内容 ≥12（条件H）
+    msp.add_line((450100 + _k * 500, 20500), (450100 + _k * 500, 27000))
+data = to_bytes(doc)
+check('R68被剔外包络内H候选: 边线框内孤立小框撤销, fc=3 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 3
+      and not any(abs(c['width'] - 11221) < 5 for c in r['candidates']))
+
+# 开关回退对照
+check('R68开关回退: NO_H_EVICT=1 时小框幸存, fc=4 (smart)',
+      lambda: _parse_env(data, FRAME_PARSER_NO_H_EVICT='1'),
+      lambda r: r['frame_count'] == 4
+      and any(abs(c['width'] - 11221) < 5 for c in r['candidates']))
+
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

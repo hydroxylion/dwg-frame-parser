@@ -3676,6 +3676,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         if _n >= COND_H_MIN_ENTITIES:
                             frame_like.append(c)
                             _in_fl_h.add(id(c))
+                            c['rescued_by'] = 'cond_h'
                             _h_added.append(c)
                     if _h_added:
                         pass_feature_count = len(frame_like)
@@ -4843,6 +4844,44 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 safe_log(f"  [R63·包裹框内补捞] 救回 {len(_wp_recovered)} 个被包裹框"
                          f"罩住的漏检候选（与已入选框同尺寸互证）: "
                          + ', '.join(f"{c['width']:.0f}x{c['height']:.0f}" for c in _wp_recovered))
+
+        # ---------- R68：被剔外包络内的条件H 孤立候选撤销 ----------
+        # 场景（美立方结施平面图8.1 fc 20→19）：11221×7961 闭合多段线位于
+        #   "边线"层 191760×78166 范围框内部——该大框经条件I 入选后被包裹剔除
+        #   （dom_hit），但其内的 11221 是条件H（主导比例 1.4158±0.5% 擦线
+        #   0.48% + 内容丰富）救援产物，且救援发生在条件I 之前、H 的"被已入选
+        #   框包住"护栏当时看不到尚未入选的大框 → 逃过护栏。它是范围框内的
+        #   详图轮廓而非图纸页：无同尺寸副本、短边 7961 与同图真框（≥42000）
+        #   差 5 倍。判据（全部满足才撤销）：rescued_by=='cond_h' + 位于某个
+        #   被剔包裹框内部 + 无同尺寸副本（±5mm）。有副本的候选（0721 wrap_peer
+        #   场景的同尺寸家族）不受影响；ttl_block/wrap_peer/table_page 等其他
+        #   救援通道证据更强，不在撤销范围。开关 FRAME_PARSER_NO_H_EVICT=1 回退。
+        if (_wrap_removed_items
+                and os.environ.get('FRAME_PARSER_NO_H_EVICT') != '1'):
+            _h_evict = []
+            for _c in frame_like:
+                if _c.get('rescued_by') != 'cond_h':
+                    continue
+                _has_dup = any(
+                    _o is not _c and _o['layout'] == _c['layout']
+                    and abs(_o['width'] - _c['width']) <= 5
+                    and abs(_o['height'] - _c['height']) <= 5
+                    for _o in frame_like)
+                if _has_dup:
+                    continue
+                for _w in _wrap_removed_items:
+                    if _is_contained(_c, _w):
+                        _h_evict.append(_c)
+                        break
+            if _h_evict:
+                _evict_ids = {id(c) for c in _h_evict}
+                frame_like = [c for c in frame_like if id(c) not in _evict_ids]
+                all_candidates = [c for c in all_candidates
+                                  if id(c) not in _evict_ids]
+                safe_log(f"  [R68·被剔外包络内H候选撤销] 撤销 {len(_h_evict)} 个"
+                         f"位于被剔外包络内、无同尺寸副本的条件H 候选: "
+                         + ', '.join(f"{c['width']:.0f}x{c['height']:.0f}"
+                                     for c in _h_evict))
 
         # ---------- R63：相邻同尺寸共边单元格剔除（表格页/户型表拆分格） ----------
         # 场景（图纸深化0722）：AA2A0/AB841 两个 23938×34315 闭合多段线（层 0，
