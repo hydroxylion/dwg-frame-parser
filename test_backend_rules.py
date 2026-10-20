@@ -2341,5 +2341,44 @@ check('R63护栏: 同尺寸≥3份网格拼版页豁免, fc=4 (smart)',
       and sum(1 for c in r['candidates']
               if abs(c['width'] - 14100) < 5 and abs(c['height'] - 10000) < 5) == 4)
 
+# ---- 用例 90：R64 判据③——近正方形巨型包络不作 rel 分母（1、8#商业平面图0606_t6HVAC） ----
+# N-AIR-文字层 1239572×1232218（ratio 1.006）垃圾边界矩形罩住图框簇：面积是真框
+# 128 倍、area_ratio 仅 4.4%（离群实体撑大 layout 总面积）——判据①② 都不命中，
+# 霸占 rel 分母后真框 rel 0.78% 全拒 → fc=0。判据③：ratio < √2×0.95 的近正方形
+# 候选内含 ≥2 个近√2 候选（各 ≤ 自身 1/20）→ 踢出分母。
+doc = make_doc()
+msp = doc.modelspace()
+for _i in range(3):
+    add_closed_rect(msp, 10000 + _i * 100000, 10000, 89100, 133650)
+add_closed_rect(msp, 0, 0, 600000, 600000)            # 近正方形巨框（ratio 1.0）
+add_closed_rect(msp, 3000000, 3000000, 10000, 10000)  # 离群实体撑大 layout 总面积
+data = to_bytes(doc)
+check('R64近正方形巨框包络: 踢出rel分母后框内真框按C入选, fc=3 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 3
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 89100) < 5 and abs(c['height'] - 133650) < 5) == 3
+      and not any(abs(c['width'] - 600000) < 5 for c in r['candidates']))
+
+# ---- 用例 91：R64 条件F 图签层（TTLB）短边豁免（HVAC 小附表框 16820×23780） ----
+# TTLB 图签层闭合多段线短边 16820（<20000）：ratio 1.4139 偏差 0.02%、rel 3.4%，
+# F 主门槛够不着 → 漏检。图签层是图框专用层，短边 ≥15000 即放行。
+doc = make_doc()
+msp = doc.modelspace()
+doc.layers.add('A-ANNO-TTLB')
+add_closed_rect(msp, 0, 0, 89100, 133650)             # 大框走条件C
+_pl = msp.add_lwpolyline(
+    [(200000, 0), (200000 + 16820, 0), (200000 + 16820, 23780), (200000, 23780)],
+    close=True)
+_pl.dxf.layer = 'A-ANNO-TTLB'
+for _k in range(14):                                  # 框内内容证据 ≥12
+    msp.add_line((200100 + _k * 500, 500), (200100 + _k * 500, 23000))
+data = to_bytes(doc)
+check('R64条件F图签层豁免: TTLB层16820x23780短边16820按F入选, fc=2 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 2
+      and any(abs(c['width'] - 16820) < 5 and abs(c['height'] - 23780) < 5
+              for c in r['candidates']))
+
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

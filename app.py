@@ -2922,6 +2922,45 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 continue  # 异常候选与分母排除段同口径，不参与"存在性"判定
             if abs(c['ratio'] / (2 ** 0.5) - 1) <= 0.10 and c['area_ratio'] >= 0.02:
                 _sqrt2_page_exists[c['layout']] = True
+        # R64 判据③ 预扫描：图框形态（近√2 ±10%）候选清单——供"近正方形巨框
+        #   包络"判据统计稀释对象（包络内含 ≥2 个页面级候选才踢，防 S015 式塌缩）。
+        _frame_shaped_cands = [
+            c for c in all_candidates
+            if c['area_ratio'] <= 1.0
+            and abs(c['ratio'] / (2 ** 0.5) - 1) <= 0.10]
+
+        def _near_square_envelope_kick(c):
+            # R64 判据③：近正方形巨型包络不作 rel 分母。
+            #   场景（1、8#商业平面图0606_t6HVAC fc 0→15）：N-AIR-文字层一个
+            #   1239572×1232218（ratio 1.006 近正方形）垃圾边界矩形罩住左侧图框簇，
+            #   面积是 89100×133650 真图框的 128 倍。既有判据①（area_ratio≥50%）
+            #   ②（ratio>2.5 且 ≥15%）都不命中——模型空间散布 ±10M 离群实体把
+            #   layout 总面积撑大，巨框 area_ratio 仅 4.4%；它霸占 rel 分母后 15 个
+            #   真图框 rel 全被压到 0.46~0.78% <10%，条件 C 全拒 → fc=0。
+            #   判据（全部满足才踢）：① 候选比例低于 A 系形态下限（< √2×0.95≈1.343，
+            #   近正方形/扁形——A 系图框必 ≥1.343，S015 的 1.591 真图框不受影响）；
+            #   ② area_ratio ≥ 2%（微观近正方形构件不涉及）；③ 严格内部包含 ≥2 个
+            #   图框形态候选（近√2 ±10%、面积各 ≤ 自身 1/20）——即"罩着一群页面"。
+            #   判据③ 本身含稀释对象证据，无塌缩风险，不记入 layout_excluded_big
+            #   （塌缩防护要求被排除大框占 layout ≥50%，本场景巨框仅 4.4%，不触发）。
+            #   开关 FRAME_PARSER_NO_ENVELOPE_DENOM=1 回退。
+            if os.environ.get('FRAME_PARSER_NO_ENVELOPE_DENOM') == '1':
+                return False
+            if c['ratio'] >= (2 ** 0.5) * 0.95 or c['area_ratio'] < 0.02:
+                return False
+            _cx1, _cy1, _cx2, _cy2 = c['bbox']
+            _n = 0
+            for _f in _frame_shaped_cands:
+                if _f is c or _f['layout'] != c['layout'] or _f['area'] > c['area'] / 20:
+                    continue
+                _fb = _f['bbox']
+                if (_fb[0] >= _cx1 - 1 and _fb[1] >= _cy1 - 1 and
+                        _fb[2] <= _cx2 + 1 and _fb[3] <= _cy2 + 1):
+                    _n += 1
+                    if _n >= 2:
+                        return True
+            return False
+
         for c in all_candidates:
             if c['area_ratio'] > 1.0:
                 continue  # 异常候选不作为相对面积参考
@@ -2945,7 +2984,8 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             if (_sqrt2_page_exists.get(c['layout'])
                     and c['area_ratio'] >= 0.5
                     and abs(c['ratio'] / (2 ** 0.5) - 1) > 0.10) or \
-               (c['area_ratio'] >= 0.15 and c['ratio'] > 2.5):
+               (c['area_ratio'] >= 0.15 and c['ratio'] > 2.5) or \
+               _near_square_envelope_kick(c):
                 _ln = c['layout']
                 if _ln not in layout_excluded_big or c['area'] > layout_excluded_big[_ln]['area']:
                     layout_excluded_big[_ln] = c
@@ -3321,7 +3361,15 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                          #   不了 C、短边 <20000 过不了 F 本门槛 → 漏检。救援本身
                          #   已有 ratio∈[1.30,5.5] + "≥2 份同尺寸/嵌套对" 判据 +
                          #   矩形度前置，放宽安全。
-                         or (c['short_side'] >= 15000 and c['type'] == '块内闭合线'))
+                         or (c['short_side'] >= 15000 and c['type'] == '块内闭合线')
+                         # R64：图签层（TTLB）闭合多段线放宽到 15000——
+                         #   1、8#商业平面图0606_t6HVAC 小附表框 16820×23780
+                         #   （ratio 1.4139 偏差 0.02%、rel 3.4%）画在 A-ANNO-TTLB
+                         #   图签层且短边 16820 <20000，F 主门槛够不着 → 漏 1 张。
+                         #   TTLB 层是图签/图框专用层，画在其上的闭合矩形即图框，
+                         #   误伤风险与 R58 放宽同量级。
+                         or (c['short_side'] >= 15000 and c['type'] in EXPLICIT_TYPES
+                             and 'TTLB' in (c.get('insert_layer') or '').upper()))
                     and (_cond_d_entity_count(c) >= COND_D_MIN_ENTITIES
                          # R58：嵌套对提升的块内闭合线豁免内容计数——其内容在
                          #   深层子块里计数困难（P_10# 23780 框内仅 1 个实体=内框
