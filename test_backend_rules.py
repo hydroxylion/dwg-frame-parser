@@ -2683,6 +2683,36 @@ check('R74判据2收紧: 细长轮廓踢出分母后A4加长页按C入选, fc=3 
       and any(abs(c['width'] - 21000) < 5 for c in r['candidates'])
       and not any(abs(c['width'] - 502191) < 5 for c in r['candidates']))
 
+check('R74判据2收紧: 细长轮廓踢出分母后A4加长页按C入选, fc=3 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 3
+      and any(abs(c['width'] - 21000) < 5 for c in r['candidates'])
+      and not any(abs(c['width'] - 502191) < 5 for c in r['candidates']))
+
+# ---- 用例 100：R75 布局空间超纸面候选不作 rel 分母（配电房布置-7.11 场景） ----
+# 布局空间是纸面坐标系（真页框长边 ≤ A0 加长 1486mm），TK 轴网线/内容框
+# （7000×17604、7016×6014）把分母撑爆 → 841×594 布局页 rel 1.184% 卡在
+# 条件B 的 10% 门槛下漏检。R75：布局空间候选长边 >2500mm → 不作 rel 分母。
+doc = make_doc()
+msp = doc.modelspace()
+lay1 = doc.layouts.get('Layout1')
+# TK 竖长轴网线（闭合，长边 17604）
+add_closed_rect(lay1, -3337313, -5502682, 7000, 17604)
+# TK 内容框（7016×6014——分母真凶）
+add_closed_rect(lay1, 200, 500, 7016, 6014)
+# 双层框两页（841×594 外框 + 806×574 内框，TEL_TITLE 纸面尺寸）
+add_closed_rect(lay1, 2404, 775, 841, 594)
+add_closed_rect(lay1, 2429, 785, 806, 574)
+add_closed_rect(lay1, 2404, 87, 841, 594)
+add_closed_rect(lay1, 2429, 97, 806, 574)
+data = to_bytes(doc)
+check('R75布局分母: 超纸面候选不作分母, 841x594按B入选, fc=2 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 2
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 841) < 5) == 2
+      and not any(c['width'] > 3000 for c in r['candidates']))
+
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 

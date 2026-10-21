@@ -2986,6 +2986,27 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         #   → 66900×42050（rel 112%）与 23780×16820（rel 16%）恢复条件C 入选。
         _pre_excl_giant = set()
         _giant_kicked_layouts = set()
+        # R75：布局空间超纸面尺寸候选（长边 >2500mm）不作 rel 分母——布局空间
+        #   是纸面坐标系（真页框长边 ≤ A0 加长 1486mm），TK 轴网线/内容框
+        #   （7000×17604、7016×6014）会把分母撑爆（配电房布置-7.11：841×594
+        #   布局页 rel 被压到 1.184% 卡在条件B 的 10% 门槛下漏检 2 页）。
+        _LAYOUT_PAGE_SIDE_MAX = 2500
+        # R75 纸面模式判定：layout **无**毫米级近√2 页（长边>2500 且 ratio
+        #   √2±10%）**且有**纸面尺寸候选（短边 200~2500 且 ratio √2±10%）才
+        #   启用过滤——d012/d013 类图的布局空间按模型比例画（84100×59400 页框，
+        #   基线 fc=3/4 的组成部分），一刀切会误踢其分母致整布局 rel 塌缩。
+        _model_scale_layouts = set()
+        _paper_mode_layouts = set()
+        for _c in all_candidates:
+            if _c['layout'] == '模型空间':
+                continue
+            _ls = max(_c['width'], _c['height'])
+            _ss = min(_c['width'], _c['height'])
+            if _ls > _LAYOUT_PAGE_SIDE_MAX and abs(_c['ratio'] / (2 ** 0.5) - 1) <= 0.10:
+                _model_scale_layouts.add(_c['layout'])
+            elif 200 <= _ss <= _LAYOUT_PAGE_SIDE_MAX and abs(_c['ratio'] / (2 ** 0.5) - 1) <= 0.10:
+                _paper_mode_layouts.add(_c['layout'])
+        _paper_mode_layouts -= _model_scale_layouts
         for _c in all_candidates:
             if _c['area_ratio'] > 1.0:
                 _pre_excl_giant.add(id(_c))
@@ -3059,6 +3080,9 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         for c in all_candidates:
             if c['area_ratio'] > 1.0:
                 continue  # 异常候选不作为相对面积参考
+            if (c['layout'] in _paper_mode_layouts
+                    and max(c['width'], c['height']) > _LAYOUT_PAGE_SIDE_MAX):
+                continue
             # 内容级底图/排版大外框不作 rel 分母（两条判据互补，覆盖两类底图）：
             #   ① 面积占比 ≥50% 且比例偏离 √2 超 10%（一楼大厅及展厅：261665×214254
             #      闭合多段线 ratio 1.22、area_ratio 92% 包住全部页面——若留作分母，10 张
@@ -5527,7 +5551,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #   （fc 7→11），但救援通道已把关过、R52 的职责正是清这类边角产物。
             _model_keep = [c for c in _model_cands
                            if abs(c['ratio'] - _sqrt2_r52) / _sqrt2_r52 <= 0.02
-                           or (c.get('rel_area_ratio', 0) >= 0.30
+                           or (c.get('rel_area_ratio', 0) >= 0.25
                                and len(_model_cands) >= 3
                                and not c.get('rescued_by'))]
             _model_frame_n = len(_model_cands)
