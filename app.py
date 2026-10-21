@@ -4594,6 +4594,13 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         #   并排独立页 bbox 分离——以"存在任意分离对"区分。
                         #   开关 FRAME_PARSER_NO_WRAP_SEP=1 回退。
                         _sep_big_drop = False
+                        # R76：独立双页"同尺寸"容差 5%→2%——火警系统.dwg 场景：
+                        #   84100×59400 页内的系统图表格分格（27657×18687 /
+                        #   27115×18680 / 27657×19599，彼此差 2~4.9%）在 5% 容差下
+                        #   聚成"同尺寸并排独立页"→ 3 张标准页（84100×59400×2 +
+                        #   80600×57400 内框）被误剔。真"并排独立页"是同模板同尺寸
+                        #   （≤2%），分格高度差 4.9% 自然拆组。
+                        _R67_SIZE_EPS = 0.01
                         if os.environ.get('FRAME_PARSER_NO_WRAP_SEP') != '1':
                             _sep_inners = [cands[j] for j in indices
                                            if j != i and _is_contained(cands[j], big)
@@ -4602,8 +4609,8 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                             for _sic in _sep_inners:
                                 _placed = False
                                 for _sg in _sep_groups:
-                                    if (abs(_sic['width'] - _sg[0]['width']) / max(_sic['width'], _sg[0]['width'], 1) < WRAP_SIZE_EPS
-                                            and abs(_sic['height'] - _sg[0]['height']) / max(_sic['height'], _sg[0]['height'], 1) < WRAP_SIZE_EPS):
+                                    if (abs(_sic['width'] - _sg[0]['width']) / max(_sic['width'], _sg[0]['width'], 1) < _R67_SIZE_EPS
+                                            and abs(_sic['height'] - _sg[0]['height']) / max(_sic['height'], _sg[0]['height'], 1) < _R67_SIZE_EPS):
                                         _sg[1] += 1
                                         _placed = True
                                         break
@@ -4613,8 +4620,8 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                 if _sg[1] < 2:
                                     continue
                                 _mems = [_sic for _sic in _sep_inners
-                                         if abs(_sic['width'] - _sg[0]['width']) / max(_sic['width'], _sg[0]['width'], 1) < WRAP_SIZE_EPS
-                                         and abs(_sic['height'] - _sg[0]['height']) / max(_sic['height'], _sg[0]['height'], 1) < WRAP_SIZE_EPS]
+                                         if abs(_sic['width'] - _sg[0]['width']) / max(_sic['width'], _sg[0]['width'], 1) < _R67_SIZE_EPS
+                                         and abs(_sic['height'] - _sg[0]['height']) / max(_sic['height'], _sg[0]['height'], 1) < _R67_SIZE_EPS]
                                 for _m1i in range(len(_mems)):
                                     for _m2i in range(_m1i + 1, len(_mems)):
                                         _b1 = _mems[_m1i]['bbox']

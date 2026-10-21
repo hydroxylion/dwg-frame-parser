@@ -2713,6 +2713,44 @@ check('R75布局分母: 超纸面候选不作分母, 841x594按B入选, fc=2 (sm
               if abs(c['width'] - 841) < 5) == 2
       and not any(c['width'] > 3000 for c in r['candidates']))
 
+check('R75布局分母: 超纸面候选不作分母, 841x594按B入选, fc=2 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 2
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 841) < 5) == 2
+      and not any(c['width'] > 3000 for c in r['candidates']))
+
+# ---- 用例 101：R76 R67 同尺寸容差 5%→1%（火警系统.dwg 场景） ----
+# 84100×59400 页内画系统图表格：分格 27657×18687（左）+ 27115×18680（右）并排
+# + 27657×19599（下）——分格彼此差 2~4.9%，旧 R67 容差 5% 把它们聚成"同尺寸
+# 并排独立页"→ 3 张标准页（84100×59400×2 + 内框 80600×57400）被误剔、6 张
+# 分格漏检成图框。R76：R67 独立双页"同尺寸"容差收 1%（同模板页差 ≤0.5%），
+# 分格自然拆组（各组 1 份 <2 不触发）→ 嵌套去重收分格、标准页保留。
+doc = make_doc()
+msp = doc.modelspace()
+# 页 A（84100×59400 外框 + 80600×57400 内框）+ 表格分格 3 个
+add_closed_rect(msp, 0, 0, 84100, 59400)
+add_closed_rect(msp, 2500, 1000, 80600, 57400)
+add_line_rect(msp, 11453, 26878, 27657, 18687)        # 分格左上（#2）
+add_line_rect(msp, 44343, 26878, 27115, 18680)        # 分格右上（#3）
+add_line_rect(msp, 11453, 3138, 27657, 19599)         # 分格下（#4）
+# 页 B（同构）
+add_closed_rect(msp, 0, -64148, 84100, 59400)
+add_closed_rect(msp, 2500, -63148, 80600, 57400)
+add_line_rect(msp, 11453, -37270, 27657, 18687)       # 分格左上（#5）
+add_line_rect(msp, 44343, -37278, 27115, 18680)       # 分格右上（#6）
+add_line_rect(msp, 11453, -60010, 27657, 19599)       # 分格下（#7）
+# 独立 A1 页（59400×42000）
+add_closed_rect(msp, -560449, -3096030, 59400, 42000)
+data = to_bytes(doc)
+check('R76容差收紧: 表格分格不触发独立双页, 标准页保留 fc=3 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 3
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 84100) < 5) == 2
+      and any(abs(c['width'] - 59400) < 5 for c in r['candidates'])
+      and not any(c['width'] < 30000 for c in r['candidates']))
+
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 
