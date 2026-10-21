@@ -2654,6 +2654,35 @@ check('R52豁免: rel>=30%主导框在布局页并存时保留, fc=11 (smart)',
       and sum(1 for c in r['candidates']
               if abs(c['width'] - 59450) < 5) == 4)
 
+check('R52豁免: rel>=30%主导框在布局页并存时保留, fc=11 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 11
+      and any(abs(c['width'] - 66900) < 5 for c in r['candidates'])
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 59450) < 5) == 4)
+
+# ---- 用例 97d：R74 判据②ar 门槛取消——细长/未闭合内容线不作 rel 分母 ----
+# 场景（20130729地下室 21000×14850 漏检）：A-FLOR-FIRE 层细长防火分区轮廓
+#   （ratio 2.833，ar 仅 0.45%）与未闭合 43 顶点边界线（ratio 2.452，w×h
+#   3.96e9）先后霸占 rel 分母 → A4 加长页 21000×14850（ratio 1.4141）rel
+#   9.946% 差 0.054pp 卡在条件C 门槛下。R74：判据②取消 ar 门槛（ratio>2.5
+#   一律踢出分母——真页框长宽比 ≤2.1+余量，ratio>2.5 绝非图框）；
+#   未闭合多段线不进候选（collect 仅收闭合），无需额外处理。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 229001, 506690, 502191, 301192)  # 二级大框（判据④踢分母）
+add_closed_rect(msp, 457356, 658780, 59450, 42050)    # 页 1（近√2，判据④触发源）
+add_closed_rect(msp, 518056, 658780, 59450, 42050)    # 页 2（分离）
+add_closed_rect(msp, 457356, 744502, 21000, 14850)    # A4 加长页（21000×14850）
+# 细长防火分区轮廓（闭合，ratio 2.833，ar 0.45%——旧判据②ar≥15% 挡不住）
+add_closed_rect(msp, 124952, 48028, 51566, 146102)
+data = to_bytes(doc)
+check('R74判据2收紧: 细长轮廓踢出分母后A4加长页按C入选, fc=3 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 3
+      and any(abs(c['width'] - 21000) < 5 for c in r['candidates'])
+      and not any(abs(c['width'] - 502191) < 5 for c in r['candidates']))
+
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 

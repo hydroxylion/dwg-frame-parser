@@ -2993,7 +2993,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             if ((_sqrt2_page_exists.get(_c['layout'])
                     and _c['area_ratio'] >= 0.5
                     and abs(_c['ratio'] / (2 ** 0.5) - 1) > 0.10)
-                    or (_c['area_ratio'] >= 0.15 and _c['ratio'] > 2.5)
+                    or _c['ratio'] > 2.5
                     or _near_square_envelope_kick(_c)):
                 _pre_excl_giant.add(id(_c))
         _lay_top2 = {}      # layout -> [最大面积, 次大面积]（①②③预排除后）
@@ -3079,7 +3079,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             _kicked_123 = ((_sqrt2_page_exists.get(c['layout'])
                             and c['area_ratio'] >= 0.5
                             and abs(c['ratio'] / (2 ** 0.5) - 1) > 0.10)
-                           or (c['area_ratio'] >= 0.15 and c['ratio'] > 2.5)
+                           or c['ratio'] > 2.5
                            or _near_square_envelope_kick(c))
             _kicked_4 = False
             if not _kicked_123:
@@ -3152,7 +3152,11 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             # 原本被 10% 门槛压住的家具矩形（rel 1.9~9.7%）全部涌入条件C 并靠互证链
             # 逃生 → fc 0→11。取 max 计回天然自限：只修"塌缩"，无塌缩的图零影响。
             _rej_ma = _r27_rejected_max_area.get(c['layout'], 0)
-            if _rej_ma > ma:
+            # R74：判据④命中（_giant_kicked_layouts）的 layout 已有 TTLB 页面
+            #   体系作真分母——R27 拒内容块的计回反而污染分母（本图计回
+            #   3.137e9 > TTLB 主导框 2.813e9 → 21000×14850 rel 从 11.1% 被压
+            #   到 9.946% 差 0.054pp 卡在条件C 门槛下漏检）→ 不计回。
+            if _rej_ma > ma and c['layout'] not in _giant_kicked_layouts:
                 ma = _rej_ma
             c['rel_area_ratio'] = (c['area'] / ma) if ma > 0 else 0.0
 
@@ -3575,14 +3579,6 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             return False
 
         frame_like = [c for c in all_candidates if is_frame_like(c)]
-        if os.environ.get('FRAME_PARSER_DBG_R74') == '1':
-            for _c in all_candidates:
-                if ((abs(_c['width'] - 23780) < 50 and abs(_c['height'] - 16820) < 50)
-                        or (abs(_c['width'] - 66900) < 50 and abs(_c['height'] - 42050) < 50)):
-                    safe_log(f"   [DBG-R74] 特征筛选 {_c['type']} {_c['width']:.0f}x{_c['height']:.0f} "
-                             f"at ({_c['bbox'][0]:.0f},{_c['bbox'][1]:.0f}) "
-                             f"ratio={_c['ratio']:.4f} ar={_c['area_ratio']:.3%} "
-                             f"rel={_c['rel_area_ratio']:.3%} in_fl={id(_c) in {id(x) for x in frame_like}}")
         pass_feature_count = len(frame_like)
 
         # ---------- 同块名族"一荣俱荣"传播（2.8米皮带线 fc 3→13） ----------
@@ -5537,12 +5533,6 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             _model_frame_n = len(_model_cands)
             if _paper_layouts and _paper_frame_n >= 4 and _model_frame_n > len(_model_keep):
                 frame_like = _model_keep + [c for c in frame_like if c['layout'] != '模型空间']
-                if os.environ.get('FRAME_PARSER_DBG_R74') == '1':
-                    for _c in frame_like:
-                        if _c['layout'] == '模型空间' and id(_c) not in {id(x) for x in _model_keep}:
-                            safe_log(f"   [DBG-R74] R52剔除 {_c['type']} {_c['width']:.0f}x{_c['height']:.0f} "
-                                     f"at ({_c['bbox'][0]:.0f},{_c['bbox'][1]:.0f}) ratio={_c['ratio']:.4f} "
-                                     f"rel={_c['rel_area_ratio']:.3%} rescued={_c.get('rescued_by','')}")
                 safe_log(f"  [布局空间优先] 布局空间 {_paper_layouts} 已识别 {_paper_frame_n} 个"
                          f"网格排版图纸页 → 剔除模型空间候选 {_model_frame_n - len(_model_keep)} 个"
                          f"（√2 比例的 {len(_model_keep)} 个豁免保留，"
