@@ -2978,9 +2978,27 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         #   S015 保护：其内部内容矩形 4941×2582 ratio 1.913 非 √2±10%，
         #   无"页面形态分离对" → 不踢 ✓。
         #   开关 FRAME_PARSER_NO_GIANT_PAGE=1 回退。
-        _lay_top2 = {}      # layout -> [最大面积, 次大面积]
+        #   R74 修正：_lay_top2 基于"①②③预排除后"的候选计算——
+        #   场景（20130729地下室 缺 5）：0 层 1611187×408405（ratio 3.945）被
+        #   判据②踢出后，502191×301192（ar 10.6%、ratio 1.667）①②③全不命中
+        #   成分母；旧版判据④的 top1=1611187（断层 4.35<10）→ 502191 逃过。
+        #   修正后 top2 基于剩余候选（59450×42050 系），502191 断层 54 倍 → 踢
+        #   → 66900×42050（rel 112%）与 23780×16820（rel 16%）恢复条件C 入选。
+        _pre_excl_giant = set()
+        _giant_kicked_layouts = set()
         for _c in all_candidates:
             if _c['area_ratio'] > 1.0:
+                _pre_excl_giant.add(id(_c))
+                continue
+            if ((_sqrt2_page_exists.get(_c['layout'])
+                    and _c['area_ratio'] >= 0.5
+                    and abs(_c['ratio'] / (2 ** 0.5) - 1) > 0.10)
+                    or (_c['area_ratio'] >= 0.15 and _c['ratio'] > 2.5)
+                    or _near_square_envelope_kick(_c)):
+                _pre_excl_giant.add(id(_c))
+        _lay_top2 = {}      # layout -> [最大面积, 次大面积]（①②③预排除后）
+        for _c in all_candidates:
+            if id(_c) in _pre_excl_giant:
                 continue
             _ln = _c['layout']
             _a = _c['area']
@@ -3058,12 +3076,19 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #  判据① 豁免（2026-09-23，S015.dwg）：layout 内**不存在**近√2 页面级候选时
             #  （_sqrt2_page_exists=False），非标比例大框不踢出分母——没有稀释对象，
             #  踢出只会导致分母塌缩（见上方预扫描注释）。
-            if (_sqrt2_page_exists.get(c['layout'])
-                    and c['area_ratio'] >= 0.5
-                    and abs(c['ratio'] / (2 ** 0.5) - 1) > 0.10) or \
-               (c['area_ratio'] >= 0.15 and c['ratio'] > 2.5) or \
-               _near_square_envelope_kick(c) or \
-               _giant_page_envelope_kick(c):
+            _kicked_123 = ((_sqrt2_page_exists.get(c['layout'])
+                            and c['area_ratio'] >= 0.5
+                            and abs(c['ratio'] / (2 ** 0.5) - 1) > 0.10)
+                           or (c['area_ratio'] >= 0.15 and c['ratio'] > 2.5)
+                           or _near_square_envelope_kick(c))
+            _kicked_4 = False
+            if not _kicked_123:
+                _kicked_4 = _giant_page_envelope_kick(c)
+                if _kicked_4:
+                    # R74：判据④命中 = 该 layout 内存在"页面体系"（≥2 页近√2
+                    #   分离对），塌缩防护不得将此空间 rel 置 0
+                    _giant_kicked_layouts.add(c['layout'])
+            if _kicked_123 or _kicked_4:
                 _ln = c['layout']
                 if _ln not in layout_excluded_big or c['area'] > layout_excluded_big[_ln]['area']:
                     layout_excluded_big[_ln] = c
@@ -3094,6 +3119,10 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             _REL_DENOM_MIN_SHARE = 0.0     # A/B 回归对照用
         _no_ref_layouts = set()
         for _ln, _ma in layout_max_area.items():
+            # R74：判据④（巨型页面外包络）命中的 layout 内部必有 ≥2 页近√2
+            #   分离对——页面参照系存在，塌缩防护不适用
+            if _ln in _giant_kicked_layouts:
+                continue
             _total = msp_total if _ln == '模型空间' else None
             if _total is None:
                 # 布局空间总面积：用该 layout 候选的 area/area_ratio 反推最稳妥
@@ -3546,6 +3575,14 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             return False
 
         frame_like = [c for c in all_candidates if is_frame_like(c)]
+        if os.environ.get('FRAME_PARSER_DBG_R74') == '1':
+            for _c in all_candidates:
+                if ((abs(_c['width'] - 23780) < 50 and abs(_c['height'] - 16820) < 50)
+                        or (abs(_c['width'] - 66900) < 50 and abs(_c['height'] - 42050) < 50)):
+                    safe_log(f"   [DBG-R74] 特征筛选 {_c['type']} {_c['width']:.0f}x{_c['height']:.0f} "
+                             f"at ({_c['bbox'][0]:.0f},{_c['bbox'][1]:.0f}) "
+                             f"ratio={_c['ratio']:.4f} ar={_c['area_ratio']:.3%} "
+                             f"rel={_c['rel_area_ratio']:.3%} in_fl={id(_c) in {id(x) for x in frame_like}}")
         pass_feature_count = len(frame_like)
 
         # ---------- 同块名族"一荣俱荣"传播（2.8米皮带线 fc 3→13） ----------
@@ -5482,11 +5519,30 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                               if ln != '模型空间']
             _paper_frame_n = sum(1 for c in frame_like if c['layout'] != '模型空间')
             _model_cands = [c for c in frame_like if c['layout'] == '模型空间']
+            # R74 豁免扩展：rel ≥30% 的模型候选是"模型空间主导图框"而非页面
+            #   内容源——场景（20130729地下室-(0版)-0-1_t8 模型 9→13）：模型空间
+            #   同时存在 59450×42050 网格页 ×9（√2 豁免）与 66900×42050 独立
+            #   大框（ratio 1.591、rel 37.3%，被"布局空间优先"误剔）；布局"出图9"
+            #   有 9 张真页触发本规则。rel ≥30% 说明候选在模型空间自成参照系
+            #   （内容源候选 rel 只有个位数 %），豁免保留。前置"模型候选 ≥3"：
+            #   DS4 场景模型仅 2 个内容框（互为分母 rel=100% 无参照意义）不适用。
+            #   R74 收紧：救援候选（rescued_by 非空）不享受本豁免——大样图(内外
+            #   保温) 场景：条件I 产物 36740×28700 系 rel 84% 会被豁免保留
+            #   （fc 7→11），但救援通道已把关过、R52 的职责正是清这类边角产物。
             _model_keep = [c for c in _model_cands
-                           if abs(c['ratio'] - _sqrt2_r52) / _sqrt2_r52 <= 0.02]
+                           if abs(c['ratio'] - _sqrt2_r52) / _sqrt2_r52 <= 0.02
+                           or (c.get('rel_area_ratio', 0) >= 0.30
+                               and len(_model_cands) >= 3
+                               and not c.get('rescued_by'))]
             _model_frame_n = len(_model_cands)
             if _paper_layouts and _paper_frame_n >= 4 and _model_frame_n > len(_model_keep):
                 frame_like = _model_keep + [c for c in frame_like if c['layout'] != '模型空间']
+                if os.environ.get('FRAME_PARSER_DBG_R74') == '1':
+                    for _c in frame_like:
+                        if _c['layout'] == '模型空间' and id(_c) not in {id(x) for x in _model_keep}:
+                            safe_log(f"   [DBG-R74] R52剔除 {_c['type']} {_c['width']:.0f}x{_c['height']:.0f} "
+                                     f"at ({_c['bbox'][0]:.0f},{_c['bbox'][1]:.0f}) ratio={_c['ratio']:.4f} "
+                                     f"rel={_c['rel_area_ratio']:.3%} rescued={_c.get('rescued_by','')}")
                 safe_log(f"  [布局空间优先] 布局空间 {_paper_layouts} 已识别 {_paper_frame_n} 个"
                          f"网格排版图纸页 → 剔除模型空间候选 {_model_frame_n - len(_model_keep)} 个"
                          f"（√2 比例的 {len(_model_keep)} 个豁免保留，"

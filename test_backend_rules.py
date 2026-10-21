@@ -2611,6 +2611,52 @@ check('R70开关回退: NO_GIANT_PAGE=1 时 89100 页框全灭, fc=2 (smart)',
       lambda r: r['frame_count'] == 2
       and not any(abs(c['width'] - 89100) < 5 for c in r['candidates']))
 
+# ---- 用例 97b：R74 判据④修正——top2 基于①②③预排除后候选 ----
+# 场景（20130729地下室-(0版)-0-1_t8）：1611187×408405（ratio 3.945）被判据②
+# 踢出分母后，502191×301192（ar 10.6%、ratio 1.667）①②③全不命中成分母；
+# 旧版判据④ top1=1611187（断层 4.35<10）→ 502191 逃过 → 66900×42050
+# （ratio 1.591，rel 1.86%<10%）与 23780×16820 漏检。修正后 top2 基于
+# 剩余候选 → 502191 断层 54 倍被踢 → 两类框恢复条件C。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 0, 0, 1611187, 408405)           # 超宽总框（判据②：ar+ratio>2.5）
+add_closed_rect(msp, 229001, 506690, 502191, 301192)  # 二级大框（判据④目标）
+add_closed_rect(msp, 457356, 658780, 59450, 42050)    # 页 1（近√2，判据②触发源）
+add_closed_rect(msp, 518056, 658780, 59450, 42050)    # 页 2（分离）
+add_closed_rect(msp, 287318, 566488, 66900, 42050)    # 独立框（ratio 1.591）
+add_closed_rect(msp, 288568, 566988, 65150, 41050)    # 其内框（孤证复核⑥互证）
+data = to_bytes(doc)
+check('R74判据4修正: 二级大框踢出分母后66900框按C入选, fc=4 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 4
+      and any(abs(c['width'] - 66900) < 5 for c in r['candidates'])
+      and not any(abs(c['width'] - 502191) < 5 for c in r['candidates']))
+# ---- 用例 97c：R52 rel 豁免（同图布局空间并存场景） ----
+# 模型空间同时存在 √2 网格页（59450×42050 ×4）与 66900×42050 独立大框
+# （rel ≥30%）；布局空间有 6 张网格页触发"布局空间优先"→ R52 豁免 rel ≥30%
+# 且模型候选 ≥3 的主导框。
+doc = make_doc()
+msp = doc.modelspace()
+for _i in range(2):
+    for _j in range(2):
+        add_closed_rect(msp, 457356 + _i * 60700, 658780 + _j * 43050,
+                        59450, 42050)
+add_closed_rect(msp, 287318, 566488, 66900, 42050)
+lay1 = doc.layouts.get('Layout1')
+for _i in range(3):
+    for _j in range(2):
+        add_closed_rect(lay1, 40 + _i * 2522, 104 + _j * 1490, 1189, 841)
+data = to_bytes(doc)
+check('R52豁免: rel>=30%主导框在布局页并存时保留, fc=11 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 11
+      and any(abs(c['width'] - 66900) < 5 for c in r['candidates'])
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 59450) < 5) == 4)
+
+
+print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
+
 # ---- 用例 98：R72 跨框重叠夹缝框剔除（地下室柱平面布置0816 场景） ----
 # 三组"上下双大框"排版（上下真框排版重叠 5.8%），组内拼接缝上各有一个竖长
 # 闭合多段线罩在两框之间——与每框交集占对方 61~72%、占自己 51%。R72：
