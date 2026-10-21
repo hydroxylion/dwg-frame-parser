@@ -4332,6 +4332,68 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                              f"候选（相邻共边连通分量 ≥3、无同尺寸组≥3/图签层/内框豁免）: "
                              f"{_gc_drop_desc}")
 
+
+        # ---------- R77c：比例空窗内容轮廓剔除（g013~g016 模型 5 张多出） ----------
+        # 场景：g013~g016（结构图）模型空间的真页是 118900×84100（√2），而
+        #   S-FLOOR 基坑轮廓 117348×228659（ratio 1.949）、TK 块基础外框
+        #   116423×225000×3（1.933）、113796×225772（1.984）——全部落在
+        #   1.93~1.98 的"比例空窗"被条件C 收入（rel 92~100%）。真页比例只有
+        #   三簇：√2（A 系）、1.769（105100×59400/148600×84100 加长）、
+        #   2.122（29700×63050 加长）——1.82~2.06 之间无任何真页形态。
+        #   判据：模型空间存在 √2±1% 标准页（页面级，短边 ≥20000）时，面积
+        #   ≥ 该标准页 ×0.25、ratio ∈ (1.822, 2.058) 空窗的候选 → 内容轮廓
+        #   剔除（117348 1.949 / 116423 1.933 / 113796 1.984 全命中）。
+        #   护栏：105100×59400（1.769）与 29700×63050（2.122）真页在空窗外；
+        #   小内容框（面积 <25%）不受影响；布局空间不启用。
+        #   开关 FRAME_PARSER_NO_STD_RATIO=1 回退。
+        if (os.environ.get('FRAME_PARSER_NO_STD_RATIO') != '1'
+                and frame_like):
+            _ms_c77 = [c for c in frame_like if c.get('layout') == '模型空间']
+            _std_page_area = 0.0
+            for _c in _ms_c77:
+                if (abs(_c['ratio'] / (2 ** 0.5) - 1) <= 0.01
+                        and min(_c['width'], _c['height']) >= 20000
+                        and _c['width'] * _c['height'] > _std_page_area):
+                    _std_page_area = _c['width'] * _c['height']
+            if _std_page_area > 0:
+                _c77_drop = set()
+                for _c in _ms_c77:
+                    if _c['width'] * _c['height'] < _std_page_area * 0.25:
+                        continue
+                    # 图层豁免：TTLB/TITLE 层候选是出图框（拼接图 245250×126150
+                    #   ratio 1.9447 真框），不做空窗剔除；g013 的基坑轮廓在
+                    #   S-FLOOR 层 → 剔。
+                    _cl = _c.get('insert_layer', '').upper()
+                    if 'TTLB' in _cl or 'TITLE' in _cl:
+                        continue
+                    # 斜放框豁免：tilted 候选的 ratio 是旋转校正后口径，与 bbox
+                    #   口径不同源（拼接图 245250×126150 斜放页校正 r1.406 被
+                    #   bbox 口径的空窗判定误剔）——不做空窗剔除。
+                    if _c.get('tilted'):
+                        continue
+                    if 1.822 < _c['ratio'] < 2.058:
+                        _c77_drop.add(id(_c))
+                # R76 同实体双口径豁免：同 (w,h) 存在 tilted √2 校正版候选
+                #   （拼接图 245250×126150 有 r1.406 校正版与 r1.944 bbox 版两套）
+                #   → 该尺寸是斜放真页，整组不剔。
+                _tilted_sizes = {(round(_c['width']), round(_c['height']))
+                                 for _c in all_candidates if _c.get('tilted')}
+                _c77_drop = {_iid for _iid in _c77_drop
+                             if next((round(_c['width']), round(_c['height']))
+                                     for _c in _ms_c77 if id(_c) == _iid)
+                             not in _tilted_sizes}
+                if _c77_drop:
+                    _c77_desc = ', '.join(
+                        f"{c['width']:.0f}x{c['height']:.0f}(r{_c['ratio']:.3f})"
+                        for c in frame_like if id(c) in _c77_drop)
+                    frame_like = [c for c in frame_like
+                                  if id(c) not in _c77_drop]
+                    all_candidates = [c for c in all_candidates
+                                      if id(c) not in _c77_drop]
+                    safe_log(f"  [R77c·比例空窗内容轮廓剔除] 剔除 {len(_c77_drop)} 个"
+                             f"ratio 落在真页空窗（1.822~2.058）的大候选: "
+                             + _c77_desc)
+
         # ---------- 孤证复核（2026-09-14，一层.dwg 0 图框误检 4 个） ----------
         # 场景：整张图没有任何图框（纯平面图 + 大样标注）。条件C 的 rel 分母是
         # "layout 内最大候选"——当最大候选本身就是标注块（一层.dwg 电梯井道大样
@@ -4447,8 +4509,19 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
 
         if _SOLO_RECHECK_ENABLED and frame_like:
             _solo_rm = []
+
             for _c in frame_like:
                 if _c.get('_via') != 'C' or _c['area_ratio'] >= 0.05:
+                    continue
+                # R77：块参照插入图框（整块 S-BORDER/图框块）rel ≥30% 是空间
+                #   主导框，不属于"空间里众多小矩形之一"——豁免（g013~g016：
+                #   TKA0 块 118900×84100 rel 37.3% 被孤证 score=0 误剔）。
+                #   限边界图层（BORDER/TTLB）——匿名内容块（a6/DOOR_SYM 类）
+                #   在 0 层不豁免（孤证⑤扩词/无图框图纸用例护栏）。
+                _ul = _c.get('insert_layer', '').upper()
+                if (_c.get('type') == '块参照插入'
+                        and _c.get('rel_area_ratio', 0) >= 0.30
+                        and ('BORDER' in _ul or 'TTLB' in _ul)):
                     continue
                 _score, _hits = _solo_evidence_score(_c)
                 if _score < _SOLO_SCORE_THRESHOLD:
@@ -5192,6 +5265,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                          f"罩在 ≥2 张互不重叠图框上的候选（错位半包含）: "
                          + _ovl_desc)
 
+
         # ---------- R63：相邻同尺寸共边单元格剔除（表格页/户型表拆分格） ----------
         # 场景（图纸深化0722）：AA2A0/AB841 两个 23938×34315 闭合多段线（层 0，
         #   无内框、无图签）左右共边拼成一张户型汇总表格页（图中红标注 65454×34315
@@ -5414,6 +5488,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
 
         def deduplicate_candidates(cands):
             """按 layout 分组，组内去除嵌套候选和高度重叠候选，保留面积最大者"""
+            _r77d_drop_outers = set()
             if len(cands) <= 1:
                 return cands
             # 按 layout 分组
@@ -5444,6 +5519,37 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                 cx1 >= ox1 - NESTED_EPS and cy1 >= oy1 - NESTED_EPS and
                                 cx2 <= ox2 + NESTED_EPS and cy2 <= oy2 + NESTED_EPS and
                                 c['area'] < outer['area'] * NESTED_AREA_RATIO):
+                            # R77d：√2 页反转保护——被包含候选 ratio 近√2±2%、
+                            #   包含者 ratio 偏离 √2 >10%、被含面积 ≥ 包含者 25%
+                            #   → 内框是真页、外框是内容外框（S-修改 修改范围线/
+                            #   基坑围界），留小剔大（g013~g016：118900×84100
+                            #   被 205000×120000 包住按嵌套剔小丢失）。
+                            #   面积 25% 门槛排除真·标题栏嵌套（11% 的目录页/
+                            #   4.8% 的大厅页不受影响）。
+                            _std_r77d = (abs(outer['ratio'] / (2 ** 0.5) - 1) <= 0.03
+                                         or abs(outer['ratio'] - 105100 / 59400) / (105100 / 59400) <= 0.03
+                                         or abs(outer['ratio'] - 63050 / 29700) / (63050 / 29700) <= 0.03)
+                            _c77d_ev = (c.get('type') == '块参照插入'
+                                        or 'BORDER' in c.get('insert_layer', '').upper()
+                                        or 'TTLB' in c.get('insert_layer', '').upper())
+                            # outer 有同尺寸兄弟（±2%）≥1 → 外框是真页组
+                            #   （13013 的 200700×126150×3），不是单张内容围界
+                            #   （g013 的 205000 单张）→ 不反转
+                            _outer_has_twin = any(
+                                _o2 is not outer and _o2['layout'] == outer['layout']
+                                and abs(_o2['width'] - outer['width']) / max(outer['width'], 1) < 0.02
+                                and abs(_o2['height'] - outer['height']) / max(outer['height'], 1) < 0.02
+                                for _o2 in frame_like)
+                            if (abs(c['ratio'] / (2 ** 0.5) - 1) <= 0.02
+                                    and not _std_r77d
+                                    and _c77d_ev
+                                    and not _outer_has_twin
+                                    and c['area'] >= outer['area'] * 0.25):
+                                log_debug(f"    [去重反转] {c['width']:.0f}x{c['height']:.0f}@{c['layout']} "
+                                          f"√2 页被非√2 外框包住，留小剔大 "
+                                          f"(剔 {outer['width']:.0f}x{outer['height']:.0f})")
+                                _r77d_drop_outers.add(id(outer))
+                                continue
                             # R62 形态A：单页图框块保护（见 _single_page_block_protect）
                             if _single_page_block_protect(c, outer):
                                 log_debug(f"    [去重保护] {c['width']:.0f}x{c['height']:.0f}@{c['layout']} "
@@ -5466,6 +5572,9 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         log_debug(f"    [去重剔除] {c['width']:.0f}x{c['height']:.0f}@{c['layout']} 被 {hit_outer['width']:.0f}x{hit_outer['height']:.0f}@{hit_outer['layout']} (bbox {tuple(round(v) for v in c['bbox'])} ⊂/≈ {tuple(round(v) for v in hit_outer['bbox'])})")
                     if not should_remove:
                         result.append(c)
+            # R77d 反转收尾：被"√2 页反转"判定的内容外框从结果移除
+            if _r77d_drop_outers:
+                result = [c for c in result if id(c) not in _r77d_drop_outers]
             return result
 
         frame_like = deduplicate_candidates(frame_like)

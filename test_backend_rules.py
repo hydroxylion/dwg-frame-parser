@@ -2751,6 +2751,31 @@ check('R76容差收紧: 表格分格不触发独立双页, 标准页保留 fc=3 
       and any(abs(c['width'] - 59400) < 5 for c in r['candidates'])
       and not any(c['width'] < 30000 for c in r['candidates']))
 
+# ---- 用例 102：R77b/c/d 内容外框与比例空窗（g013~g016 场景缩微） ----
+# 模型空间：205000×120000 修改范围线（S-修改）内含 118900×84100 √2 页框
+# （TKA0/S-BORDER）+ 4 张结构基坑轮廓（117348/116423×3/113796，ratio
+# 1.933~1.984 落真页空窗 1.822~2.058）。R77b 剔外框（内含 √2 页 40.7%）、
+# R77c 剔空窗 4 张、R77d 兜底嵌套反转 → 只留 118900。
+doc = make_doc()
+msp = doc.modelspace()
+doc.blocks.new('TKA0')
+_blk = doc.blocks.get('TKA0')
+add_closed_rect(_blk, 0, 0, 118900, 84100)
+add_closed_rect(_blk, 2500, 1000, 115400, 81600)
+msp.add_blockref('TKA0', (28295798, 21832268),
+                   dxfattribs={'layer': 'S-BORDER'})
+add_closed_rect(msp, 28289698, 21822268, 205000, 120000)
+add_closed_rect(msp, 28612566, 21498058, 117348, 228659)
+add_closed_rect(msp, 28636392, 21121524, 116423, 225000)
+add_closed_rect(msp, 28877988, 21499355, 116423, 225000)
+add_closed_rect(msp, 28900340, 21121224, 116423, 225000)
+add_closed_rect(msp, 29132129, 21992748, 113796, 225772)
+data = to_bytes(doc)
+check('R77内容外框+比例空窗: 结构轮廓剔除只留√2页, fc=1 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and abs(r['candidates'][0]['width'] - 118900) < 5)
+
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
 
@@ -2776,7 +2801,8 @@ check('R72跨框重叠: 拼接缝夹缝框剔除, fc=4 (smart)',
 
 # 开关回退对照：夹缝框幸存（fc=6，夹缝框与双框互为重叠对）
 check('R72开关回退: NO_OVERLAP_EVICT=1 时夹缝框幸存, fc=6 (smart)',
-      lambda: _parse_env(data, FRAME_PARSER_NO_OVERLAP_EVICT='1'),
+      lambda: _parse_env(data, FRAME_PARSER_NO_OVERLAP_EVICT='1',
+                         FRAME_PARSER_NO_STD_RATIO='1'),
       lambda r: r['frame_count'] == 6)
 
 # ---- 用例 99：R73 条件H3 同比例家族互证（P_9#给排水平面图 场景） ----
