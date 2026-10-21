@@ -2636,5 +2636,43 @@ check('R72开关回退: NO_OVERLAP_EVICT=1 时夹缝框幸存, fc=6 (smart)',
       lambda: _parse_env(data, FRAME_PARSER_NO_OVERLAP_EVICT='1'),
       lambda r: r['frame_count'] == 6)
 
+# ---- 用例 99：R73 条件H3 同比例家族互证（P_9#给排水平面图 场景） ----
+# 巨块内 29720×16820（ratio 1.7683 A3 加长比例）经块内救援提升后全通道否决：
+# F 只认 √2±2%；H 主导比例需同簇已入选 ≥3 份，同簇 105100×59400 只有 2 份
+# → 差 1 票。R73：块内闭合线候选与同 layout 已入选 ratio ±1% 成员 ≥2 个
+# （rel ≥0.1%）→ block_family 救援。
+doc = make_doc()
+msp = doc.modelspace()
+doc.blocks.new('BLK_G')
+_blk = doc.blocks.get('BLK_G')
+# 容器长条（R27 拒形态：3 条 LINE 开口围出，无闭合边框证据）
+msp2 = None
+for _ln_pts in (((0, 0), (752479, 0)), ((752479, 0), (752479, 242321)),
+                ((0, 0), (0, 242321))):
+    _blk.add_line(_ln_pts[0], _ln_pts[1])
+# 块内 2 份 29720×16820 + 2 份 42050×29700（≥2 个尺寸组 → 块内救援触发）
+add_closed_rect(_blk, 500000, 30000, 29720, 16820)
+add_closed_rect(_blk, 500000, 60000, 29720, 16820)
+add_closed_rect(_blk, 200000, 30000, 42050, 29700)
+add_closed_rect(_blk, 200000, 80000, 42050, 29700)
+msp.add_blockref('BLK_G', (0, -250000))
+msp.add_line((3000000, 3000000), (3100000, 3000000))  # 离群实体压容器 area_ratio
+# 顶层 2 张 105100×59400（ratio 1.7694 同簇，rel=100% 互为分母走 C）
+add_closed_rect(msp, 0, 0, 105100, 59400)
+add_closed_rect(msp, 110000, 0, 105100, 59400)
+data = to_bytes(doc)
+check('R73同比例家族: 块内A3加长框按家族互证救回, fc=6 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 6
+      and sum(1 for c in r['candidates']
+              if abs(c['width'] - 29720) < 5) == 2
+      and not any(abs(c['width'] - 752479) < 5 for c in r['candidates']))
+
+# 开关回退对照：关掉 H3 → 块内 A3 加长框全灭（105100×2 + 42050×2 幸存）
+check('R73开关回退: NO_COND_H3=1 时块内加长框全灭, fc=4 (smart)',
+      lambda: _parse_env(data, FRAME_PARSER_NO_COND_H3='1'),
+      lambda r: r['frame_count'] == 4
+      and not any(abs(c['width'] - 29720) < 5 for c in r['candidates']))
+
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

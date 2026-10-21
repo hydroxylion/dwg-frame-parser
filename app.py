@@ -4136,6 +4136,47 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             if _ttlblk_added:
                 pass_feature_count = len(frame_like)
 
+        # ---------- 条件H3：同比例家族互证（R73，P_9#给排水平面图 13→14） ----------
+        # 场景：块 9#商业-平面图-20130627-5_t3 内 29720×16820（A3 加长比例
+        #   ratio 1.7683）经 R43 块内图框救援提升为候选，但全通道否决——条件F
+        #   只认 √2±2%（1.7683 偏差 25%）；条件H 主导比例需同簇已入选 ≥3 份，
+        #   同簇的 105100×59400（ratio 1.7694，差 0.06%）只有 2 份 → 差 1 票。
+        #   判据：type='块内闭合线' 候选与同 layout 已入选候选中 ratio ±1% 的
+        #   成员 ≥2 个（同比例家族），rel ≥0.1% → 救援（rescued_by='block_family'）。
+        #   块内闭合线本身已带图框族证据链（R43 提升门槛），同比例家族互证补上
+        #   "主导不足 3 份"的边角。开关 FRAME_PARSER_NO_COND_H3=1 回退。
+        if os.environ.get('FRAME_PARSER_NO_COND_H3') != '1' and frame_like:
+            _in_fl_h3 = {id(c) for c in frame_like}
+            _h3_added = []
+            for _c in all_candidates:
+                if id(_c) in _in_fl_h3:
+                    continue
+                if _c.get('type') != '块内闭合线':
+                    continue
+                if _c.get('rel_area_ratio', 0) < 0.001:
+                    continue
+                _ln = _c.get('layout', '')
+                _n_fam = 0
+                for _f in frame_like:
+                    if _f['layout'] != _ln:
+                        continue
+                    if abs(_f['ratio'] - _c['ratio']) / max(_c['ratio'], 1e-9) <= 0.01:
+                        _n_fam += 1
+                        if _n_fam >= 2:
+                            break
+                if _n_fam < 2:
+                    continue
+                _c['rescued_by'] = 'block_family'
+                frame_like.append(_c)
+                _in_fl_h3.add(id(_c))
+                _h3_added.append(_c)
+            if _h3_added:
+                pass_feature_count = len(frame_like)
+                safe_log(f"  [条件H3·同比例家族互证] 补入 {len(_h3_added)} 个"
+                         f"与已入选图框同比例（±1%）的块内闭合线: "
+                         + ', '.join(f"{c['width']:.0f}x{c['height']:.0f}"
+                                     for c in _h3_added))
+
         # ---------- R66：共边网格链剔除（房间/防火分区/设备分格阵列） ----------
         # 场景（地下室接地6.12 fc 16→2）：模型空间 20 个直线矩形（7197~8401 ×
         #   11300~17800）是配电房分格阵列——x 起点严格等距（266848→274648→…→
