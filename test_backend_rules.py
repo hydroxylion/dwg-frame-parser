@@ -2958,4 +2958,51 @@ check('R83双线闭合多段线: 空壳大框同心包真图框留小剔大, fc=
       and not any(abs(c['width'] - 173232) < 5 for c in r['candidates']))
 
 
+# ---- 用例 107：R84 判据④「页级尺寸」护栏（总平面定位及竖向设计图 场景） ----
+# 纸面比例模式（msp_total ≈ 743,150mm² < 4m²）：真图框 892×631（块参照，ratio
+# 1.4138 精确√2，area_ratio 75.7%）。框内有 4 份 7.8×12 建筑构件符号（00-建筑
+# 层，ratio 1.538 落 √2±10%）位置分离 + 图签表格格子（49×24 / 52×27 /
+# 32×22×2 / 27×13，实测各带双线内框 → 孤证⑧互证存活）。
+# 旧判据④ 把 7.8×12 当成"独立图纸页"→ 判真图框为巨型包络踢出 rel 分母 →
+# 分母塌缩到格子面积（1409）→ 格子 rel 暴涨 25~100% 全过条件C → 真图框反因
+# "内含 4 个独立尺寸组"被包裹框剔除 → 输出小格子。
+# 修复：被罩候选短边须 ≥ 外框短边×5%（真页占包络短边通常 ≥15%，用例97 实测
+# 15.6%；构件符号/表格格子相对图框仅 1~4%，本图最大 52×27 → 4.3%）→ 判据④
+# 不触发，分母保持真图框面积，格子 rel 回落 <10% 被条件C 拒。
+doc = make_doc()
+msp = doc.modelspace()
+# 真图框块（892×631，纸面 mm）——块参照插入（复刻「图框做进块定义」画法）
+doc.blocks.new('ZPM_FRAME')
+_blk_zpm = doc.blocks.get('ZPM_FRAME')
+_blk_zpm.add_lwpolyline([(0, 0), (892, 0), (892, 631), (0, 631)], close=True)
+msp.add_blockref('ZPM_FRAME', (0, 0))
+# 框内 4 份 7.8×12 构件符号（ratio 1.538 落 √2±10%，位置分离）
+for _px, _py in ((100, 100), (300, 100), (500, 100), (700, 100)):
+    add_closed_rect(msp, _px, _py, 7.8, 12.0)
+# 图签格子 4 组，每组外框+内框双线（孤证⑧互证 → 不被孤证剔除；4 个独立尺寸组
+# 使真图框的「块参照包裹剔除豁免」失效 → 旧口径下真图框被剔）
+add_closed_rect(msp, 640, 480, 49, 24);  add_closed_rect(msp, 641, 481, 48, 23)
+add_closed_rect(msp, 640, 450, 52, 27);  add_closed_rect(msp, 641, 451, 51, 26)
+add_closed_rect(msp, 600, 420, 32, 22);  add_closed_rect(msp, 601, 421, 31, 21)
+add_closed_rect(msp, 560, 420, 32, 22);  add_closed_rect(msp, 561, 421, 31, 21)
+add_closed_rect(msp, 640, 400, 27, 13);  add_closed_rect(msp, 641, 401, 26, 12)
+# 框内内容线（撑住 layout 总 bbox ≈ 纸面，使 msp_total <4m² 走纸面比例模式）
+for _k in range(12):
+    msp.add_line((50 + _k * 20, 50), (50 + _k * 20, 600))
+data = to_bytes(doc)
+check('R84页级尺寸护栏: 构件符号不算独立页, 真图框不被判巨型包络, fc=1 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and abs(r['width'] - 892) < 5 and abs(r['height'] - 631) < 5)
+
+# 开关回退对照：关掉页级尺寸护栏 → 7.8×12 构件符号被当独立页 → 真图框判巨型
+# 包络踢出分母 → 分母塌缩到格子面积 → 格子 rel 暴涨过条件C → 真图框反被包裹框
+# 剔除、图签格子当选（复现原 bug）
+check('R84开关回退: NO_GIANT_PAGE_MIN=1 时真图框被判包络丢失, 图签格子当选',
+      lambda: _parse_env(data, FRAME_PARSER_NO_GIANT_PAGE_MIN='1'),
+      lambda r: r['frame_count'] > 1
+      and not any(abs(c['width'] - 892) < 5 for c in r['candidates'])
+      and any(abs(c['width'] - 49) < 2 for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

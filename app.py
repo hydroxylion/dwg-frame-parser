@@ -3128,12 +3128,28 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 return False
             _cx1, _cy1, _cx2, _cy2 = c['bbox']
             # ② 内部同尺寸（±5%）近√2 候选组，组内存在 bbox 分离对
+            # R84「页级尺寸」护栏：被罩候选必须是**图纸页量级**——短边 ≥ 外框短边×5%。
+            #   场景（总平面定位及竖向设计图.dwg 识3实际1）：纸面比例模式（msp_total
+            #   743,150mm² <4m²）下真图框 892×631（块参照，ratio 1.4138 精确√2，
+            #   area_ratio 75.7%）框内有 4 份 7.8×12mm 建筑构件符号（00-建筑 层，
+            #   ratio 1.538 落 √2±10%）位置分离 → 被本判据当成"罩住 4 张独立页的
+            #   巨型包络"踢出 rel 分母 → 分母塌缩到 1409（一个 52×27 图签格子面积）
+            #   → 图签表格里 49×24/32×22/27×13 等小格子 rel 暴涨到 25~100% 全过条件C
+            #   → 真图框反因"内含 4 个独立尺寸组"被包裹框剔除 → 输出 3 个格子。
+            #   真"图纸页"占包络短边通常 ≥15%（用例97：42000/270000=15.6%），而构件
+            #   符号/表格格子相对图框仅 1~4%（本图最大 52×27 → 4.3%）——5% 干净分离。
+            #   开关 FRAME_PARSER_NO_GIANT_PAGE_MIN=1 回退（恢复旧的无尺寸护栏口径）。
+            _gp_min_short = 0.0
+            if os.environ.get('FRAME_PARSER_NO_GIANT_PAGE_MIN') != '1':
+                _gp_min_short = min(c['width'], c['height']) * 0.05
             _mems = []
             for _f in all_candidates:
                 if _f is c or _f['layout'] != _ln or _f['area'] > c['area'] * 0.5:
                     continue
                 if abs(_f['ratio'] / (2 ** 0.5) - 1) > 0.10:
                     continue
+                if min(_f['width'], _f['height']) < _gp_min_short:
+                    continue  # 非页级尺寸（构件符号/表格格子），不算"独立图纸页"
                 _fb = _f['bbox']
                 if (_fb[0] >= _cx1 - 1 and _fb[1] >= _cy1 - 1 and
                         _fb[2] <= _cx2 + 1 and _fb[3] <= _cy2 + 1):
