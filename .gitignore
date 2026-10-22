@@ -28,3 +28,6 @@ tmp_*.py
 
 # 测试产出的临时 Excel
 tmp_*.xlsx
+
+# R78b DXF 转换缓存（可随时整个删除，按 DWG mtime+size 自动重建）
+regress_dxf_cache/

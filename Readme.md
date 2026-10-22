@@ -136,6 +136,14 @@ ezdxf 默认不加载 XREF 外部文件，引用块会漏识别图框。检测�
 
 **验证**：并行全量 71 张 **7.2 分钟**（原 32 分钟，提速 4.4 倍），61 张基线全一致与串行结果完全相同；2 张并行偶发报错被串行重试兜住后 SAME。
 
+### 2026-10-22（第七十八轮 b —— 回归提速 P1：DXF 转换缓存）
+
+**需求**：R78 并行后单张耗时大头仍在 ezdxf 解析（~98s）+ ODA 转换（~25s）；ODA 转换结果只依赖 DWG 内容（mtime+size）+ ODA 版本，与 app.py 代码无关——可缓存复用。
+
+**修法（仅 regress_check.py）**：复刻 `odafc.readfile` 的转换段（`_detect_version` → `_odafc_arguments(audit=True)` → `_execute_odafc`）产出中间 DXF，gzip（level 1）缓存到 `regress_dxf_cache/`（键 = 文件名安全化 + size + mtime，已加 .gitignore，可随时整个删除）；worker 命中缓存直接把 DXF bytes 喂 `get_bounding_box_from_bytes`（与生产 odafc 路径的 ezdxf 读取语义一致——odafc 的 audit 传给的是 ODA 转换器，缓存产物已含 audit）。转换失败（私有 API 变动/沙箱拦截/ODA 异常）自动回退 DWG 原路径，正确性不受影响。`--no-cache` 可禁用（initargs 显式传入 worker——spawn 模式主进程的 global 不会带过去）。
+
+**验证**：d012/d013/四川自贡（25.4MB）缓存路径 SAME（基线为 DWG 路径生成，SAME 即语义等价实证）；全量首跑 7.9 分钟（付转换+gzip 成本，转换 66 张入库）、热缓存复跑 **6.8 分钟、命中 69**，61 张基线全一致；拼接图沙箱拦截临时写入被回退机制兜住仍 SAME。注：并行已摊薄转换开销，热缓存墙钟收益约 6%（单图冒烟收益更大）；真正大头仍是 ezdxf 解析（R78 P2 关联回归可绕开）。
+
 ## 三、优化记录
 
 ### 2026-10-21（第七十七轮 —— g013~g016 识别 9 实际 5：内容外框/比例空窗/孤证豁免/嵌套反转四件套）
