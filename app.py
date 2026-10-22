@@ -3165,9 +3165,43 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                      f"（{_big['width']:.0f}×{_big['height']:.0f} ratio {_big['ratio']:.3f}）"
                      f"→ 判定为『整图即图框、内无图框级参照系』，该空间 rel 置 0，"
                      f"仅保留条件A/B 通道")
+        # R79：实物尺度详图空间（内容总面积 4~100m²）且零标题栏证据 → 模型
+        #   空间 rel 分母改用内容总面积。此类空间（井道大样.dwg 82m² 管井详图）
+        #   没有页框参照系——最大候选本身就是图案，rel 相对它自举虚高（570×830
+        #   等井道轮廓 rel 19.9%~100% 全过条件C 误判为图框）。改用内容总面积作
+        #   分母后图案 rel 掉到 0.6~2.6% 被条件C 自然拒之；真图框场景（图框占
+        #   内容主导，如非圆减速器 2378×1682=99%、R56 总图-排水 A3=10.7%）不受
+        #   影响。4m² 下限与 R56 纸面比例模式（<4m²）衔接，一层.dwg/齿轮箱等
+        #   纸面模式图在区带外。开关 FRAME_PARSER_NO_MSP_TOTAL_DENOM=1 回退。
+        _ms_total_denom = False
+        if (os.environ.get('FRAME_PARSER_NO_MSP_TOTAL_DENOM') != '1'
+                and 4e6 <= msp_total < 1e8):
+            _TIT_KWS = ('TITLE', 'TTLB', '图框', 'BORDER', '标题')
+            _has_title_ev = False
+            for _e in msp:
+                try:
+                    _lay = (_e.dxf.layer or '').upper()
+                    if any(_k in _lay for _k in _TIT_KWS):
+                        _has_title_ev = True
+                        break
+                    if (_e.dxftype() == 'INSERT' and any(
+                            _k in (_e.dxf.name or '').upper()
+                            for _k in _TIT_KWS)):
+                        _has_title_ev = True
+                        break
+                except Exception:
+                    continue
+            if not _has_title_ev:
+                _ms_total_denom = True
+                safe_log(f"  [R79·实物尺度详图空间] 模型空间总面积 "
+                         f"{msp_total / 1e6:.1f}m² 且零标题栏证据 → rel 分母"
+                         f"改用内容总面积（无页框参照系）")
         for c in all_candidates:
             if c['layout'] in _no_ref_layouts:
                 c['rel_area_ratio'] = 0.0
+                continue
+            if _ms_total_denom and c['layout'] == '模型空间':
+                c['rel_area_ratio'] = (c['area'] / msp_total) if msp_total > 0 else 0.0
                 continue
             ma = layout_max_area.get(c['layout'], 0)
             # R27 回归修复（一层.dwg fc 0→11）：入库阶段被 R27 闭合通道拒绝、但构件
@@ -3603,6 +3637,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             return False
 
         frame_like = [c for c in all_candidates if is_frame_like(c)]
+
         pass_feature_count = len(frame_like)
 
         # ---------- 同块名族"一荣俱荣"传播（2.8米皮带线 fc 3→13） ----------
