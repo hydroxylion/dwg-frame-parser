@@ -1843,6 +1843,61 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 _maximal.append(_a)
         return _maximal
 
+    # R82：标题栏专用层页框扫描（块定义顶层）。TEL_TITLE/TTLB/PUB_TITLE/
+    #   BORDER/图框 命名层的闭合矩形即页框语义实体——天正 t3 导出的图框装配
+    #   块（*U21、整页装配块）里，页框画在标题栏层，bbox 可能被离群实体污染
+    #   或远大于页框本身。
+    _title_page_cache = {}
+
+    def _scan_title_layer_page_rects(_bn):
+        if _bn in _title_page_cache:
+            return _title_page_cache[_bn]
+        _blk = doc.blocks.get(_bn)
+        if _blk is None:
+            return []
+        _raw = []
+        for _e2 in _blk:
+            try:
+                if _e2.dxftype() != 'LWPOLYLINE':
+                    continue
+                _lu = (_e2.dxf.layer or '').upper()
+                if not any(_k in _lu for _k in
+                           ('TEL_TITLE', 'TTLB', 'PUB_TITLE', 'BORDER', '图框')):
+                    continue
+                if not is_polyline_closed(_e2):
+                    continue
+                _pv2 = get_polyline_vertices(_e2)
+                if len(_pv2) < 3:
+                    continue
+                _lx = [p[0] for p in _pv2]
+                _ly = [p[1] for p in _pv2]
+                _lw = max(_lx) - min(_lx)
+                _lh = max(_ly) - min(_ly)
+                if _lw <= 0 or _lh <= 0:
+                    continue
+                _ls = min(_lw, _lh)
+                if _ls < 15000 or not (1.10 <= max(_lw, _lh) / _ls <= FRAME_RATIO_MAX):
+                    continue
+                _raw.append((min(_lx), min(_ly), max(_lx), max(_ly)))
+            except Exception:
+                continue
+        _maximal = []
+        for _a in _raw:
+            _contained = False
+            for _b in _raw:
+                if _a == _b:
+                    continue
+                _aa = (_a[2] - _a[0]) * (_a[3] - _a[1])
+                _ab = (_b[2] - _b[0]) * (_b[3] - _b[1])
+                if (_ab > _aa and _a[0] >= _b[0] - 1.0 and _a[1] >= _b[1] - 1.0
+                        and _a[2] <= _b[2] + 1.0 and _a[3] <= _b[3] + 1.0):
+                    _contained = True
+                    break
+            if not _contained:
+                _maximal.append(_a)
+        _title_page_cache[_bn] = _maximal
+        return _maximal
+
     for _entity in visible_entities:
         if _entity.dxftype() != 'INSERT':
             continue
@@ -2330,6 +2385,20 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                             and _fw >= _w * 0.95 and _fh >= _h * 0.95):
                         _w = _fw
                         _h = _fh
+                # R82b：块内标题栏层页框——页框语义层的闭合矩形即真页框，即使
+                #   远小于块 bbox（整页装配块含溢出内容）也以页框尺寸替代
+                #   （暖通（防排烟）_t3 页2：装配块 249386×151370，真框
+                #   189150×89100 占 76%/59%——95% 条件够不着）。
+                _tf1 = _scan_title_layer_page_rects(_bn) if layout_name == '模型空间' else []
+                if _tf1:
+                    _fb2 = max(_tf1, key=lambda r: (r[2] - r[0]) * (r[3] - r[1]))
+                    _fw = (_fb2[2] - _fb2[0]) * abs(_xs)
+                    _fh = (_fb2[3] - _fb2[1]) * abs(_ys)
+                    if (_fw > 0 and _fh > 0
+                            and _fw * _fh < _w * _h
+                            and max(_fw, _fh) >= 15000):
+                        _w = _fw
+                        _h = _fh
             candidates.append({
                 'type': '块参照插入',
                 'area': _w * _h,
@@ -2473,6 +2542,17 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             if _s_min > 0 and any(abs(_s_min - _fs) / _fs <= 0.01 for _fs in _frame_short_sides):
                 _a_series_protected.append(
                     f"{_bn}({len(_grp)}个,{_sample['width']:.0f}x{_sample['height']:.0f},短边{_s_min:.0f}同图框族)")
+                continue
+            # R82d：块内标题栏层页框保护——块定义内含标题栏专用层图框级闭合
+            #   矩形的是真图框装配块，不参与对齐剔除（暖通（防排烟）_t3：
+            #   图框装配块 *U21 9 实例完美水平一行 → 命中"水平对齐装饰阵列"
+            #   启发式整组误删，ratio 2.12 加长横版不在 √2±10% 白名单内）。
+            #   仅模型空间启用——纸面布局空间（一层平面图3.25_t3 的"图框2"
+            #   块 11 份水平排列）真框是并存的闭合多段线，块是冗余副本，本应
+            #   被对齐排列剔除，R75 纸面比例模式另有通道，不在此豁免。
+            if layout_name == '模型空间' and _scan_title_layer_page_rects(_bn):
+                _a_series_protected.append(
+                    f"{_bn}({len(_grp)}个,{_sample['width']:.0f}x{_sample['height']:.0f},标题栏层页框)")
                 continue
             _ctr = [((candidates[_i]['bbox'][0]+candidates[_i]['bbox'][2])/2,
                      (candidates[_i]['bbox'][1]+candidates[_i]['bbox'][3])/2) for _i in _grp]

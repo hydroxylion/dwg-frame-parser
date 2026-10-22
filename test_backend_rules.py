@@ -2821,6 +2821,43 @@ check('R80保护条件5: 电梯井轮廓块不享R62保护被嵌套收掉, fc=1 
       and abs(r['candidates'][0]['width'] - 189150) < 5)
 
 
+# ---- 用例 105：R82 标题栏层页框（暖通（防排烟）_t3 场景缩微） ----
+# 天正 t3 图框装配块：9 个图框块（TEL_TITLE 层 189150×89100）水平一行排列
+# → 命中"对齐排列装饰阵列"启发式；ratio 2.12 加长横版不在 √2±10% 白名单。
+# R82d：块内含标题栏层页框 → 保护不对齐剔除。另有 1 个整页装配块（bbox
+# 249386×151370 含溢出内容，真框 189150×89100 在 TEL_TITLE 层占 45%）——
+# R82b：标题栏层页框 < 块 bbox → 以页框尺寸替换（否则 249×151 撑大 rel 分母
+# 把 9 个图框块的 rel 压到 8.9% 被条件C 拒）。
+def _add_title_rect(layout, x, y, w, h):
+    layout.add_lwpolyline(
+        [(x, y), (x + w, y), (x + w, y + h), (x, y + h)],
+        close=True, dxfattribs={'layer': 'TEL_TITLE'})
+
+doc = make_doc()
+msp = doc.modelspace()
+doc.layers.new('TEL_TITLE')
+# 页 1：直绘标题栏层页框
+_add_title_rect(msp, 0, 500000, 189150, 89100)
+# 图框装配块 *U21 形态：9 实例水平一行（y 同、x 每 189150 一格）
+doc.blocks.new('TMP_FB')
+_blk_fb = doc.blocks.get('TMP_FB')
+_add_title_rect(_blk_fb, 0, 0, 189150, 89100)
+for _k in range(9):
+    msp.add_blockref('TMP_FB', (_k * 189150, 0))
+# 整页装配块（含溢出内容撑大 bbox + 标题栏层真框）
+doc.blocks.new('TMP_ASM')
+_blk_asm = doc.blocks.get('TMP_ASM')
+add_closed_rect(_blk_asm, 0, 0, 249386, 151370)   # 溢出内容（0 层）
+_add_title_rect(_blk_asm, 0, 0, 189150, 89100)     # 真页框（TEL_TITLE）
+msp.add_blockref('TMP_ASM', (2000000, 0))
+data = to_bytes(doc)
+check('R82标题栏层页框: 9图框块水平排列不误删+装配块按页框替换, fc=11 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 11
+      and all(abs(c['width'] - 189150) < 5 and abs(c['height'] - 89100) < 5
+              for c in r['candidates']))
+
+
 
 # ---- 用例 98：R72 跨框重叠夹缝框剔除（地下室柱平面布置0816 场景） ----
 # 三组"上下双大框"排版（上下真框排版重叠 5.8%），组内拼接缝上各有一个竖长
