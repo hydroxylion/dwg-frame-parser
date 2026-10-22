@@ -196,9 +196,15 @@ def polygon_area(vertices):
     return abs(area) / 2.0
 
 def is_polyline_closed(entity):
-    """安全判断多段线是否闭合，兼容 LWPOLYLINE 和 POLYLINE"""
+    """安全判断多段线是否闭合，兼容 LWPOLYLINE 和 POLYLINE。
+    R83：closed 标志为 False 但首尾顶点坐标重合的"几何闭合"多段线也视为闭合
+    （n036_t8.dwg 的 79968×59400 图框：5 顶点首尾重合、closed=False 被漏识别）。"""
     if hasattr(entity, 'closed'):
-        return entity.closed
+        if entity.closed:
+            return True
+        # closed=False 时补查几何闭合（首尾坐标重合），LWPOLYLINE 常见"点回起点未设闭合标志"画法
+        vertices = get_polyline_vertices(entity)
+        return len(vertices) >= 3 and vertices[0] == vertices[-1]
     if entity.dxftype() == 'POLYLINE':
         return bool(entity.dxf.flags & 1)
     vertices = get_polyline_vertices(entity)
@@ -4558,6 +4564,15 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                         #    已验证严格嵌套+面积比[0.85,0.995]，
                                         #    强于⑥的宽松包含判据；内框未入库时
                                         #    ⑥ 拿不到分，⑦ 补上该盲区——d008）
+            'double_line_inner': 1.0,  # ⑧ 双线画法内框互证：同图层同心嵌套闭合矩形
+                                        #    （面积比[0.85,0.995]）。n036_t8.dwg 的
+                                        #    79968×59400 外框内含 77168×58000 内框
+                                        #    （同 LEVEL_1 层、同心、面积比 94.2%），
+                                        #    但内框 ratio 1.330 擦线下限没过条件C
+                                        #    进不了 frame_like，⑥ 找不到它 → 外框
+                                        #    被孤证 score=0 误剔。双线画法是图框
+                                        #    强特征（内容矩形极少同层同心嵌套且
+                                        #    面积比落 85%~99.5%），故单独加权互证。
         }
         # ⑤ 图幅代号：A0~A9 独立词。(?<![a-z0-9]) 防匿名块名 A$C6A6C4DA6
         # （其 a6 前是字母数字无词边界）；(?![0-9]) 防 A31005 类图纸编号误伤。
@@ -4621,6 +4636,32 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             if _c.get('nested_pair'):                   # ⑦ R43 块内嵌套对互证
                 _score += _SOLO_WEIGHTS['nested_pair_rescue']
                 _hits.append('⑦嵌套图框对（救援扫描已验证严格嵌套+面积比）')
+            for _o in all_candidates:                   # ⑧ 双线画法内框互证
+                if _o is _c or _o['layout'] != _lk:
+                    continue
+                # 限闭合多段线类型：n036 的 79968/77168（LWPOLYLINE 双线画法）
+                #   需互证；d013 的 200700/195450（LINE 直线矩形嵌套框群，
+                #   同层同心、面积比 95.2%）若同样互证会误护 200700，破坏
+                #   NO_SHELL_GHOST=1 开关回退用例（范围框应复活吃真框）。
+                #   直线矩形双线画法已由 R45「自身内框反证」/条件B/D 覆盖。
+                if _c.get('type') != '闭合多段线' or _o.get('type') != '闭合多段线':
+                    continue
+                if _o.get('insert_layer') != _c.get('insert_layer'):
+                    continue  # 同图层才互证（外框+内框画在同一层）
+                if _o['area'] <= 0 or _c['area'] <= 0:
+                    continue
+                _ar = _o['area'] / _c['area']
+                if not (0.85 <= _ar <= 0.995):
+                    continue  # 面积比须落双线画法区间（内框 85%~99.5% 外框）
+                _ob = _o['bbox']
+                if not (_ob[0] >= _c['bbox'][0] - 1 and _ob[1] >= _c['bbox'][1] - 1 and
+                        _ob[2] <= _c['bbox'][2] + 1 and _ob[3] <= _c['bbox'][3] + 1):
+                    continue  # 须严格同心包含
+                _score += _SOLO_WEIGHTS['double_line_inner']
+                _hits.append(f"⑧双线内框 {_o['width']:.0f}x{_o['height']:.0f}"
+                             f"({_o.get('insert_layer')})")
+                _c['_double_line_inner'] = True  # R83：标记双线画法真图框，去重阶段免被空壳外包络剔小
+                break
             return _score, _hits
 
         if _SOLO_RECHECK_ENABLED and frame_like:
@@ -5671,6 +5712,24 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                 log_debug(f"    [去重反转] {c['width']:.0f}x{c['height']:.0f}@{c['layout']} "
                                           f"√2 页被非√2 外框包住，留小剔大 "
                                           f"(剔 {outer['width']:.0f}x{outer['height']:.0f})")
+                                _r77d_drop_outers.add(id(outer))
+                                continue
+                            # R83：双线画法真图框保护——被含候选 c 带双线内框
+                            #   （同层同心嵌套、面积比 0.85~0.995，孤证评分⑧已标记）
+                            #   是真图框强证据，不应被同心空壳外包络当嵌套物剔小。
+                            #   场景（n036_t8.dwg）：79968×59400（LEVEL_1 双线图框，
+                            #   内含 77168×58000 内框）被 173232×85241（layer=0 空壳
+                            #   大框，框内除图框外全空）同心包住 → 按旧嵌套规则留大
+                            #   剔小，真图框丢失、空壳框当选。留小剔大，剔空壳外框。
+                            #   护栏：outer 为「块参照插入」（真图框块，d012 的
+                            #   321093×259386 块内标题栏嵌套体系 200700/195450 亦
+                            #   带双线）时不反转——块参照是真图框，其内部嵌套框
+                            #   （标题栏/内容框）照旧被嵌套收掉，不得留小剔大。
+                            if (c.get('_double_line_inner')
+                                    and outer.get('type') != '块参照插入'):
+                                log_debug(f"    [去重保护] {c['width']:.0f}x{c['height']:.0f}@{c['layout']} "
+                                          f"双线画法真图框，免被 {outer['width']:.0f}x{outer['height']:.0f} "
+                                          f"空壳外包络剔小 → 留小剔大")
                                 _r77d_drop_outers.add(id(outer))
                                 continue
                             # R62 形态A：单页图框块保护（见 _single_page_block_protect）

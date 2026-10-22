@@ -2924,4 +2924,38 @@ check('R73开关回退: NO_COND_H3=1 时块内加长框全灭, fc=4 (smart)',
       and not any(abs(c['width'] - 29720) < 5 for c in r['candidates']))
 
 
+# ---- 用例 106：R83 双线画法闭合多段线图框被同心空壳大框包住（n036_t8 场景） ----
+# 真图框 79968×59400（LEVEL_1 层闭合多段线，首尾坐标重合但 closed=False——
+# 修复 is_polyline_closed 漏判"几何闭合"）+ 内框 77168×58000（同层同心闭合，
+# 面积比 94.2% 双线画法）。外层 173232×85241（0 层空壳大框，ratio 2.03 落在
+# 真页空窗 1.822~2.058，但图内无 √2 标准页故 R77c 不启用）同心全包真图框，
+# 框内除图框外全空 → 抢 rel 分母（真框 rel 32%）+ 去重"留大剔小"。
+# 修复：① is_polyline_closed 认几何闭合 ② 孤证评分⑧双线内框互证 ③ 去重阶段
+# 带双线内框的真图框免被非块参照空壳外框剔小（留小剔大）。
+doc = make_doc()
+msp = doc.modelspace()
+doc.layers.new('LEVEL_1')
+# 真图框外框：5 顶点首尾重合但 close=False（复刻 n036 的 79968×59400）
+msp.add_lwpolyline(
+    [(200464, -234798), (280432, -234798), (280432, -175398),
+     (200464, -175398), (200464, -234798)],
+    close=False, dxfattribs={'layer': 'LEVEL_1'})
+# 真图框内框：闭合双线（77168×58000，面积比 94.2%）
+add_closed_rect(msp, 202564, -234098, 77168, 58000)
+for _e in msp:
+    if _e.dxftype() == 'LWPOLYLINE' and _e.dxf.layer == '0':
+        _e.dxf.layer = 'LEVEL_1'  # 内框也归 LEVEL_1（同层双线才互证）
+# 外层空壳大框（173232×85241，0 层）
+add_closed_rect(msp, 154640, -245136, 173232, 85241)
+# 远距离散实体撑大 msp 总 bbox（使 173232 area_ratio <5% 进孤证复核、真框 area_ratio<5%）
+add_line_rect(msp, 1000000, -1000000, 3000, 2000)
+add_line_rect(msp, 3500000, -5500000, 3000, 2000)
+data = to_bytes(doc)
+check('R83双线闭合多段线: 空壳大框同心包真图框留小剔大, fc=1 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and abs(r['width'] - 79968) < 5 and abs(r['height'] - 59400) < 5
+      and not any(abs(c['width'] - 173232) < 5 for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
