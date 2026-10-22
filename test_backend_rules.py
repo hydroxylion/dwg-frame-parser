@@ -2797,6 +2797,30 @@ check('R79实物尺度: 零标题证据详图空间图案按内容总面积分�
       and abs(r['candidates'][0]['width'] - 100000) < 5)
 
 
+# ---- 用例 104：R80 R62 保护条件⑤——蹭保护的小设备轮廓块（水箱间电梯间 场景） ----
+# 平面图内 2 个 3450×5290 电梯井轮廓块（块定义比例=候选比例、与外框比例差>10%、
+# 外框面积≥4×——R62 前四条件全中）蹭"单页图框块"保护致嵌套去重失效误检。
+# R80 条件⑤：块定义长边 ≥ 外框长边×10% 才保护（电梯井 5290/189150=2.8% 拒；
+# R62 原场景 134300/388331=34.6%、用例82 30% 不受影响）。
+doc = make_doc()
+msp = doc.modelspace()
+_blk_sh = doc.blocks.new(name='TMP_SHAFT')
+add_closed_rect(_blk_sh, 0, 0, 3450, 5290)
+add_closed_rect(_blk_sh, 200, 200, 3050, 4890)
+msp.add_blockref('TMP_SHAFT', (440112, 41045))
+# 第二个井道尺寸稍异——避免"同尺寸≥2"触发包裹框剔除反吃真框
+_blk_sh2 = doc.blocks.new(name='TMP_SHAFT2')
+add_closed_rect(_blk_sh2, 0, 0, 3450, 5150)
+add_closed_rect(_blk_sh2, 200, 200, 3050, 4750)
+msp.add_blockref('TMP_SHAFT2', (458611, 41045))
+add_closed_rect(msp, 350000, 5000, 189150, 89100)   # 真框（大平面）
+data = to_bytes(doc)
+check('R80保护条件5: 电梯井轮廓块不享R62保护被嵌套收掉, fc=1 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and abs(r['candidates'][0]['width'] - 189150) < 5)
+
+
 
 # ---- 用例 98：R72 跨框重叠夹缝框剔除（地下室柱平面布置0816 场景） ----
 # 三组"上下双大框"排版（上下真框排版重叠 5.8%），组内拼接缝上各有一个竖长

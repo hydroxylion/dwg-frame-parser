@@ -3638,6 +3638,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
 
         frame_like = [c for c in all_candidates if is_frame_like(c)]
 
+
         pass_feature_count = len(frame_like)
 
         # ---------- 同块名族"一荣俱荣"传播（2.8米皮带线 fc 3→13） ----------
@@ -5511,6 +5512,13 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             if min(cw_, ch_) <= 0 or min(ow_, oh_) <= 0:
                 return False
             if outer['area'] < c['area'] * 4:
+                return False
+            # ⑤ R80：块定义长边 ≥ 外框长边 ×10%——页块是"图幅"，与所在图纸
+            #   同量级（R62 场景 134300/388331=34.6%、用例82 84100/280000=30%）。
+            #   设备轮廓块蹭保护（水箱间电梯间.dwg：3450×5290 电梯井轮廓块，
+            #   5290/189150=2.8%，被 R62 保护致嵌套去重失效、平面图内 2 个
+            #   电梯井误检为图框）→ 不保护，照常嵌套剔小。
+            if max(bdw, bdh) < max(ow_, oh_) * 0.10:
                 return False
             _cr = max(cw_, ch_) / min(cw_, ch_)
             _br = max(bdw, bdh) / min(bdw, bdh)
