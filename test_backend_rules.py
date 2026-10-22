@@ -3005,4 +3005,60 @@ check('R84开关回退: NO_GIANT_PAGE_MIN=1 时真图框被判包络丢失, 图�
       and any(abs(c['width'] - 49) < 2 for c in r['candidates']))
 
 
+# ---- 用例 108：R86 块内页框递归下探（暖通（防排烟）场景缩微） ----
+# 真图框 189150×89100 全部由块参照提供，其中一页的图框藏在**两层嵌套**里：
+# 平面图内容块 002（3010 实体，块 bbox 312492×154326 含墙外溢出内容）→
+# INSERT *U22 → TEL_TITLE 层 189150×89100 页框。
+# 旧 _scan_title_layer_page_rects 只扫块定义**顶层** → 002 扫不到页框 →
+# R82b 尺寸替换不生效 → 002 以块 bbox（312492×154326）被当图框输出。
+# 修复：递归下探子块（限深 3），子块页框经 insert + R(rot)·S·(p−base) 变换
+# 转到父块坐标系。全部 11 页应输出 189150×89100。
+_W, _H, _STEP = 189150, 89100, 189150
+
+
+def _add_title_page(layout, x, y):
+    """在图框层画 189150×89100 页框 + 内框（双线画法）。"""
+    layout.add_lwpolyline(
+        [(x, y), (x + _W, y), (x + _W, y + _H), (x, y + _H)],
+        close=True, dxfattribs={'layer': 'TEL_TITLE'})
+    layout.add_lwpolyline(
+        [(x + 2100, y + 1500), (x + _W - 3150, y + 1500),
+         (x + _W - 3150, y + _H - 1500), (x + 2100, y + _H - 1500)],
+        close=True, dxfattribs={'layer': 'TEL_TITLE'})
+
+
+doc = make_doc()
+msp = doc.modelspace()
+doc.layers.new('TEL_TITLE')
+# 图框块 *U22：块内页框放在 (365098,-2790)（偏离原点，复刻真实块的排版位置）
+doc.blocks.new('U22_FRAME')
+_blk_u22 = doc.blocks.get('U22_FRAME')
+_blk_u22.add_lwpolyline(
+    [(365098, -2790), (365098 + _W, -2790), (365098 + _W, -2790 + _H),
+     (365098, -2790 + _H)], close=True, dxfattribs={'layer': 'TEL_TITLE'})
+_blk_u22.add_lwpolyline(
+    [(365098 + 2100, -2790 + 1500), (365098 + _W - 3150, -2790 + 1500),
+     (365098 + _W - 3150, -2790 + _H - 1500), (365098 + 2100, -2790 + _H - 1500)],
+    close=True, dxfattribs={'layer': 'TEL_TITLE'})
+# 平面图内容块 002：块内嵌 *U22（页框在子块里），本体只有溢出内容线，无页框
+doc.blocks.new('PLAN_002')
+_blk_p = doc.blocks.get('PLAN_002')
+for _k in range(20):                       # 平面图墙线（不含图框几何）
+    _blk_p.add_line((_k * 9000, 0), (_k * 9000, 90000))
+_blk_p.add_line((0, 150000), (189150, 150000))   # 溢出内容（撑大块 bbox 到 154326）
+_blk_p.add_blockref('U22_FRAME', (-365098, -86310))
+# 顶层：10 页直插 *U22 + 1 页用 002 内容块（页框在嵌套子块）
+for _k in range(11):
+    if _k == 0:
+        msp.add_blockref('PLAN_002', (0, 89100))       # 002 占第 1 页位置
+    else:
+        msp.add_blockref('U22_FRAME', ((_k - 1) * _STEP + 13202, 2790))
+data = to_bytes(doc)
+check('R86块内页框递归: 嵌套子块的TEL_TITLE页框替换块bbox, 11页全189150x89100 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 11
+      and all(abs(c['width'] - 189150) < 5 and abs(c['height'] - 89100) < 5
+              for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

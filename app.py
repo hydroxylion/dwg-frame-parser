@@ -1855,16 +1855,61 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     #   或远大于页框本身。
     _title_page_cache = {}
 
-    def _scan_title_layer_page_rects(_bn):
-        if _bn in _title_page_cache:
+    def _scan_title_layer_page_rects(_bn, _visited=None, _depth=0):
+        # R86：支持递归下探子块。002 类"平面图内容块"把图框放在**嵌套子块**里
+        #   （结构：002 → INSERT *U22 → TEL_TITLE 层 189150×89100），只扫块定义
+        #   顶层会漏掉 → R82b 尺寸替换不生效 → 块 bbox（312492×154326，含溢出
+        #   内容）被当图框输出。递归把子块页框经实例变换转到父块坐标系后合并
+        #   （变换口径同 _get_block_world_bbox：insert + R(rot)·S·(p − base)）。
+        if _depth == 0 and _bn in _title_page_cache:
             return _title_page_cache[_bn]
         _blk = doc.blocks.get(_bn)
         if _blk is None:
             return []
+        if _visited is None:
+            _visited = set()
+        if _bn in _visited:
+            return []
+        _visited = _visited | {_bn}
         _raw = []
         for _e2 in _blk:
             try:
-                if _e2.dxftype() != 'LWPOLYLINE':
+                _t2 = _e2.dxftype()
+                if _t2 == 'INSERT':
+                    # R86：递归子块页框 → 变换到本块坐标系（限深 3 层防环）
+                    if _depth < 3:
+                        _sub = _scan_title_layer_page_rects(
+                            _e2.dxf.name, _visited, _depth + 1)
+                        if _sub:
+                            _ipt = (_e2.dxf.insert.x, _e2.dxf.insert.y)
+                            _sx2 = _e2.dxf.xscale; _sy2 = _e2.dxf.yscale
+                            if abs(_sx2) < 1e-9 or abs(_sy2) < 1e-9:
+                                continue
+                            try:
+                                _nb = doc.blocks[_e2.dxf.name].block.dxf.base_point
+                                _nbx, _nby = _nb.x, _nb.y
+                            except Exception:
+                                _nbx = _nby = 0.0
+                            _nrot2 = getattr(_e2.dxf, 'rotation', 0)
+                            for _sr in _sub:
+                                _nc2 = [(_sr[0] - _nbx, _sr[1] - _nby),
+                                        (_sr[2] - _nbx, _sr[1] - _nby),
+                                        (_sr[0] - _nbx, _sr[3] - _nby),
+                                        (_sr[2] - _nbx, _sr[3] - _nby)]
+                                _nc2 = [(_p[0] * _sx2, _p[1] * _sy2) for _p in _nc2]
+                                if _nrot2:
+                                    _nr2 = _math.radians(_nrot2)
+                                    _ncr2 = _math.cos(_nr2); _nsr2 = _math.sin(_nr2)
+                                    _nc2 = [(_p[0] * _ncr2 - _p[1] * _nsr2,
+                                             _p[0] * _nsr2 + _p[1] * _ncr2)
+                                            for _p in _nc2]
+                                _nc2 = [(_p[0] + _ipt[0], _p[1] + _ipt[1]) for _p in _nc2]
+                                _raw.append((min(_p[0] for _p in _nc2),
+                                             min(_p[1] for _p in _nc2),
+                                             max(_p[0] for _p in _nc2),
+                                             max(_p[1] for _p in _nc2)))
+                    continue
+                if _t2 != 'LWPOLYLINE':
                     continue
                 _lu = (_e2.dxf.layer or '').upper()
                 if not any(_k in _lu for _k in
@@ -1901,7 +1946,8 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                     break
             if not _contained:
                 _maximal.append(_a)
-        _title_page_cache[_bn] = _maximal
+        if _depth == 0:
+            _title_page_cache[_bn] = _maximal
         return _maximal
 
     for _entity in visible_entities:
