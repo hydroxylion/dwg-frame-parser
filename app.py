@@ -6161,17 +6161,52 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #   R74 收紧：救援候选（rescued_by 非空）不享受本豁免——大样图(内外
             #   保温) 场景：条件I 产物 36740×28700 系 rel 84% 会被豁免保留
             #   （fc 7→11），但救援通道已把关过、R52 的职责正是清这类边角产物。
+            #
+            # R90 再收紧：**房间量级候选不享受本豁免**。
+            #   反例（140822雅安综合艺术楼平面参照_t7.dwg fc 101，实际只有布局
+            #   4 张）：布局"布局1"排出 4 张 841×594 真页 → 触发本规则；但模型
+            #   空间那 97 个候选全是**房间轮廓**（8100×5600×40、5400×8100×36、
+            #   3450×8100×10、8100×4150×2…，绝对尺寸 1~10m），它们把两个豁免
+            #   条件同时占满：
+            #     · 房间比例恰好贴近 √2（8100/5600=1.4464 偏 2.3%、5400/8100
+            #       =1.5000 偏 6.1%、8100/5750=1.4087 仅偏 0.39%）→ 命中 √2 豁免；
+            #     · rel 高达 42%~71% → 命中 rel≥25% 豁免。
+            #   更根本的是 rel 分母自我循环：模型空间的 rel 分母取该空间最大候选，
+            #   而最大候选**就是房间轮廓自己**，于是每个房间 rel = 自身/最大房间
+            #   = 42%~71%，条件C 的 10% 门槛形同虚设。分母与候选同类时，相对面积
+            #   法失去判别力——这正是本规则要兜的场景。
+            #   判据：短边 < ROOM_SCALE_MAX_SIDE(10000mm) 的候选视为**真实房间/
+            #   构件尺寸**，不是"图纸坐标里的页面框"，一律不豁免。
+            #   门槛依据（全回归库实测"布局有真页 且 模型也有候选"的 14 张图，
+            #   取各图模型候选短边最小值分布）：
+            #      3450~5750  本图 97 个房间轮廓      ← 该剔
+            #      14813      罗马都市gai222（基线 fc=2）  ← 该留
+            #      16820      大样图(内外保温)（基线 fc=7）← 该留
+            #      29700 起   其余全部真图框           ← 该留
+            #   10000 落在 5750 与 14813 的空隙中，两侧余量 1.74× / 1.48×。
+            #   物理依据：图纸坐标里 A1 是 84100×59400（短边 84m），真实房间是
+            #   8m 级；短边 <10m 的"框"要么是房间，要么是构件，不会是整页纸。
+            #   开关 FRAME_PARSER_NO_ROOM_SCALE=1 回退本收紧。
+            _ROOM_MAX_SIDE = 10000.0
+            _room_scale_on = os.environ.get('FRAME_PARSER_NO_ROOM_SCALE') != '1'
+
+            def _is_room_scale(_c):
+                return _room_scale_on and min(_c['width'], _c['height']) < _ROOM_MAX_SIDE
+
             _model_keep = [c for c in _model_cands
-                           if abs(c['ratio'] - _sqrt2_r52) / _sqrt2_r52 <= 0.02
-                           or (c.get('rel_area_ratio', 0) >= 0.25
-                               and len(_model_cands) >= 3
-                               and not c.get('rescued_by'))]
+                           if not _is_room_scale(c)
+                           and (abs(c['ratio'] - _sqrt2_r52) / _sqrt2_r52 <= 0.02
+                                or (c.get('rel_area_ratio', 0) >= 0.25
+                                    and len(_model_cands) >= 3
+                                    and not c.get('rescued_by')))]
             _model_frame_n = len(_model_cands)
             if _paper_layouts and _paper_frame_n >= 4 and _model_frame_n > len(_model_keep):
+                _n_room_dropped = sum(1 for c in _model_cands if _is_room_scale(c))
                 frame_like = _model_keep + [c for c in frame_like if c['layout'] != '模型空间']
                 safe_log(f"  [布局空间优先] 布局空间 {_paper_layouts} 已识别 {_paper_frame_n} 个"
                          f"网格排版图纸页 → 剔除模型空间候选 {_model_frame_n - len(_model_keep)} 个"
                          f"（√2 比例的 {len(_model_keep)} 个豁免保留，"
+                         f"其中房间量级（短边<{_ROOM_MAX_SIDE:.0f}mm）不豁免 {_n_room_dropped} 个，"
                          f"模型空间其余大框视为页面内容源）")
 
         # frame_count 只统计"像图框"的候选数。旧写法在 frame_like 为空时兜底成

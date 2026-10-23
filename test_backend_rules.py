@@ -3281,4 +3281,58 @@ check('R89块内页框面积护栏: 仅占块定义13%的构件轮廓不被当�
                         for c in r['candidates']))
 
 
+# ---- 用例 113：R90 「布局空间优先」房间量级不豁免（雅安平面参照 101→4） ----
+# 场景复刻（140822雅安综合艺术楼平面参照_t7.dwg）：
+#   布局"布局1"排出 4 张 841×594 真页 → 触发 R52「布局空间优先」；但模型空间
+#   那 97 个候选全是**房间轮廓**（8100×5600×40、5400×8100×36…，绝对尺寸
+#   1~10m），它们同时占满 R52 的两个豁免口子：
+#     · 房间比例恰好贴近 √2（8100/5600=1.4464 偏 2.3%）→ 命中 √2 豁免；
+#     · 模型空间里没有大真框，rel 分母取的就是房间自己 → 每个房间 rel
+#       高达 42%~71% → 命中 rel≥25% 豁免。
+#   此后条件C 的 10% 门槛也形同虚设（分母与候选同类）。
+# R90：短边 < ROOM_SCALE_MAX_SIDE(10000mm) 的候选视为真实房间/构件尺寸，
+#   不享受任何豁免。门槛依据全回归库 14 张「布局有真页且模型有候选」的图实测
+#   的短边最小值空隙：本图 3450~5750 vs 罗马都市 14813 / 大样图 16820 /
+#   其余 29700+，10000 落在空隙中间。
+# 对照组：模型空间放 1 张真实图框量级的 59400×42050（短边 42050 ≥ 10000）
+#   → 仍享受 √2 豁免、必须保留（证明这不是"布局有页就清空模型"的一刀切）。
+def _build_r90(model_kind):
+    d = make_doc()
+    # 布局空间 2×2 共 4 张 A1 真页（841×594）
+    blk = d.blocks.new('PAGE_A1')
+    add_closed_rect(blk, 0, 0, 841, 594)
+    lay1 = d.layouts.new('布局1')
+    for _cy in range(2):
+        for _cx in range(2):
+            lay1.add_blockref('PAGE_A1', (_cx * 841, _cy * 594))
+    msp = d.modelspace()
+    if model_kind == 'room':
+        # 4 个房间轮廓 8100×5600（用直线矩形，与真实图的"直线矩形"类型一致），
+        # 互相留 2000 间隙 → 不共边，避开 R66 共边网格链剔除，确保测到 R90 本尊
+        for _cy in range(2):
+            for _cx in range(2):
+                add_line_rect(msp, _cx * 10100, _cy * 7600, 8100, 5600)
+    else:
+        # 真实图框量级（短边 42050 ≥ 10000）：应按 √2 豁免保住
+        add_line_rect(msp, 0, 0, 59400, 42050)
+    return to_bytes(d)
+
+
+data = _build_r90('room')
+check('R90布局空间优先: 模型空间房间量级轮廓(8100x5600, 短边<10000)不豁免, 只剩布局4页 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 4
+      and r['frame_counts_by_layout'].get('布局 "布局1"') == 4
+      and '模型空间' not in r['frame_counts_by_layout'])
+
+data = _build_r90('frame')
+check('R90对照: 模型空间的真实图框量级(59400x42050, 短边>=10000)仍享√2豁免保留, fc=5 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 5
+      and r['frame_counts_by_layout'].get('布局 "布局1"') == 4
+      and r['frame_counts_by_layout'].get('模型空间') == 1
+      and any(abs(c['width'] - 59400) < 5 and abs(c['height'] - 42050) < 5
+              for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
