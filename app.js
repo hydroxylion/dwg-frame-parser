@@ -603,7 +603,12 @@ async function parseSingleFile(file) {
                 && Object.keys(data.frame_counts_by_layout).length > 0)
                 ? data.frame_counts_by_layout
                 : null;
-            const rec = addRecord(w, h, result, name, filePath, { frameCount, candidates, layoutCounts });
+            // R94：外部参照告警。后端 xref_warnings 里 status='missing' 表示该 xref
+            // 块未解析（参照文件找不到），其中的图框**完全没被计入** frame_count
+            // ——必须在界面上明确提示，否则用户看到的是一个偏小的数字却毫不知情。
+            // status='resolved' 的是已成功加载并入候选的，只在气泡里说明，不算告警。
+            const xrefWarnings = Array.isArray(data.xref_warnings) ? data.xref_warnings : [];
+            const rec = addRecord(w, h, result, name, filePath, { frameCount, candidates, layoutCounts, xrefWarnings });
             maybeAutoPrecheck(rec);
             return true;
         } catch (err) {
@@ -942,6 +947,18 @@ function addRecord(w, h, result, name, path, framesInfo) {
         h: c.height,
         layout: c.layout,
     }));
+    // R94：外部参照告警。missingXs = 未解析的 xref（其内图框未计入 frame_count），
+    // resolvedXs = 已自动加载并补入候选的 xref。两者分开：前者是"数据可能不全"
+    // 的警告，后者只是"来源说明"，不能混为同一个严重级别。
+    const xrefs = (framesInfo && Array.isArray(framesInfo.xrefWarnings))
+        ? framesInfo.xrefWarnings
+        : [];
+    const missingXs = xrefs.filter(w => w && w.status !== 'resolved');
+    const resolvedXs = xrefs.filter(w => w && w.status === 'resolved');
+    const missingXsText = missingXs.map(w =>
+        `${w.block_name}（${w.insert_count} 处引用）`).join('、');
+    const resolvedXsText = resolvedXs.map(w =>
+        `${w.block_name}（${w.insert_count} 处引用）`).join('、');
     const record = {
         id: ++recordIdCounter,
         name: name || '',
@@ -970,7 +987,17 @@ function addRecord(w, h, result, name, path, framesInfo) {
         // R48：表格页标记（后端条件I 救援候选带 rescued_by='table_page'）
         hasTablePage: tablePageFrames.length > 0,
         tablePageText: tablePageText,
+        // R94：外部参照状态
+        //   hasMissingXref=true → 图框数可能偏少（未解析 xref 内的页没计入），
+        //     必须显式提示，避免用户看到一个偏小数字却以为完整。
+        //   hasResolvedXref=true → 参照已自动加载并补入，仅作来源说明。
+        hasMissingXref: missingXs.length > 0,
+        missingXrefText: missingXsText,
+        hasResolvedXref: resolvedXs.length > 0,
+        resolvedXrefText: resolvedXsText,
     };
+    // 未解析 xref 的提示由 renderRecords() 里的汇总告警条统一处理
+    //   （renderXrefWarningBox），不在每文件解析时弹窗，避免批量上传刷屏。
     records.push(record);
     saveRecords();
     renderRecords();
@@ -1087,8 +1114,61 @@ document.querySelectorAll('#filterCheckboxes input[type="checkbox"]').forEach(cb
     cb.addEventListener('change', renderRecords);
 });
 
-function renderRecords() {
-    const tbody = document.getElementById('recordBody');
+// ---------- R94：未解析外部参照（xref）告警展示 ----------
+// 背景：外部参照里的图框在后端只有"被成功加载"时才会补入 frame_count。
+//   加载不到（线上上传单文件时必然如此）时，用户看到的图框数是**偏小**的，
+//   而旧版前端完全不展示 xref_warnings → 用户毫不知情。静默漏检比漏检本身更危险。
+// 展示分三层，覆盖不同注意力层级：
+//   ① 记录行徽标（⚠ 参照未加载）：一眼能看出哪一行数据可能不全
+//   ② 页面汇总告警条：列出所有受影响文件 + 修复建议
+//   ③ 图框数气泡：在明细里说明参照的解析状态
+let _xrefWarnDismissed = new Set();   // 用户手动关闭过的文件 path
+
+function xrefBadgeHtml(rec) {
+    let out = '';
+    if (rec.hasMissingXref) {
+        out += `<span class="type-tag xf-missing" title="外部参照未解析，其中的图框未计入本行图框数（可能偏少）：${escHtml(rec.missingXrefText || '')}">⚠ 参照未加载</span>`;
+    } else if (rec.hasResolvedXref) {
+        out += `<span class="type-tag xf-resolved" title="外部参照已自动加载，其中的图框已并入本行统计：${escHtml(rec.resolvedXrefText || '')}">🔗 参照已加载</span>`;
+    }
+    return out;
+}
+
+// 汇总告警条：扫描全部记录，把"参照未加载"的文件集中列出来
+function renderXrefWarningBox() {
+    const box = document.getElementById('xrefWarningBox');
+    if (!box) return;
+    const affected = records.filter(r => r && r.hasMissingXref && !_xrefWarnDismissed.has(r.path || r.name));
+    if (affected.length === 0) {
+        box.style.display = 'none';
+        box.innerHTML = '';
+        return;
+    }
+    const items = affected.map(r => {
+        const nm = r.path || r.name || '(未命名)';
+        return `<li>${escHtml(nm)}<span class="xf-badge">${escHtml(r.missingXrefText || '参照未加载')}</span></li>`;
+    }).join('');
+    box.innerHTML = `
+        <span class="xf-close" title="关闭提示（仅隐藏本提示条，行内徽标仍保留）">✕</span>
+        <div class="xf-title">⚠ 有 ${affected.length} 个图纸含未解析的外部参照，图框数可能偏少</div>
+        <div>以下图纸引用的外部参照文件未能加载，参照内的图框<strong>没有计入</strong>图框数，请勿直接据此判定图纸张数：</div>
+        <ul>${items}</ul>
+        <div class="xf-fix">
+            <strong>怎么解决：</strong><br>
+            ① 出图方在 CAD 里执行 <code>XREF</code> → <strong>绑定（BIND）</strong>，把参照打散进主文件后再提供；<br>
+            ② 或把参照 dwg 与主文件放在同一目录一起提供（需服务端配置参照搜索目录 <code>FRAME_PARSER_XREF_DIRS</code>）。
+        </div>`;
+    box.style.display = 'block';
+    const closeBtn = box.querySelector('.xf-close');
+    if (closeBtn) {
+        closeBtn.addEventListener('click', () => {
+            affected.forEach(r => _xrefWarnDismissed.add(r.path || r.name));
+            renderXrefWarningBox();
+        });
+    }
+}
+
+function renderRecords() {    const tbody = document.getElementById('recordBody');
     const countSpan = document.getElementById('recordCount');
     const filterCountSpan = document.getElementById('filterCount');
 
@@ -1145,7 +1225,7 @@ function renderRecords() {
         const tablePageHtml = rec.hasTablePage
             ? `<span class="type-tag table-page" title="含表格页（条件I 表格内容页救援）：${escHtml(rec.tablePageText || '')}">📋 表格页</span>`
             : '';
-        const typeHtml = `<span class="type-tag ${typeInfo.cls}">${typeInfo.label}</span>${mixedHtml}${tablePageHtml}`;
+        const typeHtml = `<span class="type-tag ${typeInfo.cls}">${typeInfo.label}</span>${mixedHtml}${tablePageHtml}${xrefBadgeHtml(rec)}`;
         // 图框数列：展示该图纸检测到的图框数量（模型空间 + 布局空间合计）。
         // 点击任一单元格弹出气泡查看明细——**单图框也要能看**（首要用途是
         // "这一张来自模型空间还是布局空间"，多图框则是空间分布 + 尺寸清单）。
@@ -1156,7 +1236,7 @@ function renderRecords() {
         // frameCount=0 也是有效检测结果（真·无图框），要显示 "0" 而非 "—"；
         // "—" 只留给手动输入/失败记录（frameCount 字段缺失）。
         const hasFrameCount = typeof rec.frameCount === 'number' && rec.frameCount >= 0;
-        const tipAttrs = `data-frames="${escHtml(rec.framesText || '')}" data-all="${escHtml(rec.framesAll || rec.framesText || '')}" data-layouts="${escHtml(JSON.stringify(rec.layoutCounts || {}))}" data-primary-layout="${escHtml(rec.primaryLayout || '')}" data-table-pages="${escHtml(rec.tablePageText || '')}"`;
+        const tipAttrs = `data-frames="${escHtml(rec.framesText || '')}" data-all="${escHtml(rec.framesAll || rec.framesText || '')}" data-layouts="${escHtml(JSON.stringify(rec.layoutCounts || {}))}" data-primary-layout="${escHtml(rec.primaryLayout || '')}" data-table-pages="${escHtml(rec.tablePageText || '')}" data-xref-missing="${escHtml(rec.missingXrefText || '')}" data-xref-resolved="${escHtml(rec.resolvedXrefText || '')}"`;
         let frameCountHtml = '—';
         if (hasFrameCount) {
             // 布局分布次级文本（模型空间×N、布局 "Sheet1"×M …），仅多图框时显示在图框
@@ -1243,6 +1323,9 @@ function renderRecords() {
 
     // 多图框徽章：可截图气泡（悬停弹出 / 移开保留片刻 / 点击钉住常显）
     bindTipAnchors(tbody);
+
+    // R94：外部参照汇总告警条（记录变化时同步刷新）
+    renderXrefWarningBox();
 
     updateBatchUI();
 }
@@ -1336,10 +1419,34 @@ function showTip(anchor) {
                </div>
              </div>`;
     }
+    // R94：外部参照状态（气泡中层——图框数字边上直接说明"这个数字是否完整"）
+    //   missing：参照没加载进来，图框数偏少 → 红框强提示
+    //   resolved：参照已自动加载并入统计 → 蓝框仅作来源说明
+    const xfMissingTxt = String(anchor.dataset.xrefMissing || '');
+    const xfResolvedTxt = String(anchor.dataset.xrefResolved || '');
+    let xrefRowsHtml = '';
+    if (xfMissingTxt) {
+        xrefRowsHtml +=
+            `<div class="tip-xref tip-xref-missing">
+               <div class="tip-xref-head">⚠ 外部参照未加载，图框数可能偏少</div>
+               <div class="tip-xref-list">${escHtml(xfMissingTxt)}</div>
+               <div class="tip-xref-note">参照内的图框未计入上方数字。出图方用 CAD 的 XREF→绑定（BIND）打散后重新提供，或把参照 dwg 与主文件放同一目录。</div>
+             </div>`;
+    }
+    if (xfResolvedTxt) {
+        xrefRowsHtml +=
+            `<div class="tip-xref tip-xref-resolved">
+               <div class="tip-xref-head">🔗 外部参照已自动加载</div>
+               <div class="tip-xref-list">${escHtml(xfResolvedTxt)}</div>
+               <div class="tip-xref-note">参照内的图框已并入上方统计。</div>
+             </div>`;
+    }
     tipPop.innerHTML =
         `<div class="tip-head">共 ${nRaw} 个图框${nDim > 1 ? `（${nDim} 种尺寸）` : ''}${truncated ? ' <span class="tip-more">· 下方滚动查看</span>' : ''}</div>`
+        + (xfMissingTxt ? xrefRowsHtml : '')
         + layoutRowsHtml
         + (dimRows ? `<div class="tip-list">${dimRows}</div>` : '')
+        + (xfResolvedTxt ? xrefRowsHtml : '')
         + `<div class="tip-actions">
              <button type="button" class="tip-btn tip-close">✕ 关闭</button>
              <button type="button" class="tip-btn tip-copy">📋 复制全部</button>

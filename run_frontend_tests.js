@@ -13,6 +13,7 @@ const FILES = [
     'test_xlsx_e2e.js',
     'test_layout_col_width.js',
     'test_delete_script_logic.js',
+    'test_xref_warning.js',
 ];
 
 // 各用例文件的汇总行格式不统一（"结果: N 通过, M 失败" / "结果：N 通过 / M 失败"），

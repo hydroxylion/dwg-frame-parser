@@ -282,7 +282,9 @@ check('开关关闭 → 不勾', autoPrecheck({ type: 'standard', frameCount: 1,
 check('标准+0框 → 不勾', autoPrecheck({ type: 'standard', frameCount: 0, mixed: false }, true), false);
 
 // 源码级护栏：防止实现漂移
-check('app.js 存在 maybeAutoPrecheck 且上传路径调用', /const rec = addRecord\(w, h, result, name, filePath, \{ frameCount, candidates, layoutCounts \}\);\s*\n\s*maybeAutoPrecheck\(rec\);/.test(src), true);
+// （R94 起 addRecord 的 framesInfo 多了 xrefWarnings，故对象字面量用 [^}]* 放宽，
+//   但"赋值给 rec 且紧随 maybeAutoPrecheck(rec)"这个结构契约仍严格校验）
+check('app.js 存在 maybeAutoPrecheck 且上传路径调用', /const rec = addRecord\(w, h, result, name, filePath, \{[^}]*\}\);\s*\n\s*maybeAutoPrecheck\(rec\);/.test(src), true);
 check('maybeAutoPrecheck 判定混合记录', /if \(isMixedRecord\(rec\)\) return;/.test(src), true);
 check('index.html 存在图框数筛选组', /id="fcFilterCheckboxes"/.test(fs.readFileSync(path.join(__dirname, 'index.html'), 'utf-8')), true);
 check('index.html 预勾选开关默认开启', /id="autoPrecheck" checked/.test(fs.readFileSync(path.join(__dirname, 'index.html'), 'utf-8')), true);

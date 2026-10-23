@@ -694,6 +694,81 @@
             cursor: help;
             white-space: nowrap;
         }
+        /* R94 外部参照徽标：
+           .xf-missing = 参照未加载，图框数可能偏少（橙红实线，强提示）
+           .xf-resolved = 参照已自动加载并补入候选（青绿虚线，仅来源说明） */
+        .type-tag.xf-missing {
+            background: linear-gradient(135deg, #fde8e8, #fdf0d5);
+            color: #a83a1e;
+            border: 1px solid #e2a18f;
+            margin-left: 4px;
+            font-weight: 600;
+            cursor: help;
+            white-space: nowrap;
+        }
+        .type-tag.xf-resolved {
+            background: #e8f1fb;
+            color: #2b5f9e;
+            border: 1px dashed #9dbde4;
+            margin-left: 4px;
+            cursor: help;
+            white-space: nowrap;
+        }
+        /* R94 未解析外部参照的汇总告警条（页面上方，批量上传时列出所有受影响文件） */
+        .xref-warn-box {
+            margin-top: 12px;
+            padding: 12px 16px;
+            border-radius: 12px;
+            background: linear-gradient(135deg, #fff5f2, #fffaf0);
+            border: 1px solid #e8b09a;
+            border-left: 4px solid #d9534f;
+            font-size: 13px;
+            line-height: 1.7;
+            color: #8a3a22;
+        }
+        .xref-warn-box .xf-title {
+            font-weight: 700;
+            color: #a83a1e;
+            margin-bottom: 6px;
+            font-size: 14px;
+        }
+        .xref-warn-box ul {
+            margin: 6px 0 4px 18px;
+            padding: 0;
+        }
+        .xref-warn-box li {
+            margin-bottom: 4px;
+            word-break: break-all;
+        }
+        .xref-warn-box .xf-badge {
+            display: inline-block;
+            padding: 0 7px;
+            border-radius: 8px;
+            background: #f6d7cc;
+            color: #8a3a22;
+            font-size: 11px;
+            margin-left: 6px;
+        }
+        .xref-warn-box .xf-fix {
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px dashed #e8b09a;
+            color: #7d4a33;
+            font-size: 12.5px;
+        }
+        .xref-warn-box .xf-fix code {
+            background: #f6e8e0;
+            padding: 1px 5px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        .xref-warn-box .xf-close {
+            float: right;
+            cursor: pointer;
+            color: #a83a1e;
+            font-weight: 700;
+            padding: 0 4px;
+        }
         /* 图框数下的布局分布次级文本：模型空间×N、布局 "Sheet1"×M … */
         .frame-dist {
             font-size: 11px;
@@ -811,6 +886,40 @@
         /* 空间信息缺失时的占位符（—）：弱化显示，表明"取不到"而非"空字符串" */
         .tip-pop .tip-none {
             color: #7f9ac0;
+        }
+        /* R94 气泡内的外部参照状态块
+           missing：参照未加载 → 红调警醒（气泡是深色底，用半透明红+亮字保证对比）
+           resolved：参照已加载 → 蓝调，仅作来源说明 */
+        .tip-pop .tip-xref {
+            border-radius: 6px;
+            padding: 5px 7px;
+            margin: 4px 0 6px;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+        .tip-pop .tip-xref-head {
+            font-weight: 700;
+            margin-bottom: 3px;
+        }
+        .tip-pop .tip-xref-list {
+            word-break: break-all;
+            opacity: 0.95;
+        }
+        .tip-pop .tip-xref-note {
+            margin-top: 4px;
+            font-size: 11.5px;
+            opacity: 0.8;
+            line-height: 1.45;
+        }
+        .tip-pop .tip-xref-missing {
+            background: rgba(217, 83, 79, 0.22);
+            border: 1px solid rgba(232, 176, 154, 0.55);
+            color: #ffd9cc;
+        }
+        .tip-pop .tip-xref-resolved {
+            background: rgba(43, 95, 158, 0.22);
+            border: 1px solid rgba(157, 189, 228, 0.5);
+            color: #cfe2ff;
         }
         .tip-pop .tip-actions {
             display: flex;
