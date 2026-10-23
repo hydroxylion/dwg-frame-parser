@@ -905,6 +905,21 @@ def is_page_ratio(r, tol_sqrt2=PAGE_RATIO_SQRT2_TOL, use_mults=True):
     return False
 
 
+def is_mult_ratio(r):
+    """仅匹配 √2×加长倍率（k=1.25/1.5/1.75，±1%），不含 √2 主口径。
+
+    与 is_page_ratio 的分工：某些判据原本有一条**严格的** √2 阈值（如 R52 用的
+    ±2%，比 is_page_ratio 的 √10% 紧得多），只想额外补上"加长幅面也算纸"的
+    能力、不愿放宽既有 √2 口径时，用本函数做独立的"或"分支（R91）。
+    """
+    if r is None or r <= 0:
+        return False
+    for _k in PAGE_RATIO_MULTS:
+        if abs(r / (_SQRT2 * _k) - 1) <= PAGE_RATIO_MULT_TOL:
+            return True
+    return False
+
+
 # ---------- 第23轮：图签附栏外扩合并（105100口径，2026-09-17） ----------
 # 场景（地下室电力t3.dwg）：84100×59400 主图框 + 左侧 21000 图签附栏应按 105100×59400
 # 整体输出（用户实测口径）。附栏在该模板中不形成独立闭合边界——J-图框/TK 层的图签条
@@ -6193,9 +6208,33 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             def _is_room_scale(_c):
                 return _room_scale_on and min(_c['width'], _c['height']) < _ROOM_MAX_SIDE
 
+            # R91：豁免① 在保留原有 √2±2% 的前提下，**额外**认 √2×加长倍率。
+            #   反例（RF雅安综合艺术楼水施_t3.dwg 模型空间 2→应 3）：该图 3 张
+            #   页框各带内框——
+            #     y≈328810 105100×59400（外）+ 101600×57400（内）PUB_TITLE 层
+            #     y≈241918 89100×63000（外）+ 83850×60000（内）TWT_TITLE 层
+            #     y≈241918 89100×63000（外）+ 83850×60000（内）GPSCOMMON 层
+            #   布局"布局1"有 4 张 841×594 真页 → 触发本规则。105100×59400 的
+            #   ratio = 1.7694 = **√2×1.25**（A1 的 1/4 加长 + 附栏口径；也正好
+            #   等于 84100+21000），对 √2 偏离 25.11% 够不着 √2±2%；rel 仅
+            #   13.60% 也够不着 rel≥25% → 两条豁免全失 → 被当内容源剔除。
+            #   加长倍率分支单独用 ±1%（比 √2 的 ±2% 更紧）：倍率之间间距小
+            #   （1.25 与 1.5 理论只差 20%），宽区间会互相重叠并擦碰非标比例真框。
+            #   实测本例对 √2×1.25 偏差仅 0.09%，±1% 留足余量。
+            #   ⚠ 保守取舍：**不动**原 √2 阈值仍是 ±2%（不是直接换成
+            #   is_page_ratio 的 ±10%）——放宽 √2 口径会同时放开所有既有的
+            #   "比例接近 √2 的内容轮廓"，风险远大于只新增倍率分支。
+            def _page_ratio_exempt(_c):
+                # 原口径：√2 ±2%（保持不变）
+                if abs(_c['ratio'] - _sqrt2_r52) / _sqrt2_r52 <= 0.02:
+                    return True
+                # R91 新增：√2×加长倍率 ±1%（模块级 is_mult_ratio，与本函数外的
+                #   _mult_ratio_ok 同口径；后者是 collect 内的局部函数，作用域不达此处）
+                return is_mult_ratio(_c['ratio'])
+
             _model_keep = [c for c in _model_cands
                            if not _is_room_scale(c)
-                           and (abs(c['ratio'] - _sqrt2_r52) / _sqrt2_r52 <= 0.02
+                           and (_page_ratio_exempt(c)
                                 or (c.get('rel_area_ratio', 0) >= 0.25
                                     and len(_model_cands) >= 3
                                     and not c.get('rescued_by')))]

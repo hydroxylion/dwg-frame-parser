@@ -3335,4 +3335,51 @@ check('R90对照: 模型空间的真实图框量级(59400x42050, 短边>=10000)�
               for c in r['candidates']))
 
 
+# ---- 用例 114：R91 R52 豁免补「√2×加长倍率」（RF雅安综合艺术楼水施 模型 2→3） ----
+# 场景复刻（RF雅安综合艺术楼水施_t3.dwg）：布局"布局1"有 4 张 841×594 真页 →
+#   触发 R52「布局空间优先」；模型空间 3 张页框各带内框：
+#     105100×59400（外）+ 101600×57400（内）—— 该图漏的就是这张
+#     89100×63000（外）+ 83850×60000（内）×2 套
+#   105100×59400 的 ratio = 1.7694 = √2×1.25（A1 的 1/4 加长 + 附栏口径，
+#   数值上 = 84100+21000），对 √2 偏离 25.11% 够不着 R52 原有的 √2±2%；
+#   rel 仅 13.60% 够不着 rel≥25% → 两条豁免全失被剔。
+# R91（保守做法）：保留 √2 仍 ±2%，**额外**加一条 √2×加长倍率 ±1% 的或分支
+#   （模块级 is_mult_ratio）。不动 √2 阈值——直接换成 is_page_ratio 的 ±10%
+#   会把所有"比例接近 √2 的内容轮廓"一并放开，风险远大于只补倍率分支。
+# 对照组：模型空间放同样带内框、但比例为非页面比例（ratio 1.90）的页框
+#   → 不走倍率分支 → 仍按内容源剔除。
+def _build_r91(model_ratio_mult):
+    d = make_doc()
+    # 布局空间 2×2 共 4 张 A1 真页（841×594）
+    blk = d.blocks.new('PAGE_A1')
+    add_closed_rect(blk, 0, 0, 841, 594)
+    lay1 = d.layouts.new('布局1')
+    for _cy in range(2):
+        for _cx in range(2):
+            lay1.add_blockref('PAGE_A1', (_cx * 841, _cy * 594))
+    msp = d.modelspace()
+    # 模型空间：一张带内框的页框（外框 + 内框，复刻真实图的双线画法）
+    #   model_ratio_mult=True  → 105100×59400（ratio 1.7694 = √2×1.25）
+    #   model_ratio_mult=False → 外框高度改成 105100/1.90（非页面比例）
+    ow, oh = 105100, (59400 if model_ratio_mult else round(105100 / 1.90))
+    add_closed_rect(msp, 0, 0, ow, oh)
+    add_closed_rect(msp, 2500, 2000, ow - 3500, oh - 2000)
+    return to_bytes(d)
+
+
+data = _build_r91(True)
+check('R91布局空间优先: √2×1.25 加长页框(105100x59400)享豁免保留, 模型空间保住1张 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_counts_by_layout'].get('模型空间') == 1
+      and r['frame_counts_by_layout'].get('布局 "布局1"') == 4
+      and any(abs(c['width'] - 105100) < 50 and abs(c['height'] - 59400) < 50
+              for c in r['candidates']))
+
+data = _build_r91(False)
+check('R91对照: 非页面比例(1.90)的模型页框不享倍率豁免, 模型空间为0 (smart)',
+      lambda: parse(data),
+      lambda r: '模型空间' not in r['frame_counts_by_layout']
+      and r['frame_counts_by_layout'].get('布局 "布局1"') == 4)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
