@@ -3454,4 +3454,107 @@ check('R94 LINE配对对照: 占到块98%的LINE边框块仍被认作图框 (sma
                     for c in r['candidates']))
 
 
+# ---- 用例 117：R95 块内「子块实例页框」提升（02食堂 识 5 实际 10） ----
+# 场景复刻（02食堂sw-2014.9.3.dwg）：图框不是直接画的矩形，而是块
+#   A$C7129040E 内 5 个 BOUNDARY-A1-1 **子块实例**（scale=100 → 84100×59400）。
+#   块内没有任何 84100×59400 的闭合矩形/LINE 矩形，只有子块实例的 bbox 是
+#   该尺寸 → 原链路（只扫块定义顶层 LWPOLYLINE）完全看不到。
+# R95：在本实例块定义里找**子块实例页框**，按四重判据筛后提升为独立候选。
+#   判据：①只扫被引用块（调用侧天然满足）②乘父+自身 scale 得世界尺寸
+#        ③短边≥15000 且 ratio∈[1.30,5.5] ④A 系图纸尺寸整数倍 ±3mm、偏离√2≤1%
+# 对照：子块实例尺寸非 A 系整数倍（如 90000×60000）→ 不提升。
+#
+# 注意用例构造：装配块本体的 bbox 也会走特征判定。真实图（02食堂）里
+#   A$C7129040E 是 458935×137558（ratio 3.34）——虽然也过 ratio 区间，但它
+#   罩住 5 个页框时走的是"包裹框剔除"（含 ≥2 个图框候选 → 本身判为外包络），
+#   不会把页框吃掉。这里刻意让装配块尺寸与真实图同量级，避免构造偏差。
+def _build_r95_inst_pages(use_a_series):
+    d = make_doc()
+    ab = d.blocks.new('ASSEMBLY')
+    if use_a_series:
+        # 页框块：定义 841×594（标准 A1），实例 scale=100 → 84100×59400
+        # = A594×100，命中判据④（A 系图纸尺寸整数倍）
+        pb = d.blocks.new('BOUNDARY_A1')
+        add_closed_rect(pb, 0, 0, 841, 594)
+        _child, _step, _sc = 'BOUNDARY_A1', 89100, 100
+    else:
+        # 对照组：900×600 的"纸"（×100 → 90000×60000，ratio 1.5）
+        # ratio 偏离 √2 达 6%，不满足判据④ → 不该被提升为页框
+        pb = d.blocks.new('BOUNDARY_BIG')
+        add_closed_rect(pb, 0, 0, 900, 600)
+        _child, _step, _sc = 'BOUNDARY_BIG', 95000, 100
+    # 5 个页框等距排一行。**间距按块定义坐标给**：子块 insert 位置在父块
+    #   坐标系内、不被子块 scale 放大，而子块展开后宽 84100 —— 间距须留出
+    #   间隙不重叠（真实图 BOUNDARY-A1-1 的 insert 是 0/89100/178200/...）。
+    #   若间距小于子块展开宽度，5 个页框会大幅重叠，被去重规则2（IoU）
+    #   合并成 1 个 —— 那是构造错误，不是识别错误。
+    for _i in range(5):
+        ab.add_blockref(_child, (_i * _step, 0),
+                        dxfattribs={'xscale': _sc, 'yscale': _sc})
+    # 装配块内还要有散件把 bbox 撑到远大于单个页框，复刻真实图
+    #   A$C7129040E 的 458935×137558（5 页只占其中一条横带）。
+    ab.add_lwpolyline([(0, -78158), (458900, -78158),
+                       (458900, 0), (0, 0)], close=True)
+    d.modelspace().add_blockref('ASSEMBLY', (0, 0))
+    return to_bytes(d)
+
+
+data = _build_r95_inst_pages(True)
+check('R95块内子块实例页框: 装配块内5个 BOUNDARY_A1(×100)=A594×100 全部提升 (smart)',
+      lambda: parse(data),
+      lambda r: sum(1 for c in r['candidates']
+                    if abs(c['width'] - 84100) < 50
+                    and abs(c['height'] - 59400) < 50) == 5)
+
+data = _build_r95_inst_pages(False)
+check('R95对照: 子块实例尺寸非A系整数倍(90000x60000)不提升为页框 (smart)',
+      lambda: parse(data),
+      lambda r: not any(abs(c['width'] - 90000) < 100 and abs(c['height'] - 60000) < 100
+                        for c in r['candidates']))
+
+
+# ---- 用例 118：R95 子块尺寸必须乘【父实例 scale】（井道大样 1 个图框） ----
+# 场景（井道大样.dwg）：块 A1 以 scale=1/150 插入**布局1**，块定义 126150×89100
+#   → 世界尺寸 841×594，正是布局页里那 1 张真页框，**不该**额外算一页。
+#   若漏乘父实例 scale，会误判成 126150×89100（= A594×150）而多加 1 页。
+# 这里直接验证"乘父 scale"这条算术：块定义 126150×89100 × 1/150 = 841×594，
+#   小于 15000 门槛 → 不提升。
+def _build_r95_parent_scale():
+    d = make_doc()
+    # 内层：126150×89100 的"纸"（A1 按 1:150 的定义尺寸）
+    pb = d.blocks.new('A1_INNER')
+    add_closed_rect(pb, 0, 0, 126150, 89100)
+    # 中层：块 A1，内含 1 个 A1_INNER
+    ab = d.blocks.new('A1')
+    ab.add_blockref('A1_INNER', (0, 0))
+    # 模型空间：把 A1 以 1/150 插入 → 世界 841×594
+    msp = d.modelspace()
+    msp.add_blockref('A1', (0, 0),
+                     dxfattribs={'xscale': 1.0 / 150, 'yscale': 1.0 / 150})
+    return to_bytes(d)
+
+
+data = _build_r95_parent_scale()
+check('R95父scale: 块定义126150x89100经1/150缩放后世界841x594, 不提升为页框 (smart)',
+      lambda: parse(data),
+      lambda r: not any(abs(c['width'] - 126150) < 500 for c in r['candidates']))
+
+# 对照组：同样的结构但**按 1:1 插入** → 世界 126150×89100 = A594×150，应提升
+def _build_r95_parent_scale_1x():
+    d = make_doc()
+    pb = d.blocks.new('A1_INNER')
+    add_closed_rect(pb, 0, 0, 126150, 89100)
+    ab = d.blocks.new('A1')
+    ab.add_blockref('A1_INNER', (0, 0))
+    d.modelspace().add_blockref('A1', (0, 0))
+    return to_bytes(d)
+
+
+data = _build_r95_parent_scale_1x()
+check('R95父scale对照: 同样结构按1:1插入(A594×150)应提升为页框 (smart)',
+      lambda: parse(data),
+      lambda r: any(abs(c['width'] - 126150) < 500 and abs(c['height'] - 89100) < 500
+                    for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

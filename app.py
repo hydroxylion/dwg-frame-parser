@@ -920,6 +920,62 @@ def is_mult_ratio(r):
     return False
 
 
+# ---------- R95：块内「子块实例页框」识别 ----------
+# 动机（02食堂sw-2014.9.3.dwg 识 5 实际 10）：
+#   漏掉的 5 张不是直接画的矩形，而是块 A$C7129040E 内 5 个
+#   `BOUNDARY-A1-1` **子块实例**（scale=100 → 84100×59400）。块内**没有任何**
+#   84100×59400 的闭合矩形或 LINE 矩形（递归 5 层扫过 455 个闭合矩形、3560 条
+#   LINE 都没有），只有子块实例的 bbox 恰好是该尺寸 → 现有
+#   `_scan_block_max_page_rects` 只扫块定义**顶层 LWPOLYLINE**，看不到它们。
+#
+# 判据经过三轮收紧（用全 83 图库实测，详见 docs/CHANGELOG.md R95）：
+#   ① 只扫「图纸中实际被引用的块」（递归展开；未引用的块定义是残留块，
+#      图面上不存在任何图形，其中的"图框"没有意义）——实测块定义 10498 个里
+#      只有 7572 个被引用（72.1%）；
+#   ② 子块 bbox 必须乘【父实例 scale】和【自身 scale】得到**世界真实尺寸**
+#      ——这条是用户指出"井道大样应该是 1 个图框"后补的关键修正：该图块 A1
+#      以 scale=1/150 插入布局1，块定义 126150×89100 → 世界 841×594（正是
+#      布局页里那 1 张真页框），漏乘父 scale 就会误判成另一张图框；
+#   ③ 世界尺寸：短边 ≥ 15000 且 ratio ∈ [1.30, FRAME_RATIO_MAX]；
+#   ④ 尺寸须为 A 系图纸尺寸的整数倍（模拟 1:N 出图）：短边 ≈ A 系短边
+#      (841/594/420/297/210/148/105) × 正整数（±3mm），且 ratio 偏离 √2 ≤1%。
+#      目标图的 84100×59400 = A594×100 正是"按 1:100 出图"的物理含义。
+#
+# 判据演进实测（每步都在除错）：
+#   宽松②③            → 全库命中 917 个（jiaju/jianliqiang/轴网块大量误收：
+#                        '文字、面积、门窗标注' 块内 87 个、S010 块内 36 个、
+#                        d006,007 内 22 个）
+#   +④                 → 8 个
+#   +①（用户指正）      → 6 个（去掉残留块噪音）
+#   +②（乘父 scale）    → 5 个，全部来自目标图，零误收
+#
+# 作用范围：**仅模型空间有效**。布局空间里块内页框常是排版内容（井道大样就是
+#   布局里 A1 按 1/150 铺底），且布局自身已有真页框，再加会重复计数。
+# 开关 FRAME_PARSER_NO_BLOCK_INST_PAGE=1 回退。
+_A_SERIES_SHORT_FOR_PAGE = (841, 594, 420, 297, 210, 148, 105)
+
+
+def is_a_series_page_size(w, h, tol_short=3.0, tol_ratio=0.01):
+    """该尺寸是否为 A 系图纸尺寸的整数倍（即"按 1:N 出图的纸"）
+
+    返回 (bool, 说明串)。判据：ratio 偏离 √2 ≤ tol_ratio，且短边等于某个
+    A 系短边 × 正整数（容差 tol_short 毫米，吸收绘图取整误差）。
+    """
+    if not w or not h or w <= 0 or h <= 0:
+        return False, ''
+    s_min, s_max = min(w, h), max(w, h)
+    if abs(s_max / s_min / _SQRT2 - 1) > tol_ratio:
+        return False, ''
+    for _a in _A_SERIES_SHORT_FOR_PAGE:
+        _n = round(s_min / _a)
+        if _n < 1:
+            continue
+        if abs(s_min - _a * _n) <= tol_short:
+            return True, f'A{_a}×{_n}'
+    return False, ''
+
+
+
 # ---------- 第23轮：图签附栏外扩合并（105100口径，2026-09-17） ----------
 # 场景（地下室电力t3.dwg）：84100×59400 主图框 + 左侧 21000 图签附栏应按 105100×59400
 # 整体输出（用户实测口径）。附栏在该模板中不形成独立闭合边界——J-图框/TK 层的图签条
@@ -2283,6 +2339,173 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             _title_page_cache[_bn] = _maximal
         return _maximal
 
+    # ---------- R95：块内「子块实例页框」提升 ----------
+    # 见模块级 is_a_series_page_size 上方的完整说明。这里只做实现。
+    _block_inst_page_cache = {}
+    _pin_defbb_cache = {}     # 块名 → 定义 bbox（性能关键，见 _inst_world_rect）
+
+    def _inst_world_rect(_ent, _parent_sx, _parent_sy):
+        """子块实例在父块定义坐标系下的矩形 (x1,y1,x2,y2)
+
+        取子块**定义 bbox**，乘【自身 scale × 父实例 scale】，按自身 rotation
+        旋转后平移到 insert 位置（基准点 base_point 先归零）。
+        返回 None 表示取不到有效尺寸。
+
+        性能：块定义 bbox 按块名缓存（`_pin_defbb_cache`）——同一块名可能被
+        插入成百上千次（A$C7129040E 内 619 个 INSERT、全图 1712 个），每次
+        重算 extents() 会让整图解析从秒级劣化到分钟级（实测回归 11min→29min+
+        仍未跑完）。
+        """
+        _cn = _ent.dxf.name
+        _cached = _pin_defbb_cache.get(_cn)
+        if _cached is None:
+            try:
+                _sb = doc.blocks.get(_cn)
+                if _sb is None:
+                    _pin_defbb_cache[_cn] = False
+                    return None
+                from ezdxf import bbox as _bbox_mod95
+                _sbb = _bbox_mod95.extents(_sb, fast=True)
+                _sx1, _sy1 = _sbb.extmin.x, _sbb.extmin.y
+                _sx2, _sy2 = _sbb.extmax.x, _sbb.extmax.y
+            except Exception:
+                _pin_defbb_cache[_cn] = False
+                return None
+            if not all(isinstance(v, (int, float))
+                       for v in (_sx1, _sy1, _sx2, _sy2)):
+                _pin_defbb_cache[_cn] = False
+                return None
+            if _sx1 == _sx2 or _sy1 == _sy2:
+                _pin_defbb_cache[_cn] = False
+                return None
+            try:
+                _sbase = _sb.block.dxf.base_point
+                _sbx, _sby = _sbase.x, _sbase.y
+            except Exception:
+                _sbx = _sby = 0.0
+            _cached = (_sx1, _sy1, _sx2, _sy2, _sbx, _sby)
+            _pin_defbb_cache[_cn] = _cached
+        if _cached is False:
+            return None
+        _sx1, _sy1, _sx2, _sy2, _sbx, _sby = _cached
+        try:
+            _ins = _ent.dxf.insert
+            _isx = (_ent.dxf.xscale or 1) * _parent_sx
+            _isy = (_ent.dxf.yscale or 1) * _parent_sy
+            _irot = getattr(_ent.dxf, 'rotation', 0) or 0
+        except Exception:
+            return None
+        if abs(_isx) < 1e-12 or abs(_isy) < 1e-12:
+            return None
+        # 快速否决：展开后的短边必然 < 15000 的直接跳过，省掉后面三角函数
+        #   （R95 判据③ 要求短边 ≥ 15000，家具/符号块的定义通常只有几十~几百 mm）
+        _quick = min((_sx2 - _sx1) * abs(_isx), (_sy2 - _sy1) * abs(_isy))
+        if _quick < 15000:
+            return None
+        _rad = _math.radians(_irot)
+        _cr, _sr = _math.cos(_rad), _math.sin(_rad)
+        _pts = []
+        for _px, _py in ((_sx1, _sy1), (_sx2, _sy1), (_sx2, _sy2), (_sx1, _sy2)):
+            _qx = (_px - _sbx) * _isx
+            _qy = (_py - _sby) * _isy
+            _pts.append((_qx * _cr - _qy * _sr + _ins.x,
+                         _qx * _sr + _qy * _cr + _ins.y))
+        _xs = [p[0] for p in _pts]
+        _ys = [p[1] for p in _pts]
+        return (min(_xs), min(_ys), max(_xs), max(_ys))
+
+    def _scan_block_inst_pages(_bn, _parent_sx=1.0, _parent_sy=1.0):
+        """块定义内**子块实例**构成的页框（父块定义坐标系），按 R95 四重判据筛选。
+
+        _parent_sx/_parent_sy：本块在图纸中的实例缩放。**仅用于尺寸判据**
+        （判据要求的是"图上真实尺寸"）；返回的坐标仍是未乘父 scale 的
+        父块定义坐标，由调用侧做完整变换，避免双重缩放。
+
+        返回 [(x1, y1, x2, y2, 子块名, 世界宽, 世界高, 说明), ...]
+        """
+        _ck = (_bn, round(_parent_sx, 9), round(_parent_sy, 9))
+        if _ck in _block_inst_page_cache:
+            return _block_inst_page_cache[_ck]
+        _blk = doc.blocks.get(_bn)
+        if _blk is None:
+            _block_inst_page_cache[_ck] = []
+            return []
+        _out = []
+        for _e2 in _blk:
+            try:
+                if _e2.dxftype() != 'INSERT':
+                    continue
+                _r = _inst_world_rect(_e2, 1.0, 1.0)
+                if _r is None:
+                    continue
+                # 世界尺寸 = 父块定义内尺寸 × 父实例 scale
+                _w = (_r[2] - _r[0]) * abs(_parent_sx)
+                _h = (_r[3] - _r[1]) * abs(_parent_sy)
+                if _w <= 0 or _h <= 0:
+                    continue
+                # 判据③：尺寸量级 + 比例区间
+                _s_min = min(_w, _h)
+                if _s_min < 15000:
+                    continue
+                _rr = max(_w, _h) / _s_min
+                if not (1.30 <= _rr <= FRAME_RATIO_MAX):
+                    continue
+                # 判据④：A 系图纸尺寸的整数倍
+                _ok, _why = is_a_series_page_size(_w, _h)
+                if not _ok:
+                    continue
+                _out.append((_r[0], _r[1], _r[2], _r[3],
+                             _e2.dxf.name, _w, _h, _why))
+            except Exception:
+                continue
+        # 极大框过滤：被同批更大页框严格包含的剔除（内框体系）
+        _kept = []
+        for _a in _out:
+            _aa = (_a[2] - _a[0]) * (_a[3] - _a[1])
+            _contained = False
+            for _b in _out:
+                if _a is _b:
+                    continue
+                _ab = (_b[2] - _b[0]) * (_b[3] - _b[1])
+                if (_ab > _aa and _a[0] >= _b[0] - 1.0 and _a[1] >= _b[1] - 1.0
+                        and _a[2] <= _b[2] + 1.0 and _a[3] <= _b[3] + 1.0):
+                    _contained = True
+                    break
+            if not _contained:
+                _kept.append(_a)
+        _block_inst_page_cache[_ck] = _kept
+        return _kept
+
+    def _collect_referenced_block_names():
+        """图纸中**实际被引用**的块名集合（递归展开，含嵌套子块）
+
+        R95 判据①。未出现在这里的块定义是残留块——图面上不存在任何图形，
+        从它们里面"识别图框"没有意义，且会引入大量噪音。
+        """
+        _refs = set()
+        _queue = []
+
+        def _feed(_container):
+            for _e in _container:
+                try:
+                    if _e.dxftype() == 'INSERT':
+                        _nm = _e.dxf.name
+                        if _nm not in _refs:
+                            _refs.add(_nm)
+                            _queue.append(_nm)
+                except Exception:
+                    continue
+
+        _feed(layout)
+        _queue = list(_refs)
+        while _queue:
+            _nm = _queue.pop()
+            _b = doc.blocks.get(_nm)
+            if _b is not None:
+                _feed(_b)
+        return _refs
+
+
     for _entity in visible_entities:
         if _entity.dxftype() != 'INSERT':
             continue
@@ -2303,6 +2526,77 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 _bpx, _bpy = _bp.x, _bp.y
             except Exception:
                 _bpx = _bpy = 0.0
+
+            # ---------- R95：块内「子块实例页框」提升 ----------
+            # 图框常被做成独立页框块，再以块参照嵌进"整页装配块/底图块"里
+            # （02食堂 A$C7129040E 内嵌 5 个 BOUNDARY-A1-1）。这种页框既不是
+            # 块内的闭合矩形，也不是本实例的 bbox，普通链路完全看不到。
+            # 这里在**本实例的块定义**里找子块实例页框，逐份变换到世界坐标后
+            # 提升为独立候选；块本体随后照常走原链路（若它自身不合格会被剔）。
+            # 仅模型空间：布局空间的块内页框多为排版内容（井道大样的 A1 按
+            # 1/150 铺底），且布局自身已有真页框，重复计入会把页数抬高。
+            if (layout_name == '模型空间'
+                    and os.environ.get('FRAME_PARSER_NO_BLOCK_INST_PAGE') != '1'):
+                try:
+                    # 传父实例 scale 只为让尺寸判据按"图上真实尺寸"判；
+                    # 返回坐标仍是父块定义坐标，下方变换统一乘父 scale，
+                    # 不会双重缩放。
+                    _inst_pages = _scan_block_inst_pages(_bn, _xs, _ys)
+                except Exception:
+                    _inst_pages = []
+                for (_px1, _py1, _px2, _py2, _sbn, _pw, _ph, _pwhy) in _inst_pages:
+                    # 页框坐标此刻在**父块定义坐标系**（_inst_world_rect 里已乘
+                    # 子块自身 scale，但还没乘本实例 scale、也没加本实例 insert）。
+                    # 完整变换：world = insert + R(父rot)·S(父scale)·p
+                    #   —— 之前漏了 S(父scale) 这一步，仅当父实例 scale=1 时
+                    #   碰巧正确（02食堂正是 1:1），父实例有缩放就会整体偏移。
+                    _wp = []
+                    _pr = _math.radians(getattr(_entity.dxf, 'rotation', 0) or 0)
+                    _pcr, _psr = _math.cos(_pr), _math.sin(_pr)
+                    for _q in ((_px1, _py1), (_px2, _py1),
+                               (_px2, _py2), (_px1, _py2)):
+                        _qx = _q[0] * _entity.dxf.xscale
+                        _qy = _q[1] * _entity.dxf.yscale
+                        _qx, _qy = (_qx * _pcr - _qy * _psr,
+                                    _qx * _psr + _qy * _pcr)
+                        _qx += _entity.dxf.insert.x
+                        _qy += _entity.dxf.insert.y
+                        if _rot is not None:
+                            _qx, _qy = _rot_pt(_qx, _qy)
+                        _wp.append((_qx, _qy))
+                    _wx1 = min(p[0] for p in _wp); _wy1 = min(p[1] for p in _wp)
+                    _wx2 = max(p[0] for p in _wp); _wy2 = max(p[1] for p in _wp)
+                    _ww = _wx2 - _wx1; _wh = _wy2 - _wy1
+                    if _ww <= 0 or _wh <= 0:
+                        continue
+                    _pkey = (round(_wx1, 3), round(_wy1, 3),
+                             round(_wx2, 3), round(_wy2, 3))
+                    if _pkey in seen_bbox:
+                        continue
+                    seen_bbox.add(_pkey)
+                    candidates.append({
+                        'type': '块内闭合线',
+                        'area': _ww * _wh,
+                        'bbox': (_wx1, _wy1, _wx2, _wy2),
+                        'width': round(_ww),
+                        'height': round(_wh),
+                        'layout': layout_name,
+                        'rectangularity': 1.0,
+                        'block_name': _sbn,
+                        'src_block': _bn,
+                        'insert_layer': _entity.dxf.layer,
+                        'block_def_w': 0.0,
+                        'block_def_h': 0.0,
+                        'tilted': False,
+                        'block_rect_len': max(_ww, _wh),
+                        'nested_pair': False,
+                        'inst_pos': (round(_entity.dxf.insert.x, 1),
+                                     round(_entity.dxf.insert.y, 1)),
+                        # R95：来源标记，便于日志与后续判据区分
+                        'from_block_inst': _bn,
+                        'page_hint': _pwhy,
+                    })
+
             _bx1, _by1, _bx2, _by2 = (_bb_def[0]-_bpx, _bb_def[1]-_bpy,
                                       _bb_def[2]-_bpx, _bb_def[3]-_bpy)
             _local_pts = [(_bx1*_xs, _by1*_ys), (_bx2*_xs, _by1*_ys),
