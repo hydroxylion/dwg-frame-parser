@@ -1214,45 +1214,106 @@ def calculate_layout_total_bbox(layout, doc):
         return (max_x - min_x) * (max_y - min_y)
     return 0
 
-# ---------- XREF 外部参照检测（方案B：只打警告，不加载） ----------
-def _detect_xref_warnings(doc):
-    """检测图纸是否使用了 XREF 外部参照（方案B：只打警告，不加载外部文件）。
+# ---------- XREF 外部参照：检测 + 自动加载（R94） ----------
+# 背景演进：
+#   R52 时代只做"检测 + 告警"（方案B），前提是"ezdxf 默认不加载外部文件"。
+#   R94 实测发现两个更麻烦的事实：
+#     ① 告警本身失效——旧检测读 blk.is_xref，但 ezdxf 把这个属性挂在
+#        blk.block_record 上（block_record.is_xref → True），blk 层取不到，
+#        于是 looks_xref 恒 False、整个告警静默失效。这正是
+#        water-2014.09.03综合艺术楼_t3.dwg 漏 8 张图框却毫无提示的原因。
+#     ② ODA File Converter **不会 bind xref**：DWG→DXF 时 xref 块恒为空块，
+#        把参照 dwg 放到主文件同目录、甚至放到 xref 记录的绝对路径处，转换
+#        产物里 xref 块依然是 0 实体（recurse=0/1 都试过）。即"放对位置"
+#        解决不了问题，必须由程序自己去加载参照文件。
+#   因此 R94 分两条腿走：
+#     A. 自动加载（本地可用时）：找到参照 dwg → 独立解析 → 递归识别其图框
+#        → 按 xref 实例变换到主文件世界坐标 → 合并进候选。
+#     B. 告警兜底（线上上传场景）：加载不到参照文件时，明确返回
+#        xref_warnings，让前端提示"本图含未解析外部参照，可能漏检"。
+#        绝不静默——静默漏检比漏检本身更危险。
 
-    背景：XREF 块定义指向外部 DWG 文件，ezdxf 默认不加载外部文件，
-    块定义内实体列表为空——引用这些块的 INSERT 实体在
-    _get_block_world_bbox 返回 None 时被跳过，会漏识别图框。
+# 参照文件搜索目录。优先级：环境变量显式指定 > 主文件同目录 > xref 记录的
+# 绝对路径所在目录（该路径可能已失效，但仍值得一试）。
+XREF_SEARCH_ENV = 'FRAME_PARSER_XREF_DIRS'
 
-    本函数只做检测 + 警告，不阻塞主流程：
-    - 没用 XREF：返回空列表，无任何副作用（绝大多数图纸）
-    - 用了 XREF：返回警告列表，主函数写日志 + 返回字段，前端可选展示
 
-    返回：[{'block_name', 'xref_path', 'insert_count', 'layouts'}]
-          layouts: {layout_name: count} 各 layout 引用次数
+def _xref_search_dirs(main_path=''):
+    """收集参照文件的搜索目录列表（去重、只保留存在的目录）"""
+    dirs = []
+    env = os.environ.get(XREF_SEARCH_ENV, '')
+    for d in env.split(';'):
+        d = d.strip()
+        if d:
+            dirs.append(d)
+    if main_path:
+        dirs.append(os.path.dirname(os.path.abspath(main_path)))
+    out = []
+    seen = set()
+    for d in dirs:
+        try:
+            key = os.path.normcase(os.path.abspath(d))
+        except Exception:
+            continue
+        if key in seen or not os.path.isdir(d):
+            continue
+        seen.add(key)
+        out.append(d)
+    return out
+
+
+def _is_unresolved_xref(blk):
+    """块定义是否为"未解析的外部参照"（空块 + xref 标志）
+
+    ezdxf 的 xref 标志在 block_record 上，不在 BlockLayout 上——这是旧检测
+    失效的直接原因。这里两处都读，并额外用"块名为空 + 有 INSERT 引用"
+    兜底（ODA 转换后的空 xref 块有时连标志都丢了）。
     """
-    # 1. 收集所有"实体列表为空"的 XREF 块定义
-    #    只警告空实体的：已加载的 XREF（entity_count > 0）说明外部文件
-    #    已被 ezdxf 解析，_get_block_world_bbox 能算出 bbox，无需警告。
-    xref_blocks = {}  # block_name -> xref_path
+    try:
+        if getattr(blk.block_record, 'is_xref', False):
+            return True
+    except Exception:
+        pass
+    try:
+        if getattr(blk, 'is_xref', False):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _detect_xref_warnings(doc, resolved=None):
+    """检测图纸使用的外部参照，返回警告列表。
+
+    resolved: {block_name: 已加载的参照文件路径}——这些视为"已解决"，不再告警，
+              但在 warning 里保留 status='resolved' 便于前端展示/排查。
+
+    返回：[{'block_name', 'xref_path', 'insert_count', 'layouts', 'status'}]
+    """
+    # 1. 收集所有"实体列表为空"且带 xref 标志的块
+    xref_blocks = {}   # block_name -> xref_path
     for blk in doc.blocks:
         try:
             name = blk.name
-            is_xref = getattr(blk, 'is_xref', False)
-            xref_path = getattr(blk.dxf, 'xref', None) if hasattr(blk, 'dxf') else None
-            # XREF 块的常见特征：is_xref=True，或 name 含路径分隔符，或 xref_path 不为空
-            looks_xref = bool(is_xref) or bool(xref_path) or ('\\' in name) or ('/' in name)
-            if not looks_xref:
+            if not _is_unresolved_xref(blk):
                 continue
-            ent_count = sum(1 for _ in blk)
-            if ent_count == 0:
-                xref_blocks[name] = xref_path or name
+            # 已加载的 xref（entity_count > 0）无需告警
+            if sum(1 for _ in blk) > 0:
+                continue
+            try:
+                xref_path = getattr(blk.block_record, 'dxf', None)
+                xref_path = (xref_path.get('xref_path', '') if xref_path else '') or ''
+            except Exception:
+                xref_path = ''
+            xref_blocks[name] = xref_path
         except Exception:
             continue
 
     if not xref_blocks:
         return []
 
-    # 2. 扫描模型空间 + 布局空间，统计引用 XREF 块的 INSERT 实例数
-    refs_by_layout = {}  # block_name -> {layout_name: count}
+    # 2. 扫描模型空间 + 各布局，统计引用次数
+    refs_by_layout = {}
 
     def scan_layout(layout, layout_name):
         for ent in layout:
@@ -1272,17 +1333,199 @@ def _detect_xref_warnings(doc):
             continue
         scan_layout(layout, f'布局 "{layout.name}"')
 
-    # 3. 只保留实际被引用的 XREF（块定义存在但未引用的不会漏识别图框）
+    # 3. 只保留实际被引用的 xref
+    resolved = resolved or {}
     warnings = []
     for bn, layouts in refs_by_layout.items():
-        total = sum(layouts.values())
         warnings.append({
             'block_name': bn,
             'xref_path': xref_blocks.get(bn, ''),
-            'insert_count': total,
+            'insert_count': sum(layouts.values()),
             'layouts': layouts,
+            'status': 'resolved' if bn in resolved else 'missing',
+            'resolved_path': resolved.get(bn, ''),
         })
     return warnings
+
+
+def _resolve_xref_file(block_name, search_dirs):
+    """按 xref 块名在搜索目录里找同名 dwg/dxf 文件。
+
+    块名本身就是参照文件的文件名（去掉扩展名）——AutoCAD/ODA 转出的 xref
+    块名通常等于参照文件名，如 '外部参照-140819雅安综合艺术楼_t3' 对应
+    '外部参照-140819雅安综合艺术楼_t3.dwg'。
+    """
+    if not block_name or os.path.isabs(block_name):
+        return None
+    # 块名可能已带扩展名
+    stems = [block_name]
+    low = block_name.lower()
+    for ext in ('.dwg', '.dxf'):
+        if low.endswith(ext):
+            stems = [block_name[:-len(ext)]]
+            break
+    for d in search_dirs:
+        for stem in stems:
+            for ext in ('.dwg', '.dxf'):
+                cand = os.path.join(d, stem + ext)
+                if os.path.isfile(cand):
+                    return cand
+    return None
+
+
+def _load_xref_candidates(doc, log=None):
+    """R94：加载外部参照并识别其中的图框候选，返回 (候选列表, 已解决映射, 信息)
+
+    为什么必须由程序自己加载：实测 ODA File Converter 不会 bind xref——把参照
+    dwg 放到主文件同目录、乃至放到 xref 记录的绝对路径处，DWG→DXF 产物里的
+    xref 块依然是 0 实体。所以"放对位置"无效，只能自己解析。
+
+    做法：
+      1. 找出所有"未解析 xref"块（block_record.is_xref 且实体数 0）；
+      2. 按块名在搜索目录里找同名 dwg/dxf（xref 块名通常等于参照文件名）；
+      3. 独立加载参照文档，用同一套 collect_candidates_from_layout 识别其图框
+         ——参照文档有自己的 layout_total 与 rel 分母，判据自洽；
+      4. 按主文件里 xref 的每个 INSERT 实例做仿射变换
+         （world = insert + R(rot)·S·p），变换后的 layout 归属主文件模型空间
+         （用户口径：参照里的页也算主图模型空间的页）；
+      5. 世界坐标 bbox 去重，避免多实例重复计入。
+
+    返回的候选会并入 all_candidates 走主流程的特征判定与清洗，因此参照里的
+    图元块同样会被筛掉，不需要单独的清洗链路。
+    """
+    cands = []
+    resolved = {}
+    info = []
+
+    # 1. 收集未解析 xref 及其 INSERT 实例
+    pending = []      # (block_name, [INSERT...])
+    for blk in doc.blocks:
+        try:
+            if not _is_unresolved_xref(blk):
+                continue
+            if sum(1 for _ in blk) > 0:
+                continue
+            instances = []
+            for lay in [doc.modelspace()] + [l for l in doc.layouts
+                                             if l.name.lower() != 'model']:
+                for e in lay:
+                    try:
+                        if e.dxftype() == 'INSERT' and e.dxf.name == blk.name:
+                            instances.append(e)
+                    except Exception:
+                        continue
+            if instances:
+                pending.append((blk.name, instances))
+        except Exception:
+            continue
+
+    if not pending:
+        return cands, resolved, info
+
+    search_dirs = _xref_search_dirs()
+
+    for bn, instances in pending:
+        fp = _resolve_xref_file(bn, search_dirs)
+        if not fp:
+            info.append({'block_name': bn, 'status': 'missing',
+                         'search_dirs': search_dirs})
+            continue
+        try:
+            xdoc = load_document(fp)
+        except Exception as e:
+            info.append({'block_name': bn, 'status': 'load_failed',
+                         'path': fp, 'error': str(e)[:160]})
+            continue
+
+        # 参照文档内部识别（用其自身坐标系，判据自洽）
+        xmsp = xdoc.modelspace()
+        try:
+            x_raw, _ = collect_candidates_from_layout(xmsp, xdoc, '模型空间')
+        except Exception as e:
+            info.append({'block_name': bn, 'status': 'collect_failed',
+                         'path': fp, 'error': str(e)[:160]})
+            continue
+
+        # 参照文档的 rel 分母（与主流程 collect 内部同口径：排除 area_ratio>1）
+        x_total = calculate_layout_total_bbox(xmsp, xdoc)
+        x_mx = 0.0
+        for c in x_raw:
+            if x_total > 0 and c['area'] / x_total <= 1.0 and c['area'] > x_mx:
+                x_mx = c['area']
+
+        # 只在参照文档内部做一次轻量筛选：必须是"图框级尺寸 + 页面比例"，
+        #   避免把参照里的家具/构件矩形全搬进来污染主流程。
+        #   —— 这里不追求完备，主流程的 is_frame_like 还会再过一遍。
+        picked = []
+        for c in x_raw:
+            try:
+                w, h = c['width'], c['height']
+                s_min, s_max = min(w, h), max(w, h)
+                if s_min < 5000:
+                    continue          # 参照里的构件/家具
+                r = s_max / s_min if s_min > 0 else 99
+                if r > 6.0:
+                    continue          # 极端细长条
+                if x_mx > 0 and c['area'] / x_mx < 0.10:
+                    continue          # 相对最大页过小 → 内容块
+                picked.append(c)
+            except Exception:
+                continue
+
+        resolved[bn] = fp
+        info.append({'block_name': bn, 'status': 'resolved', 'path': fp,
+                     'instances': len(instances), 'raw': len(x_raw),
+                     'picked': len(picked)})
+
+        seen = set()
+        added = 0
+        for e in instances:
+            try:
+                ins = (e.dxf.insert.x, e.dxf.insert.y)
+                rot = getattr(e.dxf, 'rotation', 0) or 0
+                sx, sy = e.dxf.xscale, e.dxf.yscale
+            except Exception:
+                continue
+            _m = __import__('math')
+            rad = _m.radians(rot)
+            cr, sr = _m.cos(rad), _m.sin(rad)
+            for c in picked:
+                try:
+                    bx1, by1, bx2, by2 = c['bbox']
+                    pts = []
+                    for px, py in ((bx1, by1), (bx2, by1), (bx2, by2), (bx1, by2)):
+                        qx, qy = px * sx, py * sy
+                        pts.append((qx * cr - qy * sr + ins[0],
+                                    qx * sr + qy * cr + ins[1]))
+                    xs = [p[0] for p in pts]
+                    ys = [p[1] for p in pts]
+                    nbb = (min(xs), min(ys), max(xs), max(ys))
+                    key = (round(nbb[0], 1), round(nbb[1], 1),
+                           round(nbb[2], 1), round(nbb[3], 1))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    nc = dict(c)
+                    nc['bbox'] = nbb
+                    nc['width'] = nbb[2] - nbb[0]
+                    nc['height'] = nbb[3] - nbb[1]
+                    nc['area'] = nc['width'] * nc['height']
+                    # 归属主文件模型空间（用户口径：参照页算主图的页）
+                    nc['layout'] = '模型空间'
+                    nc['from_xref'] = bn
+                    nc['from_xref_path'] = fp
+                    nc['type'] = c.get('type', '闭合多段线')
+                    cands.append(nc)
+                    added += 1
+                except Exception:
+                    continue
+        if log:
+            log(f"  [XREF 加载] 块 {bn!r} → {os.path.basename(fp)}"
+                f"（{len(instances)} 个实例，参照内候选 {len(x_raw)} → 筛出 {len(picked)}"
+                f"，去重合并 {added} 个）")
+    return cands, resolved, info
+
+
 
 # ---------- 统一扫描函数 ----------
 def collect_candidates_from_layout(layout, doc, layout_name):
@@ -1686,7 +1929,22 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 if _left is not None and _right is not None:
                     _ww = min(_right, _ox2) - max(_left, _ox1)
                     if _ww >= _min_seg:
-                        _ev = max(_ev, _ww, _hh)
+                        # R94：LINE 簇配对出的"矩形"须接近块定义尺寸（≥70%），
+                        #   否则是块内墙线/门窗线偶然围合出的内部区域，不是图框边框。
+                        #   反例（water-2014.09.03综合艺术楼_t3.dwg 误报 2 张
+                        #   11123×7906）：块 A$C560B6EBA 是平面详图图元块
+                        #   （146 LINE / 29 HATCH / 30 INSERT，块内最大闭合多段线
+                        #   仅 1800×600），但 4 条墙线（水平 y=0/-4990 长 8096、
+                        #   竖直 x=0/5850 长 6475）配对出 5850×4990 的"矩形"，
+                        #   占块长边 11021 的 53% —— 刚好越过原 50% 门槛，
+                        #   于是被认定"有闭合边框证据"入库，再靠条件B（短边
+                        #   7906 > 500、尺寸规整）成为图框候选 → 2 张误报。
+                        #   真图框的 LINE 边框就是块外框本身（≈100%），
+                        #   LWPOLYLINE 与嵌套传导两条路径不受本校验影响。
+                        #   取 70% 而非 85%：给"块 bbox 被外溢内容撑大"的真图框
+                        #   块留余量（841 边框 / 1100 bbox = 76% 仍可通过）。
+                        if max(_ww, _hh) >= _bb_len * 0.70:
+                            _ev = max(_ev, _ww, _hh)
         _block_closed_cache[_ck] = _ev
         return _ev
 
@@ -2997,18 +3255,44 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
 
         doc = load_document(tmp_path)
 
-        # ---------- XREF 外部参照检测（方案B：只打警告，不加载外部文件） ----------
-        # ezdxf 默认不加载 XREF 外部文件，引用这些块的 INSERT 实体会漏识别图框。
-        # 现阶段只做检测 + 日志 + 返回字段，主流程不阻塞；
-        # 等真遇到 XREF 图纸再决定是否升级到方案A（主动加载外部文件）。
-        xref_warnings = _detect_xref_warnings(doc)
+        # ---------- XREF 外部参照：自动加载 + 告警兜底（R94） ----------
+        # ezdxf 默认不加载 XREF 外部文件，且 ODA 转换不会 bind xref（实测：把
+        # 参照 dwg 放到主文件同目录或 xref 记录的绝对路径处，转换产物里 xref
+        # 块仍是 0 实体）。因此这里主动找参照文件、独立解析、按实例变换合并。
+        # 加载不到时退回"告警"路径——绝不静默漏检。
+        _xref_resolved = {}
+        _xref_info = []
+        _xref_cands = []
+        if os.environ.get('FRAME_PARSER_NO_XREF_LOAD') != '1':
+            try:
+                _xref_cands, _xref_resolved, _xref_info = _load_xref_candidates(
+                    doc, log=safe_log)
+            except Exception as _xe:
+                safe_log(f"  [XREF 加载] 失败（不影响主流程）: {str(_xe)[:160]}")
+                _xref_cands, _xref_resolved, _xref_info = [], {}, []
+
+        xref_warnings = _detect_xref_warnings(doc, resolved=_xref_resolved)
+        if _xref_cands:
+            safe_log(f"✅ [XREF 加载] 已从外部参照补入 {len(_xref_cands)} 个图框候选")
+        for _wi in _xref_info:
+            if _wi.get('status') != 'resolved':
+                safe_log(f"  [XREF 加载] 块 {_wi.get('block_name')!r} "
+                         f"{_wi.get('status')}，未补入"
+                         + (f"（搜索目录: {_wi.get('search_dirs')}）"
+                            if _wi.get('search_dirs') else ''))
         if xref_warnings:
-            safe_log("⚠️ [XREF 警告] 检测到外部参照，可能漏识别图框：")
-            for w in xref_warnings:
-                layouts_desc = ", ".join(f"{ln} {cnt} 处" for ln, cnt in w['layouts'].items())
-                safe_log(f"   - 块 {w['block_name']!r} (xref: {w['xref_path']!r}) | "
-                         f"{w['insert_count']} 处 INSERT | {layouts_desc}")
-            safe_log("   建议拆开源 DWG 单独解析，或后续启用 XREF 加载方案")
+            _missing = [w for w in xref_warnings if w.get('status') != 'resolved']
+            if _missing:
+                safe_log("⚠️ [XREF 警告] 存在未解析的外部参照，可能漏识别图框：")
+                for w in _missing:
+                    layouts_desc = ", ".join(f"{ln} {cnt} 处"
+                                             for ln, cnt in w['layouts'].items())
+                    safe_log(f"   - 块 {w['block_name']!r} | "
+                             f"{w['insert_count']} 处 INSERT | {layouts_desc}")
+                safe_log(f"   可设置环境变量 {XREF_SEARCH_ENV} 指向参照文件所在目录，"
+                         f"或用 CAD 的 XREF→绑定（BIND）把参照打散进主文件")
+            else:
+                safe_log("✅ [XREF] 外部参照已全部解析并补入候选")
 
         # ---------- 逐 layout 收集候选，并计算同源的分母（该 layout 总包围盒面积） ----------
         all_candidates = []
@@ -3034,6 +3318,28 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             for c in _lay_cands:
                 c['area_ratio'] = (c['area'] / layout_total) if layout_total > 0 else 1.0
                 all_candidates.append(c)
+
+        # R94：外部参照补入的候选（已在 _load_xref_candidates 内部完成变换与
+        #   世界坐标去重）。它们走主流程同一套 is_frame_like / 清洗判据，因此
+        #   参照内的图元块同样会被筛掉。area_ratio 用主文件模型空间分母，
+        #   与模型空间自身的候选同口径。
+        if _xref_cands:
+            _seen_x = set()
+            for _c in all_candidates:
+                _seen_x.add((round(_c['bbox'][0], 1), round(_c['bbox'][1], 1),
+                             round(_c['bbox'][2], 1), round(_c['bbox'][3], 1)))
+            _n_x = 0
+            for _c in _xref_cands:
+                _k = (round(_c['bbox'][0], 1), round(_c['bbox'][1], 1),
+                      round(_c['bbox'][2], 1), round(_c['bbox'][3], 1))
+                if _k in _seen_x:
+                    continue
+                _seen_x.add(_k)
+                _c['area_ratio'] = (_c['area'] / msp_total) if msp_total > 0 else 1.0
+                all_candidates.append(_c)
+                _n_x += 1
+            if _n_x != len(_xref_cands):
+                safe_log(f"  [XREF 加载] 与主文件候选坐标重合，去重 {len(_xref_cands) - _n_x} 个")
 
         if not all_candidates:
             raise ValueError("未找到任何有效边界")

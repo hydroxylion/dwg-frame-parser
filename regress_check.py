@@ -41,6 +41,22 @@ BASELINE_PATH = os.path.join(BASE_DIR, 'regression_baseline.json')
 DEFAULT_FOLDER = r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）'
 DXF_CACHE_DIR = os.path.join(BASE_DIR, 'regress_dxf_cache')
 
+# R94：外部参照（xref）搜索目录。
+#   get_bounding_box_from_bytes 只拿到文件 bytes（主文件被写到临时目录），
+#   无法从路径推断原始所在目录，因此 xref 参照文件必须靠环境变量
+#   FRAME_PARSER_XREF_DIRS 指定。回归时若不设，含 xref 的图纸会加载不到
+#   参照 → fc 与"设了变量"的基线不一致（water-2014.09.03 会从 14 掉到 6）。
+#   这里给回归配置默认值：图纸目录本身 + 几个已知的参照文件存放处。
+#   用户环境不同的话，在自己 shell 里 export FRAME_PARSER_XREF_DIRS 覆盖。
+_DEFAULT_XREF_DIRS = [
+    DEFAULT_FOLDER,
+    r'C:\Users\hui_ou\Desktop\建筑项目图纸 - 非标\雅安中学\雅中水电\雅中给排水图\综合艺术楼',
+]
+if not os.environ.get('FRAME_PARSER_XREF_DIRS'):
+    _exist = [d for d in _DEFAULT_XREF_DIRS if os.path.isdir(d)]
+    if _exist:
+        os.environ['FRAME_PARSER_XREF_DIRS'] = ';'.join(_exist)
+
 
 def load_app():
     """加载当前工作区 app.py（含全部未提交改动）"""

@@ -10,11 +10,11 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 回归基准 | 81 张校验图纸：**63 张有基线且全一致**；其余 18 张为 R79 之后新增的校验场景，基线尚未补录（`python regress_check.py --update` 补录后纳入对比） |
-| 后端测试 | `test_backend_rules.py` **151 通过 / 0 失败** |
+| 回归基准 | 83 张校验图纸：**64 张有基线且全一致**；其余 19 张为 R79 之后新增的校验场景，基线尚未补录（`python regress_check.py --update` 补录后纳入对比） |
+| 后端测试 | `test_backend_rules.py` **154 通过 / 0 失败** |
 | 前端测试 | `npm test` **245 通过 / 0 失败**（7 个用例文件） |
-| 回归耗时 | 全量 81 张 **约 7~10 分钟**（并行 8 worker + DXF 转换缓存）；`--serial` 串行约 32 分钟 |
-| 最近一轮 | **R91** RF雅安综合艺术楼水施_t3：模型空间识 **2 → 3**，105100×59400（ratio √2×1.25 加长+附栏）不再被「布局空间优先」误剔 |
+| 回归耗时 | 全量 83 张 **约 7~12 分钟**（并行 8 worker + DXF 转换缓存）；`--serial` 串行约 32 分钟 |
+| 最近一轮 | **R94** water-2014.09.03综合艺术楼_t3：识 **6 → 14**，通过自动加载外部参照补回 8 张（84100×59400 ×13 + 42050×29700 ×1）；并修复 xref 告警静默失效、图元块误报 |
 
 **算法环境变量开关**（仅用于回归 A/B 对照，生产不设置）：
 
@@ -33,6 +33,8 @@
 | `FRAME_PARSER_NO_BLOCK_FRAME_RESCUE=1` | 关闭 R27 拒块内图框救援+rel分母补强（R40） |
 | `FRAME_PARSER_NO_MULTI_PAGE_DENOM=1` | 关闭 R88 判据⑤（多页包络不作 rel 分母）+ √2×加长倍率页面比例判定 |
 | `FRAME_PARSER_NO_ROOM_SCALE=1` | 关闭 R90「房间量级（短边<10000mm）不享受「布局空间优先」豁免」 |
+| `FRAME_PARSER_NO_XREF_LOAD=1` | 关闭 R94 外部参照自动加载（只保留告警） |
+| `FRAME_PARSER_XREF_DIRS` | R94 参照文件搜索目录（`;` 分隔），如 `D:\图库\雅安;E:\参照` |
 
 > 另有 25 个细分开关（`NO_GIANT_PAGE_MIN`、`NO_COND_H3`、`NO_GRID_CHAIN`、`NO_SHELL_GHOST`、`NO_SCALE_CLIFF`、`NO_R36_YIELD` 等），完整清单与对应规则号见 [docs/CHANGELOG.md 附录](docs/CHANGELOG.md#附录环境变量开关全清单)。
 
@@ -131,12 +133,13 @@ ezdxf 默认不加载 XREF 外部文件，引用块会漏识别图框。检测�
 
 ---
 
-## 三、近期关键修复（R75 ~ R91）
+## 三、近期关键修复（R75 ~ R94）
 
-> 完整逐轮记录（R1~R91：需求 → 根因链 → 修法 → A/B 验证 → 踩坑教训）已拆到 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**，含 85 条轮次索引表、环境变量开关全清单。README 只保留近期结论。
+> 完整逐轮记录（R1~R94：需求 → 根因链 → 修法 → A/B 验证 → 踩坑教训）已拆到 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**，含 88 条轮次索引表、环境变量开关全清单。README 只保留近期结论。
 
 | 轮次 | 图纸 / 现象 | 一句话修法 |
 | --- | --- | --- |
+| R94 | water-2014.09.03综合艺术楼_t3 识 6 实际 14（8 张在外部参照里） | ①xref 自动加载：检测空 xref 块 → 按块名找参照 dwg → 递归识别 → 按实例变换合并；②xref 告警原本静默失效（读 blk.is_xref，实际在 block_record 上）；③LINE 簇配对须 ≥ 块长边 70%（图元块墙线围合误报） |
 | R91 | RF雅安综合艺术楼水施_t3 模型空间识 2 实际 3 | 「布局空间优先」的豁免补 √2×加长倍率 ±1%（保留原 √2±2% 不动）：105100×59400 = √2×1.25 离 √2 达 25.11%、rel 仅 13.6%，两条豁免原本都够不着 |
 | R90 | 140822雅安综合艺术楼平面参照_t7 识 101 实际 4 | 「布局空间优先」的房间量级不豁免：短边 <10000mm 的候选是真实房间/构件、不是图纸坐标页面框，不再享受 √2 与 rel≥25% 两条豁免（模型空间 rel 分母是房间自己，条件C 的 10% 门槛在此失效） |
 | R89 | 汽配城 A2栋A3栋水施_t3 识 14 实际 16（+4 误报） | ①对齐排列剔除白名单补「√2×加长倍率」比例（74300×42000=√2×1.25 的 6 个图框块被当装饰阵列删，仅模型空间生效）；②块内页框须占块定义面积 ≥40%（ga/lo 块的 ROOF/STAIR 构件轮廓被多页拆分误提升为页） |
@@ -188,7 +191,7 @@ python app.py
 **回归与自测**：
 
 ```
-python test_backend_rules.py      # 后端规则单测（151 项）
+python test_backend_rules.py      # 后端规则单测（154 项）
 python regress_check.py           # 全量回归（并行 + DXF 缓存，约 7 分钟）
 python regress_check.py --serial  # 串行对照（约 32 分钟）
 python regress_check.py --update  # 把当前结果写回基线（确认行为正确后使用）
@@ -226,7 +229,7 @@ node test_judge_logic.js          # 也可单独跑某一个（其余 test_*.js 
 | `index.html` | 前端上传页面 |
 | `app.js` | 前端逻辑（调用 /upload 接口） |
 | `style.css` | 前端样式 |
-| `test_backend_rules.py` | 后端规则端到端测试（ezdxf 构造图纸，151 项全绿） |
+| `test_backend_rules.py` | 后端规则端到端测试（ezdxf 构造图纸，154 项全绿） |
 | `run_frontend_tests.js` | 前端测试汇总运行器（`npm test`，一次跑完 7 个用例文件并汇总） |
 | `package.json` | 前端测试依赖声明（唯一 devDependency：jsdom，仅 `test_*` 用，不影响生产） |
 | `test_judge_logic.js` | 前端尺寸分类逻辑单元测试（31 项） |

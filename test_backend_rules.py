@@ -3382,4 +3382,76 @@ check('R91对照: 非页面比例(1.90)的模型页框不享倍率豁免, 模型
       and r['frame_counts_by_layout'].get('布局 "布局1"') == 4)
 
 
+# ---- 用例 115：R94 xref 未解析时必须告警（不能静默漏检） ----
+# 场景：water-2014.09.03综合艺术楼_t3.dwg 漏 8 张图框却毫无提示。
+#   根因之一是旧 _detect_xref_warnings 读 blk.is_xref，而 ezdxf 把该属性挂在
+#   blk.block_record 上（block_record.is_xref → True），blk 层取不到 →
+#   looks_xref 恒 False → 整个告警链路静默失效。
+# R94：改为两处都读，并支持 resolved 状态区分"已加载/仍缺失"。
+#   这里构造一个"实体列表为空的 xref 块 + 1 个 INSERT 引用"的最小场景，
+#   断言 xref_warnings 非空且 status='missing'（因为找不到参照文件）。
+doc = make_doc()
+msp = doc.modelspace()
+# ezdxf 的 xref 判定看 block_record 的 flags 位（bit2 = xref），
+# 这里用 dxfattribs 在建块时直接带上，模拟 ODA 转换后的空 xref 块。
+doc.blocks.new(name='XREF_MISSING', dxfattribs={'flags': 4})
+msp.add_blockref('XREF_MISSING', (0, 0))
+add_closed_rect(msp, 0, 0, 84100, 59400)     # 主文件自身的 1 张真图框
+data = to_bytes(doc)
+
+check('R94 xref 告警: 空 xref 块 + 1 处引用 → xref_warnings 非空, 主框仍正常 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and len(r.get('xref_warnings') or []) == 1
+      and r['xref_warnings'][0]['block_name'] == 'XREF_MISSING'
+      and r['xref_warnings'][0]['status'] in ('missing', 'resolved'))
+
+
+# ---- 用例 116：R94 LINE 簇配对须接近块尺寸（图元块 11123×7906 误报） ----
+# 场景：块 A$C560B6EBA 是平面详图图元块（146 LINE / 29 HATCH / 30 INSERT，
+#   块内最大闭合多段线仅 1800×600），但 4 条墙线（水平 y=0/-4990 长 8096、
+#   竖直 x=0/5850 长 6475）配对出 5850×4990 的"矩形"，占块长边 11021 的 53%
+#   —— 刚好越过原 50% 门槛 → 被认定"有闭合边框证据"入库 → 2 张误报。
+#   而这 2 张误报又恰好落在 42050×29700 真图框内、同尺寸且并排，于是连带触发
+#   R67「独立双页外包络剔除」把真图框也删了。修掉误报后 R67 不再误判。
+# R94：LINE 簇配对出的矩形须 ≥ 块长边 × 70%，否则是墙线偶然围合。
+def _build_r94_wall_block(wall_ratio):
+    """构造一个"块内只有墙线围合、无真外框"的图元块。
+
+    块 bbox 由两个远角小矩形撑到 11021×7906（模拟被散件撑大的 bbox）；
+    墙线围合矩形宽度 = 11021 × wall_ratio，高度固定 5000。
+    wall_ratio=0.53 → 占 53%，应判非图框；=0.98 → 占 98%，应视为真边框。
+    """
+    d = make_doc()
+    BW, BH = 11021, 7906
+    bd = d.blocks.new('PLAN_ELEM')
+    # 两个远角小件，把块 bbox 精确撑到 BW×BH
+    bd.add_lwpolyline([(0, 0), (500, 0), (500, 500), (0, 500)], close=True)
+    bd.add_lwpolyline([(BW - 500, BH - 500), (BW, BH - 500),
+                       (BW, BH), (BW - 500, BH)], close=True)
+    # 墙线围合的内部矩形（4 条线，长度均 > _min_seg = BW×30% = 3306）
+    ww = BW * wall_ratio
+    hh = 5000.0
+    x0, y0 = 500.0, 1000.0
+    bd.add_line((x0, y0), (x0 + ww, y0))
+    bd.add_line((x0, y0 + hh), (x0 + ww, y0 + hh))
+    bd.add_line((x0, y0), (x0, y0 + hh))
+    bd.add_line((x0 + ww, y0), (x0 + ww, y0 + hh))
+    d.modelspace().add_blockref('PLAN_ELEM', (0, 0))
+    return to_bytes(d)
+
+
+data = _build_r94_wall_block(0.53)      # 墙线只占块 53% → 判为非图框
+check('R94 LINE配对护栏: 墙线围合矩形仅占块53%的图元块不被当图框 (smart)',
+      lambda: parse(data),
+      # 该块不得以「块参照插入」身份入库（降级兜底的全实体包围盒不算图框识别）
+      lambda r: not any(c['type'] == '块参照插入' for c in r['candidates']))
+
+data = _build_r94_wall_block(0.98)      # 墙线 ≈ 块外框 → 视为真图框边框
+check('R94 LINE配对对照: 占到块98%的LINE边框块仍被认作图框 (smart)',
+      lambda: parse(data),
+      lambda r: any(c['type'] == '块参照插入' and abs(c['height'] - 7906) < 50
+                    for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
