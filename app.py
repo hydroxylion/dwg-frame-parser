@@ -872,6 +872,39 @@ def normalized_ratio(width, height):
     return max(width, height) / min(width, height)
 
 
+# ---------- 页面比例判定（R88 引入，R89 提升为模块级） ----------
+# A 系幅面的长宽比恒为 √2；加长幅面则为 √2×k，k = 1 + n/4：
+#   1/4 加长 k=1.25、1/2 加长 k=1.5、3/4 加长 k=1.75。
+# 这些比例都是"纸"，凡判断"某矩形是不是页面"的地方都应认：
+#   - R88：rel 分母排除判据⑤ 的内页识别
+#   - R89：对齐排列剔除白名单（暖通 1~12F 的 189150×89100 = √2×1.5；
+#          汽配城 A2栋A3栋水施 的 74300×42000 = √2×1.25 = A2 1/4 加长）
+# 容差设计：
+#   √2 主口径 ±10%（历史口径，保持不变）；
+#   √2×倍率 ±1%——倍率之间间距小（1.25 与 1.5 理论只差 20%），宽区间会重叠，
+#   且会与"非标比例真图框"擦碰。实测分离度：真加长页偏差 0.07~0.28%
+#   （189150/89100 对 √2×1.5 差 0.074%、74300/42000 对 √2×1.25 差 0.069%；
+#   汽配城 STAIR 构件轮廓 46800×22000 对 √2×1.5 差 0.28%——它走块内闭合线
+#   通道，不参与对齐白名单，故无碍），而"整图排版包络"偏差 1.78% 以上。
+_SQRT2 = 2 ** 0.5
+PAGE_RATIO_MULTS = (1.25, 1.5, 1.75)
+PAGE_RATIO_MULT_TOL = 0.01
+PAGE_RATIO_SQRT2_TOL = 0.10
+
+
+def is_page_ratio(r, tol_sqrt2=PAGE_RATIO_SQRT2_TOL, use_mults=True):
+    """该长宽比是否属于"纸张"：√2±tol_sqrt2，或 √2×加长倍率±1%"""
+    if r is None or r <= 0:
+        return False
+    if abs(r / _SQRT2 - 1) <= tol_sqrt2:
+        return True
+    if use_mults:
+        for _k in PAGE_RATIO_MULTS:
+            if abs(r / (_SQRT2 * _k) - 1) <= PAGE_RATIO_MULT_TOL:
+                return True
+    return False
+
+
 # ---------- 第23轮：图签附栏外扩合并（105100口径，2026-09-17） ----------
 # 场景（地下室电力t3.dwg）：84100×59400 主图框 + 左侧 21000 图签附栏应按 105100×59400
 # 整体输出（用户实测口径）。附栏在该模板中不形成独立闭合边界——J-图框/TK 层的图签条
@@ -1847,6 +1880,33 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                     break
             if not _contained:
                 _maximal.append(_a)
+        # R89：「块内页框」须占块定义面积的相当比例，否则是块内构件轮廓。
+        #   反例（汽配城 A2栋A3栋水施_t3.dwg 误报 4 张）：建筑平面块 ga
+        #   （块定义 56753×115866）内含屋面轮廓 42600×17400（ROOF 层）、
+        #   楼梯间轮廓 47200×22000 / 46600×21400（STAIR 层）等 5 个互不嵌套
+        #   大矩形 —— 它们是**建筑构件**，却因"同块多页框"被 R60 多页拼版块
+        #   拆分当成拼版页逐份提升为候选，最终 47200×22000 / 46800×22000 /
+        #   42600×17400 / 42200×17400 四张进了结果（用户确认为误报）。
+        #   判据：页框面积 ≥ 块定义 bbox 面积 × 40%。
+        #   实测分离度：真拼版块 TMP_2PAGE 每页占 47.4%、gh5zgcf 占 89.6%、
+        #   gh5 单页占 100%；而 ga/lo 的构件轮廓只占 11.3%~15.8%。
+        #   40% 门槛居中留余量，且"两页上下排布"这种最常见拼版仍安全通过。
+        #   R62c 单页尺寸替换路径要求页框 ≥95%×块 bbox，比本门槛更严，不受影响。
+        _bb_area = 0.0
+        try:
+            from ezdxf import bbox as _bbox_mod
+            _defbb = _bbox_mod.extents(_blk, fast=True)
+            _bb_area = ((_defbb.extmax.x - _defbb.extmin.x)
+                        * (_defbb.extmax.y - _defbb.extmin.y))
+        except Exception:
+            _bb_area = 0.0
+        if _bb_area > 0:
+            _kept_page = []
+            for _a in _maximal:
+                _a_area = (_a[2] - _a[0]) * (_a[3] - _a[1])
+                if _a_area >= _bb_area * 0.40:
+                    _kept_page.append(_a)
+            _maximal = _kept_page
         return _maximal
 
     # R82：标题栏专用层页框扫描（块定义顶层）。TEL_TITLE/TTLB/PUB_TITLE/
@@ -2550,6 +2610,16 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         for _idx, _c in enumerate(candidates):
             if _c.get('type') == '块参照插入':
                 _bn_groups.setdefault(_c.get('block_name', '<unknown>'), []).append(_idx)
+
+        def _mult_ratio_ok(_r):
+            """仅匹配 √2×加长倍率（不含 √2±10% 主口径）——R89 用"""
+            if _r is None or _r <= 0:
+                return False
+            for _k in PAGE_RATIO_MULTS:
+                if abs(_r / (_SQRT2 * _k) - 1) <= PAGE_RATIO_MULT_TOL:
+                    return True
+            return False
+
         _aligned_log = []
         _a_series_protected = []  # 白名单保护（图框类块，不参与对齐剔除）
         _rm_idx = set()
@@ -2570,7 +2640,12 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             _s0max = max(_s0['width'], _s0['height'])
             if _is_standard_a_series(_s0['width'], _s0['height']):
                 _frame_short_sides.add(_s0min)
-            elif _s0min > 0 and abs(_s0max / _s0min - _math.sqrt(2)) / _math.sqrt(2) <= 0.10:
+            elif _s0min > 0 and abs(_s0max / _s0min / _SQRT2 - 1) <= 0.10:
+                _frame_short_sides.add(_s0min)
+            elif (_s0min > 0 and layout_name == '模型空间'
+                    and _mult_ratio_ok(_s0max / _s0min)):
+                # R89：模型空间的 √2×加长倍率图框块也计入"图框族短边"
+                #   （与主循环白名单同口径，否则同套图的另一版本块拿不到短边豁免）
                 _frame_short_sides.add(_s0min)
         for _bn, _grp in _bn_groups.items():
             if len(_grp) < 3:
@@ -2586,9 +2661,31 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 continue
             _s_min = min(_sample['width'], _sample['height'])
             _s_max = max(_sample['width'], _sample['height'])
-            if _s_min > 0 and abs(_s_max / _s_min - _math.sqrt(2)) / _math.sqrt(2) <= 0.10:
-                _a_series_protected.append(f"{_bn}({len(_grp)}个,{_sample['width']:.0f}x{_sample['height']:.0f},ratio{_s_max/_s_min:.3f})")
-                continue
+            if _s_min > 0:
+                # √2±10%：历史口径，模型空间与布局空间都保护
+                if abs(_s_max / _s_min / _SQRT2 - 1) <= 0.10:
+                    _a_series_protected.append(
+                        f"{_bn}({len(_grp)}个,{_sample['width']:.0f}x{_sample['height']:.0f},"
+                        f"ratio{_s_max/_s_min:.3f})")
+                    continue
+                # R89：√2×加长倍率±1%，**仅模型空间**。
+                #   反例（汽配城 A2栋A3栋水施_t3.dwg 漏 6 张）：真图框块 gh5
+                #   尺寸 74300×42000（ratio 1.7690 = √2×1.25 = A2 1/4 加长），
+                #   6 个实例分两组、每组 3 个 x 几乎同列 y 等距排列（间距 42000）
+                #   → 命中"垂直对齐装饰块"启发式整组删除。原白名单只认 A 系列
+                #   与 √2±10%，而 1.769 偏离 √2 达 25%，白名单够不着。
+                #   装饰块（柱 700×1215、门窗、家具）比例远离任何 √2×k，不受影响。
+                #   为何限模型空间：布局空间的"纸面"里同一图框块常被连排复制成
+                #   冗余副本，真框是并存的显式矩形，这些副本**该被对齐剔除**。
+                #   实测漂移（本次回归抓到）：一层平面图3.25_t3 布局"布局1"的
+                #   "图框2"块 11 个 1783×841（ratio 2.120 命中 √2×1.5）本应整组
+                #   剔除，一并保护后 fc 11→10 且多出 2 张 1783×841 误报；该布局
+                #   配对的 841×594 真框走 √2±10% 已受保护，无需倍率再兜。
+                if layout_name == '模型空间' and _mult_ratio_ok(_s_max / _s_min):
+                    _a_series_protected.append(
+                        f"{_bn}({len(_grp)}个,{_sample['width']:.0f}x{_sample['height']:.0f},"
+                        f"ratio{_s_max/_s_min:.3f}加长幅面)")
+                    continue
             # 同模板短边保护：短边与已保护图框块的短边一致（±1%）→ 视为同套
             #   图框的另一版本（bbox 被块内外溢内容撑大），不剔除。
             if _s_min > 0 and any(abs(_s_min - _fs) / _fs <= 0.01 for _fs in _frame_short_sides):
@@ -3068,20 +3165,14 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         #   而 7.34e11 那个 ratio 7.63 的巨型框早就被判据②（ratio>2.5）踢出分母。
         #   放宽存在性只会给 S015 式"非标真图框被踢"开风险口子而无收益。
         #   本判定供下方面积分母排除「判据⑤」使用。
-        _SQRT2_BASE = 2 ** 0.5
-        _PAGE_RATIO_MULTS = (1.25, 1.5, 1.75)      # A 系 1/4、1/2、3/4 加长
-        _PAGE_RATIO_MULT_TOL = 0.01
+        # R89：这里改为复用模块级 is_page_ratio()（同一口径也给对齐白名单用），
+        #   开关只控制"是否启用 √2×倍率"部分。
+        _SQRT2_BASE = _SQRT2
         _mult_page_on = os.environ.get('FRAME_PARSER_NO_MULTI_PAGE_DENOM') != '1'
 
         def _is_page_ratio(_r):
             """该比例是否属于"纸"：√2±10%（原口径）或 √2×加长倍率±1%（R88）"""
-            if abs(_r / _SQRT2_BASE - 1) <= 0.10:
-                return True
-            if _mult_page_on:
-                for _k in _PAGE_RATIO_MULTS:
-                    if abs(_r / (_SQRT2_BASE * _k) - 1) <= _PAGE_RATIO_MULT_TOL:
-                        return True
-            return False
+            return is_page_ratio(_r, use_mults=_mult_page_on)
 
         _sqrt2_page_exists = {}
         for c in all_candidates:

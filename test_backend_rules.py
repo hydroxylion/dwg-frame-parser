@@ -3197,4 +3197,88 @@ check('R88判据⑤对照: 内框为非页面比例(1.90)时不踢包络分母, 
       and abs(r['width'] - _ENV110[0]) < 5)
 
 
+# ---- 用例 111：R89 对齐白名单补 √2×加长倍率（汽配城 A2栋A3栋水施 漏 6 张） ----
+# 场景：真图框块 gh5 尺寸 74300×42000（ratio 1.7690 = √2×1.25 = A2 1/4 加长），
+#   6 个实例分两组、每组 3 个 x 完全同列（x_std=0）y 等距 42000 排列 →
+#   命中"垂直对齐装饰块"启发式整组删除。
+#   原白名单只认 A 系列（短边 42000 不在 {841..105}）与 √2±10%
+#   （1.769 偏离 √2 达 25%），两处都够不着 → 6 张全漏。
+# R89：白名单比例判定改用 is_page_ratio()（含 √2×k, k=1.25/1.5/1.75, ±1%）。
+# 对照：同样 3 个同列等距排列，但尺寸比例改成非页面比例（1.90）→
+#   不被白名单保护 → 仍按装饰阵列剔除。
+_W111 = 74300, 42000        # ratio 1.7690 = √2×1.25
+
+
+def _build_r89(page_ratio_ok=True):
+    d = make_doc()
+    lay = d.modelspace()
+    w, h = _W111
+    if not page_ratio_ok:
+        h = round(w / 1.90)          # 非页面比例（对照组）
+    d.blocks.new('GH5_FRAME')
+    bd = d.blocks.get('GH5_FRAME')
+    bd.add_lwpolyline([(0, 0), (w, 0), (w, h), (0, h)], close=True)
+    bd.add_lwpolyline([(1500, 1500), (w - 1500, 1500),
+                       (w - 1500, h - 1500), (1500, h - 1500)], close=True)
+    # 6 个实例：两组、每组 3 个 x 几乎同列、y 等距（复刻真实图"垂直对齐"命中形态）。
+    #   两组 x 只差 4348（真实图 gh5 两组 x=406406 / 410754 的实测差值）——
+    #   若把两组拉开很远，x 标准差会变大，反而躲过"垂直对齐"判据。
+    for gx in (0, 4348):
+        for k in range(3):
+            lay.add_blockref('GH5_FRAME', (gx, k * h))
+    return to_bytes(d)
+
+
+data = _build_r89(True)
+check('R89对齐白名单: √2×1.25 加长图框块(74300x42000)6实例垂直排列不被当装饰块剔, fc=6 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 6
+      and all(abs(c['width'] - _W111[0]) < 5 for c in r['candidates']))
+
+data = _build_r89(False)
+check('R89对齐白名单对照: 非页面比例(1.90)的同列排列块仍按装饰阵列剔除 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 0
+      or not any(abs(c['width'] - _W111[0]) < 5 for c in r['candidates']))
+
+
+# ---- 用例 112：R89 块内页框须占块定义面积 ≥40%（汽配城 ga/lo 构件轮廓误报） ----
+# 场景：建筑平面块 ga（块定义 56753×115866）内含屋面轮廓 42600×17400（ROOF 层）、
+#   楼梯间轮廓 47200×22000（STAIR 层）等 5 个互不嵌套大矩形 —— 它们是建筑
+#   构件，却被 R60 多页拼版块拆分当"拼版页"逐份提升为候选，最终 4 张
+#   （47200×22000 / 42600×17400 及 lo 块的对应项）进了结果（用户确认误报）。
+#   构件轮廓只占块定义面积 11.3%~15.8%，而真拼版块每页占 47.4%~100%。
+# R89：页框面积 ≥ 块定义 bbox 面积 × 40% 才认作"块内页框"。
+# 正向对照：用例 79（R60）的 TMP_2PAGE 每页占 47.4%，仍须正常拆分 → 已由
+#   既有用例守护；此处的对照组把构件轮廓做小到 15%，验证被正确拒绝。
+def _build_r89_block_pages(page_ratio):
+    """块定义做大（页框只占小块），模拟 ga 块内构件轮廓。
+    page_ratio: 页框面积 / 块定义面积"""
+    d = make_doc()
+    lay = d.modelspace()
+    # 块定义 115866×56753（与 ga 同量级）
+    BW, BH = 115866, 56753
+    d.blocks.new('PLAN_BLK')
+    bd = d.blocks.get('PLAN_BLK')
+    # 块外轮廓（撑出块定义 bbox）
+    bd.add_lwpolyline([(0, 0), (BW, 0), (BW, BH), (0, BH)], close=True)
+    # 块内 2 个互不嵌套的"构件轮廓"（ROOF 层），尺寸各占 page_ratio
+    tw = round(BW * 0.35)
+    th = round(BH * (page_ratio / 0.35))
+    bd.add_lwpolyline([(1000, 1000), (1000 + tw, 1000),
+                       (1000 + tw, 1000 + th), (1000, 1000 + th)], close=True)
+    bd.add_lwpolyline([(1000, 1000 + th + 500), (1000 + tw, 1000 + th + 500),
+                       (1000 + tw, 1000 + 2 * th + 500), (1000, 1000 + 2 * th + 500)],
+                      close=True)
+    lay.add_blockref('PLAN_BLK', (0, 0))
+    return to_bytes(d)
+
+
+data = _build_r89_block_pages(0.13)   # 构件轮廓仅占块 13%（ga 实测 11.3~15.8%）
+check('R89块内页框面积护栏: 仅占块定义13%的构件轮廓不被当拼版页提升, 无该尺寸候选 (smart)',
+      lambda: parse(data),
+      lambda r: not any(abs(c['width'] - round(115866 * 0.35)) < 50
+                        for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
