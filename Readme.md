@@ -12,7 +12,7 @@
 | --- | --- |
 | 回归基准 | 78 张校验图纸：**61 张有基线且全一致**；其余 17 张为 R79 之后新增的校验场景，基线尚未补录（`python regress_check.py --update` 补录后纳入对比） |
 | 后端测试 | `test_backend_rules.py` **140 通过 / 0 失败** |
-| 前端测试 | 需先 `npm i jsdom` 才能跑全量；当前可运行部分 **193 通过 / 1 失败**——失败项是 `test_single_frame_tip.js` 里「tipAttrs 含 4 个 data 属性」的计数断言过期（R48 新增 `data-table-pages` 后实为 5 个），属断言维护问题，非功能缺陷 |
+| 前端测试 | `npm test` **245 通过 / 0 失败**（7 个用例文件） |
 | 回归耗时 | 全量 78 张 **约 7 分钟**（并行 8 worker + DXF 转换缓存）；`--serial` 串行约 32 分钟 |
 | 最近一轮 | **R86** 暖通（防排烟）：识 1 → **11**，11 个图框全部 189150×89100 |
 
@@ -185,7 +185,10 @@ python test_backend_rules.py      # 后端规则单测（140 项）
 python regress_check.py           # 全量回归（并行 + DXF 缓存，约 7 分钟）
 python regress_check.py --serial  # 串行对照（约 32 分钟）
 python regress_check.py --update  # 把当前结果写回基线（确认行为正确后使用）
-node test_judge_logic.js          # 前端单测（其余 test_*.js 同理）
+
+npm install                       # 首次：装前端测试依赖 jsdom
+npm test                          # 前端全部用例（7 个文件，245 项，汇总输出）
+node test_judge_logic.js          # 也可单独跑某一个（其余 test_*.js 同理）
 ```
 
 ---
@@ -217,8 +220,10 @@ node test_judge_logic.js          # 前端单测（其余 test_*.js 同理）
 | `app.js` | 前端逻辑（调用 /upload 接口） |
 | `style.css` | 前端样式 |
 | `test_backend_rules.py` | 后端规则端到端测试（ezdxf 构造图纸，140 项全绿） |
+| `run_frontend_tests.js` | 前端测试汇总运行器（`npm test`，一次跑完 7 个用例文件并汇总） |
+| `package.json` | 前端测试依赖声明（唯一 devDependency：jsdom，仅 `test_*` 用，不影响生产） |
 | `test_judge_logic.js` | 前端尺寸分类逻辑单元测试（31 项） |
-| `test_single_frame_tip.js` | 单图框空间来源气泡的数据构建 / HTML 生成 / 源码级回归测试（100 项） |
+| `test_single_frame_tip.js` | 单图框空间来源气泡的数据构建 / HTML 生成 / 源码级回归测试（102 项，含 tipAttrs 属性集合与消费端自动对账） |
 | `test_tip_interaction.js` | 气泡点击交互端到端 DOM 测试（jsdom，18 项；未装 jsdom 自动跳过） |
 | `test_xlsx_export.js` | Excel 列宽自适应单元测试 + 真生成 xlsx 读回校验（54 项） |
 | `test_xlsx_e2e.js` | Excel 导出端到端测试（jsdom 加载真实页面点击导出，24 项） |

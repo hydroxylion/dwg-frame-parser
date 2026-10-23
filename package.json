@@ -1,0 +1,12 @@
+{
+  "name": "dwg-frame-parser",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DWG/DXF 图框解析工具 —— 前端测试依赖（后端为 Flask + ezdxf，见 Readme.md）",
+  "scripts": {
+    "test": "node run_frontend_tests.js"
+  },
+  "devDependencies": {
+    "jsdom": "^30.1.3"
+  }
+}

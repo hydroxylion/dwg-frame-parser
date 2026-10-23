@@ -169,8 +169,32 @@ const tipAttrsDef = src.match(/const tipAttrs = `([^`]*)`/);
 check('tipAttrs 定义存在', !!tipAttrsDef, true);
 check('tipAttrs 内不含 class= （否则与外层 class 重复）',
     tipAttrsDef ? /class=/.test(tipAttrsDef[1]) : true, false);
-check('tipAttrs 含 4 个 data 属性',
-    tipAttrsDef ? (tipAttrsDef[1].match(/data-/g) || []).length : 0, 4);
+
+// ---- tipAttrs 的属性集合校验 ----
+// 旧写法断言「恰好 4 个 data 属性」，是硬编码计数：R48 新增 data-table-pages
+// 后计数变 5，断言失效但功能正常（假失败），而且下次再加属性还得手工改数字。
+// 改为两条结构性断言，不再依赖数量：
+//   ① 模板里出现的所有属性名必须都是 data-*——真正要防的回归是「有人把
+//      class=/title= 等属性塞进 tipAttrs」，那会触发重复 class 的历史 bug；
+//   ② 气泡代码实际读取的每个 anchor.dataset.X，tipAttrs 里必须有对应的
+//      data-x（camelCase→kebab-case）——属性和消费端自动对账，新增读取
+//      却忘了加属性会被立刻抓到，新增属性也不会造成假失败。
+const tipAttrsBody = tipAttrsDef ? tipAttrsDef[1] : '';
+const attrNames = (tipAttrsBody.match(/([A-Za-z][\w-]*)\s*=/g) || [])
+    .map(s => s.replace(/\s*=$/, ''));
+const nonDataAttrs = attrNames.filter(n => !n.startsWith('data-'));
+check('tipAttrs 内所有属性均为 data-*', nonDataAttrs, []);
+
+// 从 app.js 里收集气泡读取的 data 属性（只认 anchor./tipAnchorEl. 这两个
+// 指向锚点元素的变量，dataset.w / dataset.id 等属于其它控件不纳入）
+const anchorDatasetReads = [...src.matchAll(/\b(?:anchor|tipAnchorEl)\.dataset\.([A-Za-z_$][\w$]*)/g)]
+    .map(m => m[1]);
+const requiredDataAttrs = [...new Set(anchorDatasetReads)]
+    .map(k => 'data-' + k.replace(/[A-Z]/g, c => '-' + c.toLowerCase()))
+    .sort();
+check('气泡读取的 data 属性非空（正则未失效）', requiredDataAttrs.length > 0, true);
+const missingAttrs = requiredDataAttrs.filter(a => !attrNames.includes(a));
+check('tipAttrs 覆盖气泡读取的全部 data 属性', missingAttrs, []);
 
 // 每个锚点分支都必须显式带 tip-anchor
 check('多图框分支含 tip-anchor', /class="type-tag multi-frame tip-anchor"/.test(src), true);

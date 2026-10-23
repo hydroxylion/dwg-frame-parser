@@ -1,7 +1,15 @@
 // 专项验证：布局分布列的宽度是否随内容自适应（针对用户反馈的问题）
 const fs = require('fs'), path = require('path');
-const DIR = 'C:/Users/hui_ou/PycharmProjects/dwg-frame-parser';
-const { JSDOM } = require('jsdom');
+const DIR = __dirname;   // 用脚本自身目录，避免硬编码绝对路径（换机器/换目录即失效）
+// 依赖 jsdom（未安装时自动跳过，与其他 jsdom 用例保持一致，不阻塞其它测试）
+let JSDOM;
+try {
+    ({ JSDOM } = require('jsdom'));
+} catch (e) {
+    console.log('SKIP  test_layout_col_width.js —— 未安装 jsdom');
+    console.log('      安装: npm install   或 npm i jsdom');
+    process.exit(0);
+}
 const html = fs.readFileSync(path.join(DIR, 'index.html'), 'utf8');
 const lib = fs.readFileSync(path.join(DIR, 'vendor', 'xlsx-style.bundle.js'), 'utf8');
 const app = fs.readFileSync(path.join(DIR, 'app.js'), 'utf8');
