@@ -3061,4 +3061,86 @@ check('R86块内页框递归: 嵌套子块的TEL_TITLE页框替换块bbox, 11页
               for c in r['candidates']))
 
 
+# ---- 用例 109：R87 包裹框内补捞放开块参照插入（暖通 1~12F 场景缩微） ----
+# 场景结构（复刻真实图的决定性环节）：
+#   包络 P（250000×200000，ratio 1.25 偏离 √2 11.6%）罩住 2 个不同尺寸的
+#   闭合多段线页框 A(105000×49000) / B(120000×56000) → 独立尺寸组 2 → 包络剔除。
+#   包络外另有页框 C(60000×28000)，它与包络内的**块参照**页框 D 同尺寸。
+#   A/B 靠条件C 进 frame_like（rel 10.3%/13.4%）；C 的 rel 只有 3.4% 过不了 C，
+#   走条件I 表格页救援（框内画横竖表格线）——与真实图 12 页靠条件I 同路径。
+#   D 是块参照：rel 同样是 3.4% 过不了 C，条件I 又被「未被已入选框完全包住」
+#   护栏挡住（此刻包络 P 还在 frame_like 里，包裹剔除发生在条件I 之后）→
+#   唯一出路是包裹剔除后的 R63 补捞。旧代码 R63 只认 EXPLICIT_TYPES
+#   （闭合多段线/直线矩形），块参照插入被类型门槛过滤 → 漏检。
+# R87 修复：R63 补捞放开块参照插入，但要求块定义内有矩形闭合边框证据
+#   （block_rect_len ≥ 块定义长边×50%，与 R58 条件C 块参照通道同口径）。
+# 对照组：把 D 的块内闭合边框换成"只有散线、无闭合矩形"的内容块形态 →
+#   无边框证据 → 不得被捞回（fc 少 1）。
+_W87 = None
+
+
+def _build_r87(with_closed_border=True):
+    """构造 R87 缩微场景；with_closed_border=False 时块内无闭合边框（对照组）"""
+    d = make_doc()
+    lay = d.modelspace()
+
+    def rect(x, y, w, h):
+        lay.add_lwpolyline([(x, y), (x + w, y), (x + w, y + h), (x, y + h)], close=True)
+
+    def table(x, y, w, h):
+        """框内画表格线：≥30 横 + ≥6 竖，满足条件I 门槛"""
+        for k in range(1, 32):
+            yy = y + h * k / 32.0
+            lay.add_line((x + 100, yy), (x + w - 100, yy))
+        for k in range(1, 8):
+            xx = x + w * k / 8.0
+            lay.add_line((xx, y + 100), (xx, y + h - 100))
+
+    # 包络 P（分母）：ratio 1.25，偏离 √2 >10% 不受包裹剔除的 √2 保护
+    rect(0, 0, 250000, 200000)
+    # 包络内 2 个不同尺寸页框（条件C：rel 10.3% / 13.4%）
+    rect(20000, 20000, 105000, 49000)
+    rect(130000, 20000, 120000, 56000)
+    # 包络外的页框 C（rel 3.4% 过不了 C，靠条件I 救援）
+    cx1, cy1, cw, chh = 0, -80000, 60000, 28000
+    rect(cx1, cy1, cw, chh)
+    table(cx1, cy1, cw, chh)
+
+    # 包络内的块参照页框 D（与 C 同尺寸）
+    if with_closed_border:
+        d.blocks.new('PAGE_D')
+        bd = d.blocks.get('PAGE_D')
+        bd.add_lwpolyline([(0, 0), (cw, 0), (cw, chh), (0, chh)], close=True)
+        for k in range(1, 6):     # 标题栏分隔线
+            bd.add_line((0, chh * k / 6.0), (cw * 0.3, chh * k / 6.0))
+        lay.add_blockref('PAGE_D', (20000, 100000))
+    else:
+        # 对照组：块内有闭合环但**不是矩形**（L 形楼板环形态）——R27 闭合证据
+        # 能过（闭合环长边=块长边），但 R58/R87 的「矩形闭合边框」口径不认，
+        # block_rect_len < 块长边×50% → 不得被补捞。
+        d.blocks.new('PLAN_D')
+        bd = d.blocks.get('PLAN_D')
+        bd.add_lwpolyline(
+            [(0, 0), (cw, 0), (cw, chh * 0.45), (cw * 0.45, chh * 0.45),
+             (cw * 0.45, chh), (0, chh)],
+            close=True)
+        for k in range(1, 6):
+            bd.add_line((0, chh * k / 6.0), (cw * 0.3, chh * k / 6.0))
+        lay.add_blockref('PLAN_D', (20000, 100000))
+    return to_bytes(d)
+
+
+data = _build_r87(True)
+check('R87包裹框内补捞: 块参照页框(有闭合边框证据)被 R63 救回, 4 页全出 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 4
+      and sorted(round(c['width']) for c in r['candidates']) == [60000, 60000, 105000, 120000])
+
+data = _build_r87(False)
+check('R87对照: 包络内块参照无闭合边框证据(内容块)不被补捞, 只 3 页 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 3
+      and sorted(round(c['width']) for c in r['candidates']) == [60000, 105000, 120000])
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

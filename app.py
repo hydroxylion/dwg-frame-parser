@@ -5299,7 +5299,34 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     if id(_c) in _wp_in_fl or _c['layout'] != _w['layout']:
                         continue
                     if _c['type'] not in EXPLICIT_TYPES:
-                        continue
+                        # R87：补捞放开「块参照插入」（暖通（1~12F空调风管和空调水管）
+                        #   给造价_t8.dwg fc 15→16）。该图页框是 189150×89100
+                        #   （ratio 2.1227 = √2×1.5，A1 加长横版）——整图无近√2 页，
+                        #   故 rel 分母排除判据① 的「存在近√2 页面级候选」前置不成立、
+                        #   判据① 不启用 → 7.34e11 巨型内容框霸占分母 → 16 页 rel
+                        #   全部只有 2.30%，条件C（≥10%）与条件A（1.21%<15%）全灭，
+                        #   全靠救援通道入选：12 页走条件I、2 页走条件H3，剩 1 页是
+                        #   **块参照插入**——它同时被两条通道漏掉：
+                        #     ①条件I 的「未被已入选框完全包住」护栏：包裹框剔除发生在
+                        #       条件I 之后，此刻 638743×306556 包络仍在 frame_like 里，
+                        #       本页被当成"包络内部内容"跳过；
+                        #     ②R63 本补捞原先只认 EXPLICIT_TYPES（闭合多段线/直线矩形），
+                        #       块参照插入被类型门槛直接过滤 → 成为无路可走的孤儿。
+                        #   护栏（与 R58 条件C 块参照通道同口径）：块定义内必须有矩形
+                        #   闭合边框证据（block_rect_len ≥ 块定义长边×50%）——真图框块
+                        #   必为矩形边框画法（本页 block_rect_len=189150=块定义长边，
+                        #   比值 100%）；表格/内容块的 bbox 只是散件外接框，无闭合
+                        #   边框，不能靠"与已入选框同尺寸"蹭入。
+                        #   另两道既有护栏（≥5000mm、ratio∈图框区间、同尺寸 ±2% 互证、
+                        #   完全落在包络内）不变。
+                        #   开关 FRAME_PARSER_NO_WRAP_PEER=1 仍可整条回退。
+                        if _c['type'] != '块参照插入':
+                            continue
+                        _wp_bdef = max(abs(_c.get('block_def_w', 0.0)),
+                                       abs(_c.get('block_def_h', 0.0)))
+                        if (_wp_bdef <= 0
+                                or _c.get('block_rect_len', 0.0) < _wp_bdef * 0.5):
+                            continue
                     if _c['width'] < 5000 or _c['height'] < 5000:
                         continue
                     if not (FRAME_RATIO_MIN <= _c['ratio'] <= FRAME_RATIO_MAX):
