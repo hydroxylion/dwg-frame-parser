@@ -3143,4 +3143,58 @@ check('R87对照: 包络内块参照无闭合边框证据(内容块)不被补捞
       and sorted(round(c['width']) for c in r['candidates']) == [60000, 105000, 120000])
 
 
+# ---- 用例 110：R88 判据⑤ 多页包络不作 rel 分母（暖通 1~12F 场景缩微） ----
+# 面积关系复刻真实图：
+#   A 系 1/2 加长页 64000×30170（ratio 2.12131 ≈ √2×1.5=2.12132，偏差 0.0004%）
+#   共 3 页，其中 2 页并排落在包络 P（230000×145000，ratio 1.5862）内、1 页在外。
+#   包络既非 √2（偏离 12.16% >10%）也非任何 √2×加长倍率（最近的是 √2×1.25，
+#   差 10.27%）→ 判据⑤ 的护栏①「容器自身不得是页面形状」不会挡它。
+#   包络 area_ratio 59.55%（走条件A 入选）、每页 area_ratio 仅 3.45%（条件A 灭），
+#   每页 rel = 页/包络 = 5.79% < 10%（条件C 灭）→ 页框全部漏检、只输出包络。
+# R88 判据⑤：包络内含 ≥2 个「同尺寸且位置分离」页面级候选（ratio 命中
+#   √2×1.5±1%、面积 ≥ 包络 5%、bbox 分离）→ 不作 rel 分母 → 分母回落到单页
+#   → 3 页 rel=100% 全靠条件C 入选，包络自己由包裹剔除（独立双页判据）收掉。
+# 对照组：同一几何，页框比例改成 1.90（非 √2、非 √2×倍率）→ 判据⑤ 不认这些
+#   是"页" → 包络继续当分母 → 页框漏检，只输出包络。
+_W110 = 64000, 30170        # ratio = 2.12131 ≈ √2×1.5
+_ENV110 = 230000, 145000    # 包络（ratio 1.5862，非页面比例）
+
+
+def _build_r88(page_ratio_ok=True):
+    d = make_doc()
+    lay = d.modelspace()
+    pw, ph = _W110
+    if not page_ratio_ok:
+        ph = round(pw / 1.90)          # 非页面比例（对照组）
+    ew, eh = _ENV110
+
+    def rect(x, y, w, h):
+        lay.add_lwpolyline([(x, y), (x + w, y), (x + w, y + h), (x, y + h)], close=True)
+
+    rect(0, 0, ew, eh)                            # 包络
+    # 包络内 2 页并排（x 方向分离）
+    rect(10000, 20000, pw, ph)
+    rect(80000, 20000, pw, ph)
+    # 包络外 1 页
+    rect(0, eh + 20000, pw, ph)
+    # 远处散线：把 layout 总面积撑到 5.6e10（约包络的 1.68 倍），
+    # 使包络 area_ratio 59.55%、页 area_ratio 3.45%——与真图同量级
+    lay.add_line((0, 0), (280000, 200000))
+    return to_bytes(d)
+
+
+data = _build_r88(True)
+check('R88判据⑤: 多页包络不作rel分母, 3 页全出且全走条件C(无救援标记) (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 3
+      and all(c.get('rescued_by') is None for c in r['candidates'])
+      and all(abs(c['width'] - _W110[0]) < 5 for c in r['candidates']))
+
+data = _build_r88(False)
+check('R88判据⑤对照: 内框为非页面比例(1.90)时不踢包络分母, 只 1 个包络 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and abs(r['width'] - _ENV110[0]) < 5)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

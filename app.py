@@ -3048,11 +3048,46 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         #   阈值 2% 依据实测分离度：一楼大厅页面块 area_ratio 1.2~3.9%（最大者
         #   须计入"存在"才能维持保护）vs S015 唯一近√2 内容块 3200×4500
         #   area_ratio 0.51%（若计入会维持误踢）——2% 居中留余量。
+        #
+        # R88：页面比例判定补「√2×加长倍率」（原口径只认 √2±10%）。
+        #   反例（暖通（1~12F空调风管和空调水管）给造价_t8.dwg 识 15 实际 16）：
+        #   全图 16 页都是 189150×89100（ratio 2.12290 = √2×1.5，A1 加长横版）。
+        #   A 系加长幅面的比例本就是 √2×k（k = 1 + n/4：1/4 加长 k=1.25、
+        #   1/2 加长 k=1.5、3/4 加长 k=1.75），它们同样是"纸"、同样构成页面
+        #   参照系，凡是判断"某个框是不是页面形状"的地方都应认这类比例。
+        #   容差取 ±1%（远紧于 √2 主口径的 ±10%）：加长倍率间距小（1.25 与 1.5
+        #   理论比例只差 20%），宽容差会让区间重叠、并与"非标比例真图框"擦碰——
+        #   S015 的 66900×42050（ratio 1.591）与 √2×1.25=1.7678 恰差 10.0%；
+        #   本图对照：真页 189150/89100 对 √2×1.5 偏差仅 0.074%，而同图那个
+        #   638744×306556 包络（ratio 2.0836）偏差 1.78%——±1% 正好把两者分开，
+        #   ±2% 会把包络误判成页面。真页框比例精度本就很高（84100/59400 偏差
+        #   0.11%），±1% 留足余量。
+        #   注：本判定**不**用于放宽判据① 的启用前置（_sqrt2_page_exists 保持
+        #   原口径 √2±10%）。实测本图放宽后判据① 仍不生效：真正的 rel 分母是
+        #   638744×306556（area_ratio 14.09% <50%，判据① 第一子句要求 ≥50%），
+        #   而 7.34e11 那个 ratio 7.63 的巨型框早就被判据②（ratio>2.5）踢出分母。
+        #   放宽存在性只会给 S015 式"非标真图框被踢"开风险口子而无收益。
+        #   本判定供下方面积分母排除「判据⑤」使用。
+        _SQRT2_BASE = 2 ** 0.5
+        _PAGE_RATIO_MULTS = (1.25, 1.5, 1.75)      # A 系 1/4、1/2、3/4 加长
+        _PAGE_RATIO_MULT_TOL = 0.01
+        _mult_page_on = os.environ.get('FRAME_PARSER_NO_MULTI_PAGE_DENOM') != '1'
+
+        def _is_page_ratio(_r):
+            """该比例是否属于"纸"：√2±10%（原口径）或 √2×加长倍率±1%（R88）"""
+            if abs(_r / _SQRT2_BASE - 1) <= 0.10:
+                return True
+            if _mult_page_on:
+                for _k in _PAGE_RATIO_MULTS:
+                    if abs(_r / (_SQRT2_BASE * _k) - 1) <= _PAGE_RATIO_MULT_TOL:
+                        return True
+            return False
+
         _sqrt2_page_exists = {}
         for c in all_candidates:
             if c['area_ratio'] > 1.0:
                 continue  # 异常候选与分母排除段同口径，不参与"存在性"判定
-            if abs(c['ratio'] / (2 ** 0.5) - 1) <= 0.10 and c['area_ratio'] >= 0.02:
+            if abs(c['ratio'] / _SQRT2_BASE - 1) <= 0.10 and c['area_ratio'] >= 0.02:
                 _sqrt2_page_exists[c['layout']] = True
         # R64 判据③ 预扫描：图框形态（近√2 ±10%）候选清单——供"近正方形巨框
         #   包络"判据统计稀释对象（包络内含 ≥2 个页面级候选才踢，防 S015 式塌缩）。
@@ -3060,6 +3095,96 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             c for c in all_candidates
             if c['area_ratio'] <= 1.0
             and abs(c['ratio'] / (2 ** 0.5) - 1) <= 0.10]
+
+        def _multi_page_envelope_kick(c):
+            """R88 判据⑤：内含 ≥2 个「同尺寸且位置分离」页面级候选的大框不作 rel 分母。
+
+            与判据④（_giant_page_envelope_kick）的分工与差异：
+              判据④ 认的是「近√2 页面」且要求每个内页 ≤ 容器面积 1/20（罩着一
+                群小页面的大包络）；
+              判据⑤ 认的是「页面形状（√2 或 √2×加长倍率）」且内页可以很大
+                （本图内页占容器 8.6%，超出 1/20=5%），关键是**同尺寸 + 分离**
+                这两条——同尺寸说明是同一模板重复出图，位置分离说明是并排的
+                独立图纸页，容器只能是排版包络。
+            证据形态与包裹框剔除的 R67「独立双页」判据完全同款（同尺寸 ±5% +
+                bbox 在 x 或 y 方向上不重叠），复用同一套事实：**既然包裹剔除
+                阶段会因此把该框判为外包络删掉，那它在算 rel 时就不该再当分母**。
+                （本图时间线：分母在包裹剔除之前算定，638744×306556 包络以
+                area_ratio 14.09% 霸占分母 → 16 页 rel 只有 8.61% < 10% 门槛
+                → 条件C 全灭；该包络随后才被包裹剔除删掉，但 rel 已经算完。）
+            护栏：
+              ① 容器自身不得是页面形状（真图纸页内含两个分离的同尺寸内容块时
+                 不予踢出——容器是"纸"，内部内容交给嵌套去重收掉）；
+              ② 内页面积 ≥ 容器 5%（防"一张真页里两个小格子"被误当拼版）；
+              ③ 内页自身须是页面形状 + area_ratio ≤1.0（异常候选不参与）；
+              ④ **内页相对容器的 rel 必须 < REL_AREA_THRESHOLD（10%）**——
+                 只在容器确实"稀释"了内页、导致内页过不了条件C 时才踢。
+                 内页相对容器已达 10% 的，本来就能正常入选，踢了毫无收益，
+                 只会白白改动分母、波及下游规则（全量回归实测：不加此护栏时
+                 10#商业平面图-20130603-4 丢 1 张、一层.dwg 从"无图框"变 9 个
+                 误报——后者容器 1430×1460 内两个 635×1340 家具符号相对容器
+                 占 40.76%，本就能入选，踢掉分母后小构件 rel 集体暴涨）。
+                 实测三图分离度：暖通目标图 8.61%（<10% 需踢）vs 10#商业
+                 13.64% / 一层 40.76%（均无需踢）。
+              ⑤ **只对本 layout 的最大候选生效**——rel 分母取的就是 layout 内
+                 最大候选面积，非最大候选踢不踢对 rel 毫无影响；而把它记进
+                 layout_excluded_big 反而会喂给下方"分母塌缩防护"（要求被排除
+                 大框占 layout ≥50%），凭空制造塌缩豁免/触发条件。一层.dwg 的
+                 容器 1430×1460（area_ratio 0.03%）远非该空间最大候选，就是靠
+                 这条护栏彻底隔开的。
+            开关 FRAME_PARSER_NO_MULTI_PAGE_DENOM=1 回退。
+            """
+            if not _mult_page_on:
+                return False
+            if _is_page_ratio(c['ratio']):
+                return False                      # 护栏①
+            # 护栏⑤：只对"将会成为 rel 分母"的最大候选生效。
+            #   取最大时须与判据② 同口径排除 ratio>2.5 的候选——那些框会被
+            #   判据② 无条件踢出分母，不可能成为 rel 分母。暖通目标图正是如此：
+            #   全空间最大是 2366499×310026（ratio 7.63，判据② 已踢），
+            #   真正当分母的是 638744×306556；若不排除它，本护栏会把真正的
+            #   分母挡在门外，判据⑤ 完全失效（实测过）。
+            _mx_area = 0
+            for _f in all_candidates:
+                if (_f['layout'] == c['layout'] and _f['area_ratio'] <= 1.0
+                        and _f['ratio'] <= 2.5):
+                    if _f['area'] > _mx_area:
+                        _mx_area = _f['area']
+            if c['area'] < _mx_area - 1e-6:
+                return False
+            _cx1, _cy1, _cx2, _cy2 = c['bbox']
+            _pl = []
+            for _f in all_candidates:
+                if _f is c or _f['layout'] != c['layout']:
+                    continue
+                if _f['area_ratio'] > 1.0:
+                    continue
+                if not _is_page_ratio(_f['ratio']):
+                    continue
+                if _f['area'] < c['area'] * 0.05:  # 护栏②
+                    continue
+                if _f['area'] >= c['area'] * REL_AREA_THRESHOLD:  # 护栏④
+                    continue
+                _fx1, _fy1, _fx2, _fy2 = _f['bbox']
+                if (_fx1 >= _cx1 - 1 and _fy1 >= _cy1 - 1
+                        and _fx2 <= _cx2 + 1 and _fy2 <= _cy2 + 1):
+                    _pl.append(_f)
+            if len(_pl) < 2:
+                return False
+            # 同尺寸（±5%，与包裹剔除 WRAP_SIZE_EPS 同口径）+ 位置分离
+            for _i in range(len(_pl)):
+                for _j in range(_i + 1, len(_pl)):
+                    _a, _b = _pl[_i], _pl[_j]
+                    if (abs(_a['width'] - _b['width']) / max(_a['width'], _b['width'], 1) >= 0.05
+                            or abs(_a['height'] - _b['height']) / max(_a['height'], _b['height'], 1) >= 0.05):
+                        continue
+                    _ab, _bb = _a['bbox'], _b['bbox']
+                    _x_sep = (_ab[2] < _bb[0] - 1 or _bb[2] < _ab[0] - 1)
+                    _y_sep = (_ab[3] < _bb[1] - 1 or _bb[3] < _ab[1] - 1)
+                    if _x_sep or _y_sep:
+                        return True
+            return False
+
 
         def _near_square_envelope_kick(c):
             # R64 判据③：近正方形巨型包络不作 rel 分母。
@@ -3260,7 +3385,16 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     # R74：判据④命中 = 该 layout 内存在"页面体系"（≥2 页近√2
                     #   分离对），塌缩防护不得将此空间 rel 置 0
                     _giant_kicked_layouts.add(c['layout'])
-            if _kicked_123 or _kicked_4:
+            # R88 判据⑤：内含 ≥2 个「同尺寸且位置分离」页面级候选的大框不作
+            #   分母（本图 638744×306556 包络 → 16 页 rel 8.61% 恢复到 100%，
+            #   全部靠条件C 正常入选，不再依赖条件I/H3/R63 三条救援通道）。
+            #   命中即视为"页面体系存在"，同判据④ 一并豁免塌缩防护。
+            _kicked_5 = False
+            if not _kicked_123 and not _kicked_4:
+                _kicked_5 = _multi_page_envelope_kick(c)
+                if _kicked_5:
+                    _giant_kicked_layouts.add(c['layout'])
+            if _kicked_123 or _kicked_4 or _kicked_5:
                 _ln = c['layout']
                 if _ln not in layout_excluded_big or c['area'] > layout_excluded_big[_ln]['area']:
                     layout_excluded_big[_ln] = c
