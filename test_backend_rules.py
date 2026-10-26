@@ -3557,4 +3557,56 @@ check('R95父scale对照: 同样结构按1:1插入(A594×150)应提升为页框 
                     for c in r['candidates']))
 
 
+# ---- 用例 119：R96 R62 单页图框块保护须验「块定义本身像个页框」 ----
+# 场景（门卫电气.dwg）：模型空间 3 个真图框 BOUNDARY-A2-1（594×420 ×100 →
+#   59400×42000），图框内各嵌一个建筑底图块（门卫 / 门卫平面，
+#   定义 25400×15500，块内最大闭合框仅 14300 = 块长边 56%）。
+#   底图块比例 1.639 恰好满足 R62 保护②③（块定义比例=候选比例、与外框
+#   1.414 差 15.9%>10%），于是被当「单页图框块」保护、绕过嵌套去重
+#   → 图框内的底图块被当独立页（fc 6 实际 3）。
+# R96 在 _single_page_block_protect 加 ⑥：块内最大闭合矩形须 ≥ 块定义
+#   长边 × 70%（真页框块的外框贴着块 bbox：BOUNDARY-A2-1 为 100%）。
+def _build_r96_base_block(base_rect_w, base_rect_h):
+    """构造「1 个真图框 + 框内 1 个建筑底图块」的图。
+
+    base_rect_w/h：底图块内**主闭合矩形**尺寸。它决定 block_rect_len，
+    从而决定 ⑥ 判据是否放行 R62 保护。
+
+    只放 1 组：3 组同尺寸水平排列会被「对齐排列剔除装饰块」整组移除，
+    那样测不到 R62 保护这条路（也掩盖了要验的东西）。
+    """
+    d = make_doc()
+    # 真图框块：块定义就是一张 A2（594×420），闭合框贴着块 bbox → rect比 100%
+    fb = d.blocks.new('BOUNDARY_A2')
+    add_closed_rect(fb, 0, 0, 594, 420)
+    # 建筑底图块：定义 bbox 撑到 25400×15500，但块内主闭合矩形只有
+    #   base_rect_w×base_rect_h（复刻房子平面轮廓：外框是墙线不是闭合框）
+    pb = d.blocks.new('PLAN_BASE')
+    add_closed_rect(pb, 0, 0, base_rect_w, base_rect_h)
+    # 散件把 bbox 撑到 25400×15500（墙角小构件，200×200 落在角上）
+    add_closed_rect(pb, 25200, 15300, 200, 200)
+    msp = d.modelspace()
+    # 真图框 ×100 → 59400×42000
+    msp.add_blockref('BOUNDARY_A2', (0, 0),
+                     dxfattribs={'xscale': 100, 'yscale': 100})
+    # 底图块落在图框内部（完全被图框 bbox 包含）→ 触发嵌套去重
+    msp.add_blockref('PLAN_BASE', (10000, 10000))
+    return to_bytes(d)
+
+
+# 主闭合矩形 14300 → rect比 14300/25400 = 56% < 70% → 不给保护 → 嵌套剔小
+data = _build_r96_base_block(14300, 8800)
+check('R96底图块: 块内闭合框仅占块长边56%(建筑平面块)不被R62保护, fc=1 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and all(abs(c['width'] - 59400) < 100 for c in r['candidates']))
+
+# 对照：主闭合矩形 25400 → rect比 100%（块定义本身即页框）→ 照旧受保护
+data = _build_r96_base_block(25400, 15500)
+check('R96对照: 块内闭合框占满块长边(块定义本身即页框)仍受R62保护, 底图块保留 (smart)',
+      lambda: parse(data),
+      lambda r: any(abs(c['width'] - 25400) < 50 and abs(c['height'] - 15500) < 50
+                    for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

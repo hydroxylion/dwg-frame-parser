@@ -6577,6 +6577,22 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 return False
             if abs(_cr - _or) / _or <= 0.10:
                 return False
+            # ⑥ R96：块定义本身必须「像个页框」——块内最大闭合矩形 ≥ 块定义
+            #   长边 × 70%。真页框块的块定义就是一张图幅，外框贴着块 bbox
+            #   （BOUNDARY-A2-1 594×420：闭合框 594 / 长边 594 = 100%）；
+            #   而建筑平面/结构底图块的外框是房子轮廓，块内最大闭合矩形只是
+            #   内部构件（门卫电气.dwg 的 门卫 / 门卫平面 25400×15500，
+            #   闭合框 14300 / 长边 25400 = 56%）。
+            #   根因：这两个底图块的比例 1.639 恰好满足②③（块定义比例 =
+            #   候选比例、与外框 1.414 差 15.9% > 10%），于是被本条保护、
+            #   绕过嵌套去重，导致图框内的底图块被当独立页（fc 6 实际 3）。
+            #   取 70% 而非更紧：给「块 bbox 被外溢内容撑大」的真图框块留
+            #   余量（R94 同类判断亦取 70%）；样例中 A$C5D4D2582 189150×89100
+            #   为 76%（真图框）仍通过。block_rect_len 取不到（0/None）时不
+            #   拒保护——不能因「证据缺失」反把真图框剔掉。
+            _brl = c.get('block_rect_len') or 0
+            if _brl > 0 and _brl < max(bdw, bdh) * 0.70:
+                return False
             return True
 
         def deduplicate_candidates(cands):
