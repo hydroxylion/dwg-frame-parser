@@ -58,12 +58,24 @@ if not os.environ.get('FRAME_PARSER_XREF_DIRS'):
         os.environ['FRAME_PARSER_XREF_DIRS'] = ';'.join(_exist)
 
 
+_APP_MOD = None
+
+
 def load_app():
-    """加载当前工作区 app.py（含全部未提交改动）"""
-    spec = importlib.util.spec_from_file_location('app_current', os.path.join(BASE_DIR, 'app.py'))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    """加载当前工作区 app.py（含全部未提交改动）。
+
+    R102：结果缓存。同一进程里多次调用只 exec_module 一次——app.py 顶层有
+    日志 handler 初始化，logging 的 logger 是进程级单例，重复 exec 会走到
+    「handlers 已存在则不复用」的分支（已在 app.py 内加固，但缓存更省事）。
+    """
+    global _APP_MOD
+    if _APP_MOD is None:
+        spec = importlib.util.spec_from_file_location(
+            'app_current', os.path.join(BASE_DIR, 'app.py'))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _APP_MOD = mod
+    return _APP_MOD
 
 
 # ---------- R78b DXF 转换缓存 ----------
@@ -76,7 +88,20 @@ def _cache_path(filepath):
     stem = os.path.splitext(os.path.basename(filepath))[0]
     safe = ''.join(c if (c.isascii() and (c.isalnum() or c in '-_')) else '_'
                    for c in stem)[:48]
-    return os.path.join(DXF_CACHE_DIR, f'{safe}-{st.st_size}-{int(st.st_mtime)}.dxf.gz')
+    # R102：缓存键必须带上转换版本。转换目标版本会影响产物内容（R14 只支持
+    #   一个图纸空间，会把多余布局丢掉），只靠 size+mtime 会让旧的 R14 缓存
+    #   继续命中，掩盖生产路径的变化（回归假绿）。
+    ver = _convert_version(filepath) or 'auto'
+    return os.path.join(DXF_CACHE_DIR,
+                        f'{safe}-{st.st_size}-{int(st.st_mtime)}-{ver}.dxf.gz')
+
+
+def _convert_version(filepath):
+    """与生产 load_document 同一套版本决策（app.dwg_convert_version）。"""
+    try:
+        return load_app().dwg_convert_version(str(filepath))
+    except Exception:
+        return None
 
 
 def _cache_get_or_convert(filepath):
@@ -102,7 +127,8 @@ def _cache_get_or_convert(filepath):
         from pathlib import Path
         from ezdxf.addons import odafc as _odafc
         infile = Path(filepath).absolute()
-        version = _odafc._detect_version(str(infile))
+        # R102：版本决策与生产 load_document 一致（低版本源文件抬到 ACAD2018）
+        version = _convert_version(str(infile)) or _odafc._detect_version(str(infile))
         with tempfile.TemporaryDirectory(prefix='odafc_cache_') as tmp_dir:
             args = _odafc._odafc_arguments(
                 infile.name, str(infile.parent), tmp_dir,

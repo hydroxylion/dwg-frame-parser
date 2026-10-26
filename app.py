@@ -64,6 +64,7 @@ _archive_oversized_log()
 logger = logging.getLogger('dwg-parser')
 logger.setLevel(logging.INFO)
 # 幂等：Flask debug 模式会用 reloader 重启进程、或模块被重复导入时，避免重复挂 handler
+_file_handler = None
 if not logger.handlers:
     _file_handler = RotatingFileHandler(
         LOG_FILE,
@@ -78,6 +79,14 @@ if not logger.handlers:
     # 不向 root logger 传播：否则 Flask/werkzeug 的 root handler（basicConfig 或
     # 默认 lastResort）会让同一条日志在控制台重复输出一遍
     logger.propagate = False
+else:
+    # R102：模块被**第二次**执行时（同一进程内 importlib 重复 exec_module，
+    #   如 regress_check.load_app 与普通 import 并存），logger 是 logging 的
+    #   进程级单例、handlers 已存在 → 上面 if 不进入，_file_handler 不会被赋值，
+    #   导致下方 _file_handler.addFilter(...) 抛 NameError 打断模块加载。
+    #   这里复用已有 handler，保持「同一个文件 handler」的语义不变。
+    _file_handler = next(
+        (h for h in logger.handlers if isinstance(h, logging.FileHandler)), None)
 
 
 def safe_log(msg):
@@ -127,10 +136,48 @@ class _EzdxfDemoteToDebugFilter(logging.Filter):
         return True
 
 
-_file_handler.addFilter(_EzdxfDemoteToDebugFilter())
+if _file_handler is not None:
+    _file_handler.addFilter(_EzdxfDemoteToDebugFilter())
 _ezdxf_logger = logging.getLogger('ezdxf')
-_ezdxf_logger.addHandler(_file_handler)
+if _file_handler is not None:
+    _ezdxf_logger.addHandler(_file_handler)
 _ezdxf_logger.propagate = False  # 不再传给 root → lastResort 不再刷控制台
+
+
+def dwg_convert_version(path):
+    """R102：决定 DWG→DXF 的转换目标版本（None = 跟随源文件版本）。
+
+    odafc.readfile 不传 version 时按源 DWG 版本转换（_detect_version）。而
+    **R14 及更早的 DXF 格式只支持一个图纸空间**，ODA 转到这些版本时会把多余的
+    布局整体丢弃。实测 总平面1116_t3.dwg（AC1014/R14）：
+
+        自动转换  → ['Model', 'Layout1']                     ← 只剩 1 个图纸空间
+        ACAD2018 → ['Model','方案报建A0','消防扑救面及登高面',
+                    '一期建筑竖向平面图','一期建筑总平面图']  ← 4 个布局全在
+
+    版本阈值实测（同一文件，逐个试）：ACAD14 丢布局；ACAD2000 / 2004 / 2007 /
+    2010 / 2013 / 2018 全部 5 个布局完整。所以只在源版本低于 R2000 时抬到
+    ACAD2018，R2000+ 仍按原版本转换——ACAD2018 转换 30MB 文件多耗约 6s，
+    不给本来就没问题的情况加负担。
+
+    回归脚本 regress_check.py 也必须用本函数（否则缓存里的 DXF 与生产路径
+    版本不一致，会掩盖问题）。
+    """
+    try:
+        from ezdxf.lldxf.validator import dwg_version as _dwg_version
+        _raw_ver = _dwg_version(path)                 # 形如 'AC1014'
+        if not _raw_ver:
+            return None
+        _mapped = odafc.map_version(_raw_ver)         # 形如 'ACAD14'
+        _multi_layout_ok = {'ACAD2000', 'ACAD2004', 'ACAD2007',
+                            'ACAD2010', 'ACAD2013', 'ACAD2018'}
+        if _mapped not in _multi_layout_ok:
+            safe_log(f'  [R102·多布局保护] 源 DWG 版本 {_raw_ver}({_mapped})'
+                     f' 不支持多图纸空间，强制以 ACAD2018 转换以保住全部布局')
+            return 'ACAD2018'
+    except Exception:
+        return None
+    return None
 
 
 def load_document(path):
@@ -151,7 +198,8 @@ def load_document(path):
             doc, _ = ezdxf.recover.readfile(path)
             return doc
     try:
-        return odafc.readfile(path, audit=True)
+        # R102：低版本源文件强制抬版本以保住全部布局，见 dwg_convert_version
+        return odafc.readfile(path, version=dwg_convert_version(path), audit=True)
     except Exception as e:
         msg = str(e)
         if 'ODAFileConverter' in msg or 'Could not find' in msg:

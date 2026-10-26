@@ -3981,4 +3981,77 @@ check('R101成组页框对照: 单张(孤例)含并排格子仍按R67剔除外�
       lambda t: not any(abs(w - 420) < 2 for w in t[1]))
 
 
+# ---- 用例 127：R102 DWG 转换版本决策（低版本源文件须抬版本以保住多布局） ----
+# 场景：总平面1116_t3.dwg 是 AC1014(R14) 格式，含 4 个图纸空间布局。而 R14 的
+#   DXF 格式本身**只支持一个图纸空间**，odafc 按源版本转换时把 4 个布局整体丢弃，
+#   只剩合成的 Layout1 → 4 张 A0 页框全部漏识别。
+#   版本阈值实测：ACAD14 丢布局；ACAD2000/2004/2007/2010/2013/2018 全部保留。
+#   故 dwg_convert_version 对低于 R2000 的源文件返回 ACAD2018，其余返回 None
+#   （跟随源版本，不加无谓的转换开销）。
+_R102_FOLDER = r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）'
+
+
+def _r102_ver(fname):
+    """取某 DWG 的转换目标版本；文件不存在返回 'MISSING'。"""
+    _p = os.path.join(_R102_FOLDER, fname)
+    if not os.path.exists(_p):
+        return 'MISSING'
+    from app import dwg_convert_version
+    return dwg_convert_version(_p)
+
+
+_legacy_ver = _r102_ver('总平面1116_t3.dwg')
+if _legacy_ver != 'MISSING':
+    # R14 源文件必须抬到 ACAD2018（否则 4 个布局被 R14 格式吞掉）
+    check('R102版本决策: R14(AC1014)源文件须抬到ACAD2018以保住多图纸空间',
+          lambda: _legacy_ver,
+          lambda v: v == 'ACAD2018')
+else:
+    print('SKIP  R102 版本决策用例（未找到 总平面1116_t3.dwg）')
+
+
+# 对照：R2000+ 源文件不得被抬版本（保持跟随源版本，避免无谓转换开销）
+_r102_r2000 = _r102_ver('邮电学院-平面图11.22.dwg')
+if _r102_r2000 != 'MISSING':
+    check('R102版本决策对照: R2000+(AC1015)源文件不抬版本(返回None)',
+          lambda: _r102_r2000,
+          lambda v: v is None)
+else:
+    print('SKIP  R102 版本决策对照（未找到 邮电学院-平面图11.22.dwg）')
+
+
+# ---- 用例 128：R102 真实图端到端：4 个布局各 1 张 A0 页框 + 模型空间 0 框 ----
+# 用户口径：模型空间无合格图框（只有交叉混杂、无实际意义的框），
+#   4 个布局各 1 个图框：841×1189 / 1189×841 / 1189×841 / 1189×841。
+_R102_TARGET = os.path.join(_R102_FOLDER, '总平面1116_t3.dwg')
+if os.path.exists(_R102_TARGET):
+    def _r102_e2e():
+        """真实 DWG 端到端：必须带 .dwg 后缀传入才会走 ODA 转换路径。"""
+        with open(_R102_TARGET, 'rb') as _f:
+            _data = _f.read()
+        return get_bounding_box_from_bytes(
+            _data, '总平面1116_t3.dwg', 'polyline', 'mm', 'smart')
+
+    _r102_res = None
+    try:
+        _r102_res = _r102_e2e()
+    except Exception as _e:
+        print('  R102 端到端解析异常:', str(_e)[:120])
+
+    if _r102_res is not None:
+        # ① 恰好 4 个图框，且全部来自布局空间（模型空间只有交叉混杂框 → 0 框）
+        check('R102真实图: 总平面1116_t3 识4框(4个布局各1张A0)，模型空间0框',
+              lambda: _r102_res,
+              lambda r: (r['frame_count'] == 4
+                         and all(c['layout'] != '模型空间' for c in r['candidates'])))
+
+        # ② 尺寸逐项匹配用户口径：1 张 841×1189 + 3 张 1189×841
+        check('R102真实图: 尺寸为 841x1189x1 + 1189x841x3（与用户口径一致）',
+              lambda: _r102_res,
+              lambda r: (sorted((c['width'], c['height']) for c in r['candidates'])
+                         == sorted([(841, 1189), (1189, 841), (1189, 841), (1189, 841)])))
+else:
+    print('SKIP  R102 真实图用例（未找到 总平面1116_t3.dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
