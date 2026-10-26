@@ -2238,6 +2238,136 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             _maximal = _kept_page
         return _maximal
 
+    # R97：块内「LINE 矩形页框」扫描（块定义坐标）。仅作 R62c 单页尺寸替换的兜底。
+    _line_page_cache = {}
+
+    def _scan_line_page_rects(_bn, _scale):
+        """块定义顶层由 **4 条 LINE** 围成的页框矩形（块定义坐标）。
+
+        背景（教学楼修改.dwg 电气）：块 BOUNDARY-A1-V 的 A1 外框是 4 条 LINE
+        画的，精确 594×841（V x=0/594 各长 841、H y=0/841 各长 594）；但块内
+        有一段 2 顶点的 LWPOLYLINE (313.2,-0.0791)→(313.8,14.9209) 向下溢出
+        0.0791mm，把块 bbox 撑成 **594×841.079078** → ×150 输出
+        89100×126161.86，而实际应为 89100×126150（差 11.86mm）。
+
+        既有两条通道都扫不到这个外框：
+          · `_scan_block_max_page_rects` / `_scan_title_layer_page_rects` 只认
+            **闭合 LWPOLYLINE**，而该外框是 LINE（块内唯一的 4 顶点闭合多段线
+            是 559×821 的标题栏内框）——这解释了为什么 R62c 尺寸替换没生效；
+          · 两者都用硬编码 `_ls < 15000` 判**块定义坐标**尺寸，而该块定义是按
+            A1 幅面 1:1 绘制的 594×841，实例 scale=150 才到 89100×126150。
+
+        判据（全部满足才返回）：
+          ① 4 条 LINE 两两配对围成矩形（水平/竖直分簇，容差 0.01mm）；
+          ② 线段长度 ≥ 15000 / scale（换算到块定义坐标，等价于世界 ≥15000mm）；
+          ③ 比例 ∈ [1.30, 5.5]（与页框判据同口径；单位方块 1×1 会在此被挡）；
+          ④ 矩形面积 ≥ 块 bbox 面积 × 85% —— 页框贴着块外框，排除块内构件/
+            表格线偶然围合。实测该门槛在 84 张校验图里只命中 BOUNDARY-A1-1 /
+            BOUNDARY-A1-V / BOUNDARY-A2-1 三个真页框块（尺寸全部精确等价于原
+            bbox，输出不变），以及一个 1×1 单位方块（被 ③ 挡掉），零误伤。
+
+        为什么不用「放宽 LWPOLYLINE 门槛」来一并解决：实测会让 BOUNDARY-A1-1
+        扫出标题栏内框 80600×57400（替换掉正确的 84100×59400），并让
+        A$C3E115B39 / 人防方案…A$C38630A0E 等块扫出 5 个随机内部矩形——
+        多页拼版拆分（R60）会把它们当独立页逐份提升，属于灾难性误报。
+        """
+        _ck = (_bn, round(abs(_scale), 6))
+        if _ck in _line_page_cache:
+            return _line_page_cache[_ck]
+        _blk = doc.blocks.get(_bn)
+        if _blk is None:
+            _line_page_cache[_ck] = []
+            return []
+        _tol = 0.01
+        _min_len = 15000.0 / max(abs(_scale), 1e-9)
+        _hlines = []    # (y, xmin, xmax)
+        _vlines = []    # (x, ymin, ymax)
+        for _e2 in _blk:
+            try:
+                if _e2.dxftype() != 'LINE':
+                    continue
+                _s2, _t2 = _e2.dxf.start, _e2.dxf.end
+                _dx2 = abs(_t2.x - _s2.x)
+                _dy2 = abs(_t2.y - _s2.y)
+                if _dy2 <= _tol and _dx2 >= _min_len:
+                    _hlines.append((_s2.y, min(_s2.x, _t2.x), max(_s2.x, _t2.x)))
+                elif _dx2 <= _tol and _dy2 >= _min_len:
+                    _vlines.append((_s2.x, min(_s2.y, _t2.y), max(_s2.y, _t2.y)))
+            except Exception:
+                continue
+        _raw = []
+        for _i in range(len(_vlines)):
+            for _j in range(_i + 1, len(_vlines)):
+                # 竖线按发现顺序入列，x 不一定左小右大（教学楼修改.dwg 的
+                # BOUNDARY-A1-V 里 x=594 那条先被扫到）→ 必须排序后再配对，
+                # 否则 _x2 <= _x1 直接 continue，外框永远配不出来。
+                _x1, _x2 = sorted((_vlines[_i][0], _vlines[_j][0]))
+                if _x2 <= _x1 + _tol:
+                    continue
+                _ylo2 = max(_vlines[_i][1], _vlines[_j][1])
+                _yhi2 = min(_vlines[_i][2], _vlines[_j][2])
+                if _yhi2 - _ylo2 <= _tol:
+                    continue
+                if not any(abs(_h[0] - _ylo2) <= _tol and _h[1] <= _x1 + _tol
+                           and _h[2] >= _x2 - _tol for _h in _hlines):
+                    continue
+                if not any(abs(_h[0] - _yhi2) <= _tol and _h[1] <= _x1 + _tol
+                           and _h[2] >= _x2 - _tol for _h in _hlines):
+                    continue
+                _w2, _h2 = _x2 - _x1, _yhi2 - _ylo2
+                _ls2 = min(_w2, _h2)
+                if _ls2 * abs(_scale) < 15000:
+                    continue
+                if not (1.30 <= max(_w2, _h2) / _ls2 <= FRAME_RATIO_MAX):
+                    continue
+                _raw.append((_x1, _ylo2, _x2, _yhi2))
+        _bb_area2 = 0.0
+        _bb_x1 = _bb_y1 = _bb_x2 = _bb_y2 = 0.0
+        try:
+            from ezdxf import bbox as _bbox_mod97
+            _db = _bbox_mod97.extents(_blk, fast=True)
+            _bb_x1, _bb_y1 = _db.extmin.x, _db.extmin.y
+            _bb_x2, _bb_y2 = _db.extmax.x, _db.extmax.y
+            _bb_area2 = (_bb_x2 - _bb_x1) * (_bb_y2 - _bb_y1)
+        except Exception:
+            _bb_area2 = 0.0
+        _maximal2 = []
+        for _a in _raw:
+            _aa = (_a[2] - _a[0]) * (_a[3] - _a[1])
+            if _bb_area2 > 0 and _aa < _bb_area2 * 0.85:
+                continue
+            # ⑤ 矩形四边须**贴合块 bbox**（相对偏差 ≤ 0.5%）。
+            #   真页框就是块的外边界，只有零星溢出实体才会让 bbox 越出一点点
+            #   （教学楼修改.dwg：0.079078/841 = 0.0094%）；而块内的「内边框
+            #   线」是整体缩进一圈，四边都会差 1~3%。
+            #   反例（电子称皮带输送系统（套图）.dwg 回归 DIFF）：PDJTK 等 4 个
+            #   块的外框与内边框都用 LINE 画，内框比 bbox 小 3%
+            #   （87320×61763 → 84750×60294，宽×0.9706 高×0.9762），单靠 R62c
+            #   的 ≥95% 门槛拦不住，会把正确尺寸改小。
+            #   宁可严：本通道只是兜底，挡掉的场景仍会保留原 bbox 尺寸，不会变差。
+            if _bb_area2 > 0:
+                _bbw = max(_bb_x2 - _bb_x1, 1e-9)
+                _bbh = max(_bb_y2 - _bb_y1, 1e-9)
+                _gap = max(abs(_a[0] - _bb_x1) / _bbw,
+                           abs(_bb_x2 - _a[2]) / _bbw,
+                           abs(_a[1] - _bb_y1) / _bbh,
+                           abs(_bb_y2 - _a[3]) / _bbh)
+                if _gap > 0.005:
+                    continue
+            _cont2 = False
+            for _b in _raw:
+                if _b == _a:
+                    continue
+                _ab = (_b[2] - _b[0]) * (_b[3] - _b[1])
+                if (_ab > _aa and _a[0] >= _b[0] - 1.0 and _a[1] >= _b[1] - 1.0
+                        and _a[2] <= _b[2] + 1.0 and _a[3] <= _b[3] + 1.0):
+                    _cont2 = True
+                    break
+            if not _cont2:
+                _maximal2.append(_a)
+        _line_page_cache[_ck] = _maximal2
+        return _maximal2
+
     # R82：标题栏专用层页框扫描（块定义顶层）。TEL_TITLE/TTLB/PUB_TITLE/
     #   BORDER/图框 命名层的闭合矩形即页框语义实体——天正 t3 导出的图框装配
     #   块（*U21、整页装配块）里，页框画在标题栏层，bbox 可能被离群实体污染
@@ -3056,6 +3186,15 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 if _mp1 is None:
                     _mp1 = _scan_block_max_page_rects(_bn)
                     _mp_cache[_bn] = _mp1
+                # R97：闭合多段线通道为空时，退到「4 条 LINE 围成的页框」通道。
+                #   仅接受**恰好 1 个**（多页拼版容器绝不走这里，避免与 R60 冲突），
+                #   且后面还要过 R62c 的 ≥95% 尺寸接近门槛，所以这里放宽到 LINE
+                #   通道不会误用块内构件轮廓（教学楼修改.dwg 的 A1 外框即 4 条 LINE，
+                #   块 bbox 被 0.079mm 溢出撑大 → 89100×126161.86 应为 89100×126150）。
+                if not _mp1:
+                    _lp1 = _scan_line_page_rects(_bn, max(abs(_xs), abs(_ys)))
+                    if len(_lp1) == 1:
+                        _mp1 = _lp1
                 if len(_mp1) == 1:
                     _fb = _mp1[0]
                     _fw = (_fb[2] - _fb[0]) * abs(_xs)

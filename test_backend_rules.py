@@ -3609,4 +3609,86 @@ check('R96对照: 块内闭合框占满块长边(块定义本身即页框)仍受
                     for c in r['candidates']))
 
 
+# ---- 用例 120：R97 块内 4 条 LINE 围成的页框须替换被溢出污染的块 bbox ----
+# 场景（教学楼修改.dwg 电气）：块 BOUNDARY-A1-V 按 A1 幅面 1:1 绘制，外框是
+#   **4 条 LINE**，精确 594×841；但块内一段 2 顶点 LWPOLYLINE 向下溢出
+#   0.0791mm，把块 bbox 撑成 594×841.079 → 实例 scale=150 时输出
+#   89100×126161.86，而实际应为 89100×126150（差 11.86mm）。
+# 既有两条通道都扫不到：`_scan_block_max_page_rects` / `_scan_title_layer_page_rects`
+#   只认闭合 LWPOLYLINE（块内唯一的 4 顶点闭合多段线是 559×821 标题栏内框），
+#   且都用硬编码 `_ls < 15000` 判块定义坐标尺寸（594 < 15000 直接出局）。
+# R97：新增 `_scan_line_page_rects`，4 条 LINE 配对成矩形，线段长 ≥ 15000/scale、
+#   矩形面积 ≥ 块 bbox × 85%，仅在闭合多段线通道为空且恰 1 个时兜底给 R62c。
+def _build_r97_line_frame(overflow):
+    """overflow：溢出的 polyline 比 0 低多少（0 表示不溢出）。"""
+    d = make_doc()
+    bd = d.blocks.new('BOUNDARY_A1V')
+    # 外框：4 条 LINE，精确 594×841（A1 纵向）
+    add_line_rect(bd, 0, 0, 594, 841)
+    # 标题栏内框：唯一的 4 顶点闭合多段线（559×821，不是外框）
+    add_closed_rect(bd, 25, 10, 559, 821)
+    # 剖切符号引线：上端正好到 841，下端（本例）溢出 -0.0791
+    bd.add_lwpolyline([(313.2, 826.0), (313.8, 841.0)])
+    if overflow:
+        bd.add_lwpolyline([(313.2, -overflow), (313.8, 14.9209)])
+    else:
+        bd.add_lwpolyline([(313.2, 0.0), (313.8, 14.9209)])
+    d.modelspace().add_blockref('BOUNDARY_A1V', (0, 0),
+                                dxfattribs={'xscale': 150, 'yscale': 150})
+    return to_bytes(d)
+
+
+data = _build_r97_line_frame(0.079078)
+check('R97 LINE页框: 块bbox被0.079溢出污染时用4条LINE外框尺寸, 89100x126150 (smart)',
+      lambda: parse(data),
+      lambda r: any(abs(c['width'] - 89100) < 1 and abs(c['height'] - 126150) < 1
+                    for c in r['candidates'])
+      and not any(abs(c['height'] - 126161.86) < 5 for c in r['candidates']))
+
+# 对照：不溢出时块 bbox 本来就等于外框，输出仍是 89100×126150
+data = _build_r97_line_frame(0)
+check('R97对照: 无溢出时同为89100x126150(未被新通道改变) (smart)',
+      lambda: parse(data),
+      lambda r: any(abs(c['width'] - 89100) < 1 and abs(c['height'] - 126150) < 1
+                    for c in r['candidates']))
+
+
+# ---- 用例 121：R97 LINE 通道须排除「内边框线」（整体缩进一圈） ----
+# 回归现场（电子称皮带输送系统（套图）.dwg）：PDJTK 等 4 个块的外框与内边框
+#   都用 LINE 画，内框比块 bbox 小 3%（87320×61763 → 84750×60294，宽×0.9706、
+#   高×0.9762）。R62c 的 ≥95% 门槛拦不住（0.9706/0.9762 都 >0.95），会把
+#   正确尺寸改小。R97 加 ⑤：矩形四边须贴合块 bbox（相对偏差 ≤0.5%）。
+def _build_r97_inner_border(inset_ratio):
+    """inset_ratio：内边框相对外框的缩进比例。0 表示没有内边框。"""
+    d = make_doc()
+    bd = d.blocks.new('PDJTK')
+    # 外框：4 条 LINE，87320/150 × 61763/150 的纸幅面（这里直接按块定义坐标写）
+    W, H = 873.2, 617.63
+    add_line_rect(bd, 0, 0, W, H)
+    if inset_ratio:
+        # 内边框：整体缩进 inset_ratio（两端各缩）
+        dx, dy = W * inset_ratio, H * inset_ratio
+        add_line_rect(bd, dx, dy, W - 2 * dx, H - 2 * dy)
+    d.modelspace().add_blockref('PDJTK', (0, 0),
+                                dxfattribs={'xscale': 100, 'yscale': 100})
+    return to_bytes(d)
+
+
+# 缩进 1.5% → 内框 84750×60294（实测回归值），四边偏差 1.5% > 0.5% → 不采用
+data = _build_r97_inner_border(0.015)
+check('R97内边框: 内边框比外框小1.5%时不被LINE通道当页框(保留外层尺寸) (smart)',
+      lambda: parse(data),
+      lambda r: any(abs(c['width'] - 87320) < 10 and abs(c['height'] - 61763) < 10
+                    for c in r['candidates'])
+      and not any(abs(c['width'] - 84750) < 20 and abs(c['height'] - 60294) < 20
+                  for c in r['candidates']))
+
+# 对照：没有内边框 → 外框照常被采纳（尺寸 = 块 bbox，无变化）
+data = _build_r97_inner_border(0)
+check('R97内边框对照: 无内边框时外框照常被LINE通道采纳 (smart)',
+      lambda: parse(data),
+      lambda r: any(abs(c['width'] - 87320) < 10 and abs(c['height'] - 61763) < 10
+                    for c in r['candidates']))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
