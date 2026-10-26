@@ -3846,4 +3846,88 @@ check('R99相邻单元格反向对照: 中性层(0层)的共边同尺寸分格�
       lambda ok: ok)
 
 
+# ---- 用例 125：R100 R79「实物尺度详图空间」不得误吃「1:1 多页图纸」 ----
+# 场景（附图02-剖面图.dwg）：11 张 A3 图框（420×297，ratio 1.414141，偏离 √2
+#   仅 0.0051%）横向并排，msp_total = 5.3m² 恰好落进 R79 的 [4m², 100m²) 带。
+#   R79 把 rel 分母换成内容总面积 → 每张 rel 仅 2.35% < 10% 门槛 → 条件C 全灭；
+#   短边 297 < MIN_FRAME_SHORT_SIDE(400) 又过不了条件B → 11 张一张都认不出（fc=0）。
+# R100 护栏：layout 内存在 ≥3 个同尺寸 A 系图幅候选 → 是按 1:1 出图的多页图纸，
+#   不是"无页框参照系的详图空间" → R79 不触发，rel 分母保持 layout_max_area。
+#   为何用「A 系图幅 + 同尺寸≥3」：详图空间的图案（井道大样 570×830 ratio 1.4561）
+#   不是 A 系图幅；单张真图框（非圆减速器 2378×1682=1 份）同尺寸 <3。两者都不触发。
+def _build_r100_paper_pages(n, paper_w=420.0, paper_h=297.0):
+    """n 张同尺寸纸面比例闭合框横向并排 + 纵向散线填充。
+
+    关键：必须让 msp_total 落进 R79 的 [4e6, 1e8) 区间（4~100 m²），
+    否则 R79 压根不触发，测不到本护栏。
+    填充用 5 条水平长线（长 3000，间距 600，最高 y≈3270），把包围盒抬高到
+    ≈3300；n 张并排宽度 = n*450。
+      n=2 → 900×3300 = 2.97e6  ← 不够 4e6，需再加宽
+    故宽度也补一条横线到 2000：总 2000×3300 = 6.6e6 ✓ 恒落在区间内，
+    与 n 无关（避免"张数少就测不到"）。
+    只有水平线、无竖线配对 → 不构成矩形候选。
+    """
+    d = make_doc()
+    msp = d.modelspace()
+    step = paper_w + 30.0
+    for i in range(n):
+        add_closed_rect(msp, i * step, 0, paper_w, paper_h)
+    # 纵向填充：5 条长 2000 的水平线，把包围盒抬到 2000×~3280
+    for k in range(5):
+        y = paper_h + 100.0 + k * 700.0
+        msp.add_line((0, y), (2000.0, y))
+    return to_bytes(d)
+
+
+# 11 张 A3 并排 → 全部识别（护栏生效）
+data = _build_r100_paper_pages(11)
+check('R100纸面多页: 11张420x297(1:1出图)全部识别, 不被R79判成详图空间 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 11
+      and all(abs(c['width'] - 420) < 2 and abs(c['height'] - 297) < 2
+              for c in r['candidates']))
+
+# 对照：只有 2 张（同尺寸 <3，护栏不触发）→ R79 照旧，图框认不出
+#   这条断言的是「护栏范围没有放宽到 2 张」——2 张共边是表格分格形态，
+#   不应因本护栏就全放行。
+data = _build_r100_paper_pages(2)
+def _r100_two_pages():
+    try:
+        _r = parse(data)
+        return _r['frame_count']
+    except RuntimeError:
+        return 0
+
+check('R100纸面多页对照: 仅2张同尺寸A系不触发护栏(仍按R79处理) (smart)',
+      _r100_two_pages,
+      lambda fc: fc < 2)
+
+# 反向对照：3 张同尺寸但**不是 A 系幅面**（如 500×300）→ 护栏不触发，R79 照旧
+def _build_r100_non_a_pages(n=4):
+    d = make_doc()
+    msp = d.modelspace()
+    W, H = 500.0, 300.0
+    step = W + 30.0
+    for i in range(n):
+        add_closed_rect(msp, i * step, 0, W, H)
+    # 同样把 msp_total 撑进 [4e6, 1e8)，让 R79 有机会触发
+    for k in range(5):
+        y = H + 100.0 + k * 700.0
+        msp.add_line((0, y), (2000.0, y))
+    return to_bytes(d)
+
+
+data = _build_r100_non_a_pages(4)
+def _r100_non_a():
+    try:
+        _r = parse(data)
+        return _r['frame_count']
+    except RuntimeError:
+        return 0
+
+check('R100纸面多页反向对照: 非A系幅面(500x300)x4不触发护栏 (smart)',
+      _r100_non_a,
+      lambda fc: fc < 4)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

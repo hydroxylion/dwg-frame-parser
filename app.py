@@ -4333,6 +4333,42 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         break
                 except Exception:
                     continue
+            # R100：结构性护栏——layout 里若存在 **≥3 个同尺寸的 A 系图幅**
+            #   候选，那它就不是"无页框参照系的详图空间"，而是**按 1:1 出图的
+            #   多页图纸**（纸面比例模式的高端：多张 A3 并排，总面积自然落在
+            #   4~100m² 区间内）。
+            #   反例（附图02-剖面图.dwg）：11 张 420×297（ratio 1.414141，偏离
+            #   √2 仅 0.0051%，is_a_series_page_size → A297×1）横向并排，
+            #   msp_total = 5.3m² 恰好落进 R79 的 [4m², 100m²) 带 → rel 分母被
+            #   换成内容总面积 → 每张 rel 只剩 2.35% < 10% 门槛 → 条件C 全灭、
+            #   短边 297 < MIN_FRAME_SHORT_SIDE 400 又过不了条件B → **11 张
+            #   图框一张都认不出**（fc=0）。而 R79 若不动，rel 分母是
+            #   layout_max_area=124740（同尺寸自举）→ rel=100% → 条件C 通过。
+            #   为何用「A 系图幅 + 同尺寸 ≥3」而不是别的：
+            #     · 详图空间的图案（井道大样 570×830 ratio 1.4561）不是 A 系
+            #       图幅，本护栏不触发，R79 原行为完整保留；
+            #     · 单张真图框（非圆减速器 2378×1682=1 份）同尺寸 <3，不触发；
+            #     · ≥3 与包裹框剔除的 MIN_WRAPPED_SAME_SIZE 同哲学——"多份
+            #       同尺寸"是有意排版的一叠页，不是偶然图案。
+            #   开关 FRAME_PARSER_NO_MSP_PAGE_GUARD=1 回退。
+            if (not _has_title_ev
+                    and os.environ.get('FRAME_PARSER_NO_MSP_PAGE_GUARD') != '1'):
+                _paper_grp = {}
+                for _c in all_candidates:
+                    if _c['layout'] != '模型空间':
+                        continue
+                    _ok_as, _ = is_a_series_page_size(_c['width'], _c['height'])
+                    if not _ok_as:
+                        continue
+                    _gk = (round(_c['width']), round(_c['height']))
+                    _paper_grp[_gk] = _paper_grp.get(_gk, 0) + 1
+                _max_paper_grp = max(_paper_grp.values()) if _paper_grp else 0
+                if _max_paper_grp >= 3:
+                    _has_title_ev = True
+                    _top = max(_paper_grp.items(), key=lambda kv: kv[1])
+                    safe_log(f"  [R100·纸面比例多页] 模型空间 {msp_total / 1e6:.1f}m² 但含 "
+                             f"{_top[1]} 份同尺寸 A 系图幅 {_top[0][0]}×{_top[0][1]}"
+                             f"（按 1:1 出图的多页图纸）→ 不判详图空间，rel 分母保持不变")
             if not _has_title_ev:
                 _ms_total_denom = True
                 safe_log(f"  [R79·实物尺度详图空间] 模型空间总面积 "
