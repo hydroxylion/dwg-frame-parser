@@ -3797,4 +3797,53 @@ else:
     print('SKIP  R98真实图用例（未找到 邮电学院-平面图11.22.dwg 或其 DXF 缓存）')
 
 
+# ---- 用例 124：R99 R63 相邻单元格剔除须认全「图签层」五类命名 ----
+# 场景（暖通专业施工图11.7.dwg）：2 张 21000×29700 真页框画在 **PUB_TITLE** 层，
+#   同尺寸恰 2 份 + 水平共边 → 命中 R63「相邻单元格剔除」，fc 14 实际 16。
+# 根因：R63 的「图签层」判据只写了 'TTLB'，而 R82 的
+#   _scan_title_layer_page_rects 一直用 5 个关键词
+#   （TEL_TITLE / TTLB / PUB_TITLE / BORDER / 图框）。两边口径不一致。
+# R99：统一成同一套关键词。
+def _build_r99_adj_cells(layer):
+    """两个同尺寸水平共边的闭合框，画在指定图层上。
+
+    尺寸 210×297（×100 → 21000×29700），比例 0.7071 竖放。
+    """
+    d = make_doc()
+    msp = d.modelspace()
+    W, H = 210.0 * 100, 297.0 * 100
+    for i in range(2):
+        msp.add_lwpolyline(
+            [(i * W, 0), ((i + 1) * W, 0), ((i + 1) * W, H), (i * W, H)],
+            close=True, dxfattribs={'layer': layer})
+    return to_bytes(d)
+
+
+# PUB_TITLE 层 → 属图签层，R63 不得剔除（回归现场）
+data = _build_r99_adj_cells('PUB_TITLE')
+check('R99相邻单元格: PUB_TITLE 层的2个共边页框不被R63剔除 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 2)
+
+# 对照：TEL_TITLE 层（R63 原本就认）→ 同样保留，确认没破坏既有行为
+data = _build_r99_adj_cells('TEL_TITLE')
+check('R99相邻单元格对照: TEL_TITLE 层照常保留 (smart)',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 2)
+
+# 反向对照：真正的中性层表格分格 → 仍须被剔（护栏不能被放宽到失效）
+#   全剔光时 parse 会抛「未检测到图框」，那正是期望结果，故用 try/except 兜。
+def _r99_neutral_dropped():
+    try:
+        _r = parse(_build_r99_adj_cells('0'))
+        return _r['frame_count'] < 2
+    except RuntimeError as _e:
+        return '未检测到图框' in str(_e)
+
+
+check('R99相邻单元格反向对照: 中性层(0层)的共边同尺寸分格仍被剔除 (smart)',
+      _r99_neutral_dropped,
+      lambda ok: ok)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

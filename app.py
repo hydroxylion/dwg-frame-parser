@@ -6577,6 +6577,19 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         #      同哲学；恰 2 份且共边才是大表拆分格（0722 户型表 23938×34315×2）。
         #   开关 FRAME_PARSER_NO_ADJ_CELL=1 回退。
         if os.environ.get('FRAME_PARSER_NO_ADJ_CELL') != '1':
+            # R99：判据③「图签层」原只认 'TTLB'，漏了同为图签语义的
+            #   TEL_TITLE / PUB_TITLE / BORDER / 图框 四类。与 R82 的
+            #   _scan_title_layer_page_rects 用同一套关键词（那边一直是 5 个，
+            #   两边口径不一致就是这个 bug 的来源）。
+            #   反例（暖通专业施工图11.7.dwg）：2 张 21000×29700 真页框画在
+            #   **PUB_TITLE** 层，因只查 'TTLB' 被判"非图签层"，又被"同尺寸
+            #   恰 2 份 + 共边"命中 → 整组剔除，fc 14 实际 16。
+            _TITLE_LAYER_KEYS = ('TTLB', 'TEL_TITLE', 'PUB_TITLE', 'BORDER', '图框')
+
+            def _on_title_layer(_c):
+                _lu = (_c.get('insert_layer') or '').upper()
+                return any(_k in _lu for _k in _TITLE_LAYER_KEYS)
+
             _adj_ids = set()
             _adj_size_cnt = {}
             for _c in frame_like:
@@ -6601,7 +6614,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 _a = frame_like[_ia]
                 if id(_a) in _adj_ids or _a['type'] != '闭合多段线':
                     continue
-                if 'TTLB' in (_a.get('insert_layer') or '').upper():
+                if _on_title_layer(_a):
                     continue
                 if _has_inner_border(_a):
                     continue
@@ -6611,7 +6624,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                             or _b['layout'] != _a['layout']
                             or _b['type'] != '闭合多段线'):
                         continue
-                    if 'TTLB' in (_b.get('insert_layer') or '').upper():
+                    if _on_title_layer(_b):
                         continue
                     if _has_inner_border(_b):
                         continue
