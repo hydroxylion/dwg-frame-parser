@@ -3599,9 +3599,24 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 #   37.5% ≥ 10% 仍撤销，行为不变。
                 _rb_area = max(1.0, (_rb[2] - _rb[0]) * (_rb[3] - _rb[1]))
                 _ob_area = max(0.0, (_ob[2] - _ob[0]) * (_ob[3] - _ob[1]))
-                if _ob_area >= _rb_area * 0.10:
-                    _revoke_keys.add((_rc['width'], _rc['height']))
-                    break
+                if _ob_area < _rb_area * 0.10:
+                    continue
+                # R98：被罩候选须与救援候选**同量级**才是"裁剪边界罩真图框"形态。
+                #   裁剪边界框罩真图框，两者是同一张图的"两层皮"，短边不会差一半
+                #   （R40 原始场景 1号2号楼：200000×300000 罩 126164×178350，
+                #   短边比 178350/300000 = 59.5%）。
+                #   反例（邮电学院-平面图11.22.dwg，R98）：真图框 148700×84100
+                #   罩住框内的**狭长表格块** 108998×20000（短边比仅 23.8%、
+                #   面积比 17.4% ≥10% 过了面积门槛）→ 4 个尺寸组 34 个候选被
+                #   整组撤销，17 张有内容的图框全部丢失（fc 13 但内容是纯线框）。
+                #   真图框罩住框内表格/明细表/门窗表是**正常图框行为**，不是
+                #   裁剪边界——裁下来的边界框不会只框住图框里的一小块。
+                _rb_short = min(_rb[2] - _rb[0], _rb[3] - _rb[1])
+                _ob_short = min(_ob[2] - _ob[0], _ob[3] - _ob[1])
+                if _ob_short < _rb_short * 0.50:
+                    continue
+                _revoke_keys.add((_rc['width'], _rc['height']))
+                break
         if _revoke_keys:
             for _gk in _revoke_keys:
                 _resc_credit.pop(_gk, None)
@@ -5210,6 +5225,33 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                        _c['bbox'][2] <= _f['bbox'][2] + 1 and _c['bbox'][3] <= _f['bbox'][3] + 1
                        for _f in frame_like):
                     continue   # 被已入选框包住：是内部内容，不救
+                # R98：被已入选/已救援框**高度重叠**（IoU ≥ 0.5）也不救。
+                #   反例（邮电学院-平面图11.22.dwg）：照明回路范围闭合多段线
+                #   140682×167328（WIRE-照明 层）与真页框组区域大幅重叠，框内
+                #   588 INSERT / 953 LINE 被误计为"表格行"（横线 632 / 竖线 255）
+                #   → 条件I 救成"表格页"。它是**回路覆盖范围**而非图纸页。
+                #   真表格页（图纸目录/材料表/设计说明）是独立的一页，不会与
+                #   已入选图框大面积重叠；只有范围线/包络线才会。
+                _ovl = False
+                _cb = _c['bbox']
+                for _f in frame_like:
+                    if _f['layout'] != _c['layout']:
+                        continue
+                    _fb = _f['bbox']
+                    _ix = max(0.0, min(_cb[2], _fb[2]) - max(_cb[0], _fb[0]))
+                    _iy = max(0.0, min(_cb[3], _fb[3]) - max(_cb[1], _fb[1]))
+                    if _ix <= 0 or _iy <= 0:
+                        continue
+                    _inter = _ix * _iy
+                    _union = ((_cb[2] - _cb[0]) * (_cb[3] - _cb[1])
+                              + (_fb[2] - _fb[0]) * (_fb[3] - _fb[1]) - _inter)
+                    if _union > 0 and _inter / _union >= 0.5:
+                        _ovl = True
+                        break
+                if _ovl:
+                    safe_log(f"   [条件I·跳过] {_c['type']} {_c['width']:.0f}×{_c['height']:.0f}："
+                             f"与已入选图框高度重叠（范围线/包络线形态），不判表格页")
+                    continue
                 # R62 形态B：块参照候选（无旋转实例）在顶层计数之外**合并**块定义
                 #   局部坐标计数（不能替换——1#,8#住宅 1051×594 组的块参照候选
                 #   依赖顶层散线救援，替换会误伤；块内表格线是增量证据）
@@ -5221,6 +5263,32 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     _nh += _bh2
                     _nv += _bv2
                 if _nh >= 30 and _nv >= 6:
+                    # R98：表格页须「线多、块少」——表格是线画出来的，框内不该
+                    #   堆着上百个块参照。反例（邮电学院-平面图11.22.dwg）：
+                    #   照明回路范围闭合多段线 140682×167328（WIRE-照明 层），
+                    #   框内 953 LINE（正交 887）+ **588 INSERT**，被误计成
+                    #   "横线 632 / 竖线 255 的表格页"救回；实际是回路覆盖范围。
+                    #   判据：块参照数 ≥100 且 ≥ 横竖线总数 ×0.5 → 判为图元内容
+                    #   而非表格页。真表格页（图纸目录/材料表/设计说明）是纯
+                    #   线稿+文字，块参照远少于表格线。
+                    _nb_i = 0
+                    _obj_i = _lay_objs.get(_c['layout'])
+                    if _obj_i is not None and _c['type'] in EXPLICIT_TYPES:
+                        _bx1, _by1, _bx2, _by2 = _c['bbox']
+                        for _e_i in _obj_i:
+                            if _e_i.dxftype() != 'INSERT':
+                                continue
+                            try:
+                                _ip_i = _e_i.dxf.insert
+                            except Exception:
+                                continue
+                            if (_bx1 <= _ip_i.x <= _bx2 and _by1 <= _ip_i.y <= _by2):
+                                _nb_i += 1
+                    if _nb_i >= 100 and _nb_i >= (_nh + _nv) * 0.5:
+                        safe_log(f"   [条件I·跳过] {_c['type']} {_c['width']:.0f}×{_c['height']:.0f}："
+                                 f"框内块参照 {_nb_i} 个 / 表格线 {_nh + _nv} 条"
+                                 f"（块多线少，判为图元内容而非表格页）")
+                        continue
                     _c['rescued_by'] = 'table_page'
                     frame_like.append(_c)
                     _in_fl_i.add(id(_c))
@@ -6842,6 +6910,66 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             if _r77d_drop_outers:
                 result = [c for c in result if id(c) not in _r77d_drop_outers]
             return result
+
+        # ---------- R98：孤例「包络框」剔除 ----------
+        # 场景（邮电学院-平面图11.22.dwg）：DOTLN（点划线/边界线）层有一条闭合
+        #   多段线 157576×89818，把真页框 148700×84100 四边各外扩 3~4% 罩住：
+        #     真页框 bbox (-6704678, 6058166)-(-6555978, 6142266)
+        #     包络框 bbox (-6698951, 6055462)-(-6541376, 6145281)
+        #   两者 IoU=0.822 > 阈值 0.5 → 去重规则2「留大剔小」把真页框剔掉，
+        #   包络框顶替入选。同时 148700×84100 少 1 个（应 8 实 7）。
+        # 为何不能靠「双线画法」判据区分：面积比 88.4%、ratio 差 0.7%，几何上
+        #   与 R83 的双线画法（内框 85%~99.5%）完全同域。
+        # 唯一可靠的区别是**成组性**：真页框在这张图里有 8 个副本（2列×4行，
+        #   是一次出图的 8 张页）；包络框只有 1 个孤例。双线画法是"每页都画两层"，
+        #   内外框副本数必然相等；包络框是"整张图套一个边界"，永远孤例。
+        # 判据（全部满足才剔 C）：
+        #   ① C 在该 layout 内**无同尺寸副本**（孤例）
+        #   ② C 与某候选 O 的 IoU ≥ 0.60（高度重叠）
+        #   ③ C 面积 > O 面积（C 在外层）
+        #   ④ ratio 差 ≤ 3%（同形状，排除"罩住一堆小页的总平面框"）
+        #   ⑤ O **成组**（同尺寸副本 ≥2 个）
+        # 剔除包络框后，O 在后续去重里不再被"留大剔小"顶掉。
+        _env_copy_cache = {}
+
+        def _env_copies(_c):
+            """同 layout 内与 _c 同尺寸（round 宽高）的**其他**候选数。"""
+            _k = (id(_c))
+            if _k in _env_copy_cache:
+                return _env_copy_cache[_k]
+            _r, _s = round(_c['width']), round(_c['height'])
+            _n = sum(1 for _o in frame_like
+                     if _o is not _c and _o['layout'] == _c['layout']
+                     and round(_o['width']) == _r and round(_o['height']) == _s)
+            _env_copy_cache[_k] = _n
+            return _n
+
+        _envelope_drop = set()
+        for _c in frame_like:
+            if id(_c) in _envelope_drop:
+                continue
+            if _env_copies(_c) > 0:
+                continue                                   # ① 成组 → 不是孤例包络
+            for _o in frame_like:
+                if _o is _c or _o['layout'] != _c['layout']:
+                    continue
+                if _c['area'] <= _o['area']:
+                    continue                               # ③ C 须在外层
+                if abs(_c['ratio'] - _o['ratio']) / max(_o['ratio'], 1e-9) > 0.03:
+                    continue                               # ④ 同形状
+                if _env_copies(_o) < 2:
+                    continue                               # ⑤ O 须成组（除自身外 ≥2 副本）
+                _bb_iou = bbox_iou(_c['bbox'], _o['bbox'])
+                if _bb_iou < 0.60:
+                    continue                               # ② 高度重叠
+                _envelope_drop.add(id(_c))
+                safe_log(f"  [R98·孤例包络框剔除] {_c['width']:.0f}x{_c['height']:.0f}"
+                         f"@{_c['layout']}（孤例，层 {_c.get('insert_layer')!r}，IoU={_bb_iou:.3f}）"
+                         f"罩住成组真页框 {_o['width']:.0f}x{_o['height']:.0f}"
+                         f"（{_env_copies(_o) + 1} 份）→ 剔包络、留真页框")
+                break
+        if _envelope_drop:
+            frame_like = [_c for _c in frame_like if id(_c) not in _envelope_drop]
 
         frame_like = deduplicate_candidates(frame_like)
         dedup_count = len(frame_like)

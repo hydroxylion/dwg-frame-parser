@@ -11,6 +11,7 @@
   8. 条件G 同模板缩放套图救援：带标题栏条纹的同比例小尺寸实例救回（胜利公寓２）
 """
 import io
+import os
 import sys
 import ezdxf
 from pathlib import Path
@@ -3689,6 +3690,111 @@ check('R97内边框对照: 无内边框时外框照常被LINE通道采纳 (smart
       lambda: parse(data),
       lambda r: any(abs(c['width'] - 87320) < 10 and abs(c['height'] - 61763) < 10
                     for c in r['candidates']))
+
+
+# ---- 用例 122：R98 孤例「包络框」不得顶替成组真页框 ----
+# 场景（邮电学院-平面图11.22.dwg）：DOTLN 层闭合多段线 157576×89818 把真页框
+#   148700×84100 四边各外扩 3~4% 罩住（IoU=0.822）→ 去重规则2「留大剔小」
+#   把真页框剔掉、包络框顶替（148700 应 8 实 7）。
+# 几何上它与 R83 双线画法同域（面积比 88.4%、ratio 差 0.7%），唯一可靠区别是
+#   **成组性**：真页框 8 个副本，包络框 1 个孤例。
+# R98 判据（全满足剔 C）：①C 无同尺寸副本 ②IoU≥0.60 ③C 面积更大
+#   ④ratio 差≤3% ⑤O 成组（除自身外 ≥2 副本）。
+def _build_r98_envelope(cls_copies, env_offset_ratio):
+    """真页框 cls_copies 个（横排）+ 1 个外扩包络框。
+
+    env_offset_ratio：包络框相对真页框的单边外扩比例（0 表示不画包络框）。
+    """
+    d = make_doc()
+    W, H = 1487.0, 841.0        # 块定义坐标（×100 → 148700×84100）
+    bd = d.blocks.new('PAGE_BLK')
+    add_closed_rect(bd, 0, 0, W, H)
+    msp = d.modelspace()
+    step = W * 1.06             # 间距留 6%，避免真页框互相重叠
+    for i in range(cls_copies):
+        msp.add_blockref('PAGE_BLK', (i * step * 100, 0),
+                         dxfattribs={'xscale': 100, 'yscale': 100})
+    if env_offset_ratio:
+        dx = W * env_offset_ratio
+        dy = H * env_offset_ratio
+        # 包络框罩住第 2 个真页框（与其 IoU 足够高）
+        bx = step * 100 - dx * 100
+        by = -dy * 100
+        add_closed_rect(msp, bx, by, (W + 2 * dx) * 100, (H + 2 * dy) * 100)
+    return to_bytes(d)
+
+
+# 8 个真页框 + 1 个外扩 3.8% 的孤例包络框 → 包络框被剔，8 个真页框全部保留
+data = _build_r98_envelope(8, 0.038)
+check('R98包络框: 孤例外扩框不顶替成组真页框(8个全保留) (smart)',
+      lambda: parse(data),
+      lambda r: sum(1 for c in r['candidates']
+                    if abs(c['width'] - 148700) < 100 and abs(c['height'] - 84100) < 100) == 8
+      and not any(c['width'] > 154000 and c['width'] < 161000
+                  and abs(c['height'] - 89818) < 500 for c in r['candidates']))
+
+# 对照：同样 8 个真页框但不画包络框 → 仍是 8 个（新判据不误伤）
+data = _build_r98_envelope(8, 0)
+check('R98包络框对照: 无包络框时 8 个真页框照常识别 (smart)',
+      lambda: parse(data),
+      lambda r: sum(1 for c in r['candidates']
+                    if abs(c['width'] - 148700) < 100 and abs(c['height'] - 84100) < 100) == 8)
+
+
+# ---- 用例 123：R98 条件I 表格页救援须「线多块少」 ----
+# 场景（邮电学院-平面图11.22.dwg）：WIRE-照明 层回路范围框 140682×167328，
+#   框内 953 LINE（正交 887）+ **577 个 INSERT** → 被条件I 误判为"表格页"
+#   （横线 632/竖线 255）救回并输出，用户确认为误报（实际是照明回路覆盖范围）。
+# R98 判据：块参照 ≥100 且 ≥ 横竖线总数×0.5 → 判为图元内容而非表格页，不救。
+#
+# 为何不用 ezdxf 现构造：条件I 的入场要同时避开条件A（area_ratio≥15%）、
+#   条件B/C（ratio 闸门 + rel≥10%）三道闸，而 area_ratio/rel 都取决于该
+#   layout 里**其他实体**的包围盒。用散线伪造分母试了 3 次（300mm 短线、
+#   巨型块、不同跨度）都无法稳定复现"恰好落到条件I"的状态——这种用例
+#   一旦 layout 细节变动就会失败，是脆弱测试。
+#   改为直接读真实图纸（走 regress_dxf_cache 的 DXF 缓存；无图纸/无缓存时跳过），
+#   断言的是端到端真实行为，这比构造更可靠。
+def _load_real_drawing(name):
+    """读取真实校验图纸的 DXF bytes（优先用回归缓存，避免每次跑 ODA）。"""
+    _dwgs = [
+        Path(r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）') / name,
+        Path(r'C:\Users\hui_ou\Desktop\建筑项目图纸 - 非标') / name,
+    ]
+    _cache_dir = Path(__file__).parent / 'regress_dxf_cache'
+    for _p in _dwgs:
+        if not _p.exists():
+            continue
+        _st = os.stat(_p)
+        _stem = _p.stem
+        _safe = ''.join(c if (c.isascii() and (c.isalnum() or c in '-_')) else '_'
+                        for c in _stem)[:48]
+        _cp = _cache_dir / f'{_safe}-{_st.st_size}-{int(_st.st_mtime)}.dxf.gz'
+        if _cp.exists():
+            try:
+                import gzip
+                return gzip.decompress(_cp.read_bytes())
+            except Exception:
+                return None
+    return None
+
+
+_real = _load_real_drawing('邮电学院-平面图11.22.dwg')
+if _real is not None:
+    _rr = parse(_real)
+    check('R98真实图: 邮电学院 剔掉2个误报后 fc=26 = 148700x84100x8 + 148600x84100x4 + 126100x59400x14',
+          lambda: _rr,
+          lambda r: r['frame_count'] == 26
+          and sorted(r['frame_counts_by_layout'].values()) == [26]
+          and not any(abs(c['width'] - 140682) < 300 and abs(c['height'] - 167328) < 300
+                      for c in r['candidates'])
+          and not any(abs(c['width'] - 157576) < 300 and abs(c['height'] - 89818) < 300
+                      for c in r['candidates']))
+    check('R98真实图: 148700x84100 有内容的8张全部保留(不再被包络框顶替)',
+          lambda: _rr,
+          lambda r: sum(1 for c in r['candidates']
+                        if abs(c['width'] - 148700) < 50 and abs(c['height'] - 84100) < 50) == 8)
+else:
+    print('SKIP  R98真实图用例（未找到 邮电学院-平面图11.22.dwg 或其 DXF 缓存）')
 
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
