@@ -3930,4 +3930,55 @@ check('R100纸面多页反向对照: 非A系幅面(500x300)x4不触发护栏 (sm
       lambda fc: fc < 4)
 
 
+# ---- 用例 126：R101 成组真页框不得被 R67「独立双页」当外包络剔掉 ----
+# 场景（附图03-柱状图.dwg）：12 张 420×297 真图框（「图框」层，横向间距 420
+#   排开），每张内部有 2 个 176×241 柱状图格子（左右两栏，水平分离）→ 命中
+#   R67「框内存在同尺寸并排独立页」→ 12 张里 11 张被当外包络剔掉，只剩 1 张
+#   （fc 23 实际 12，其中 22 个还是格子误报）。
+# R101 护栏：big 自身在同 layout 内有同尺寸副本（含自身 ≥2）→ 它是成组排版的
+#   真页框，不是包裹框，R67 不剔。
+#   包裹框的本质是"整张图套一个外边界"，必然**孤例**；真页框出图时是**一叠**。
+#   与 R98「孤例包络框罩住成组真页框 → 剔孤例框」完全对称：
+#     R98：孤例框罩成组页   → 剔孤例框
+#     R101：成组框罩内部格 → 不剔成组框
+def _build_r101_grouped_pages(n_pages, inner_cols=2):
+    """n_pages 张 420×297 真页框横排，每张内含 inner_cols 个 176×241 并排格子。"""
+    d = make_doc()
+    msp = d.modelspace()
+    W, H = 420.0, 297.0
+    iw, ih = 176.0, 241.0
+    for i in range(n_pages):
+        x0 = i * W
+        y0 = 0.0
+        add_closed_rect(msp, x0, y0, W, H)
+        # 内部格子：左右两栏，水平分离（间距 10）
+        for c in range(inner_cols):
+            add_closed_rect(msp, x0 + 10.0 + c * (iw + 10.0), y0 + 28.0, iw, ih)
+    return to_bytes(d)
+
+
+# 12 张成组页框，每张含 2 个并排格子 → 12 个页框全部保留
+data = _build_r101_grouped_pages(12, 2)
+check('R101成组页框: 12张420x297(内含并排格子)不被R67当外包络剔除 (smart)',
+      lambda: parse(data),
+      lambda r: sum(1 for c in r['candidates']
+                    if abs(c['width'] - 420) < 2 and abs(c['height'] - 297) < 2) == 12)
+
+# 对照：同样含并排格子的**单张**页框（孤例）→ R67 照旧剔它（原行为不变）
+#   注意剔除后的形态：外层 420×297 被剔掉，内部 2 个 176×241 格子残留成候选
+#   （fc=2）。这正是 R67 的既有行为（"大框是包裹框 → 剔框留页"），本护栏
+#   不得改变它——所以断言的是「420×297 不在了」而不是「fc=0」。
+data = _build_r101_grouped_pages(1, 2)
+def _r101_single():
+    try:
+        _r = parse(data)
+        return _r['frame_count'], [c['width'] for c in _r['candidates']]
+    except RuntimeError:
+        return 0, []
+
+check('R101成组页框对照: 单张(孤例)含并排格子仍按R67剔除外层框 (smart)',
+      _r101_single,
+      lambda t: not any(abs(w - 420) < 2 for w in t[1]))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

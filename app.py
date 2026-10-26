@@ -5976,7 +5976,30 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         #   80600×57400 内框）被误剔。真"并排独立页"是同模板同尺寸
                         #   （≤2%），分格高度差 4.9% 自然拆组。
                         _R67_SIZE_EPS = 0.01
-                        if os.environ.get('FRAME_PARSER_NO_WRAP_SEP') != '1':
+                        # R101：成组护栏——big 自身在同 layout 内有同尺寸副本
+                        #   （含自身 ≥2 份）时，它**不是**包裹框，而是成组排版的
+                        #   真页框，R67 不得剔除。
+                        #   包裹框的本质是"整张图套一个外边界"，必然**孤例**；
+                        #   真页框在出图时是**一叠**（一次出 N 张，同模板同尺寸并排）。
+                        #   这与 R98「孤例包络框罩住成组真页框」完全对称：
+                        #     R98：孤例框罩成组页   → 剔孤例框
+                        #     R101：成组框罩内部格 → 不剔成组框
+                        #   反例（附图03-柱状图.dwg）：12 张 420×297 真图框（「图框」
+                        #   层，横向间距 420 排开）每张内部有 2 个 176×241 柱状图
+                        #   格子（左右两栏，水平分离）→ 命中 R67「框内存在同尺寸
+                        #   并排独立页」→ 12 张里 11 张被当外包络剔掉，只剩 1 张
+                        #   （fc 23 实际 12，其中 22 个还是格子误报）。
+                        #   R67 原场景（美立方 146990×201938 大框）大框是孤例，
+                        #   不受本护栏影响。
+                        _big_twins = 0
+                        if os.environ.get('FRAME_PARSER_NO_WRAP_TWIN_GUARD') != '1':
+                            for _oc in cands:
+                                if (_oc is big or _oc['layout'] != big['layout']):
+                                    continue
+                                if (abs(_oc['width'] - big['width']) / max(_oc['width'], big['width'], 1) < _R67_SIZE_EPS
+                                        and abs(_oc['height'] - big['height']) / max(_oc['height'], big['height'], 1) < _R67_SIZE_EPS):
+                                    _big_twins += 1
+                        if os.environ.get('FRAME_PARSER_NO_WRAP_SEP') != '1' and _big_twins == 0:
                             _sep_inners = [cands[j] for j in indices
                                            if j != i and _is_contained(cands[j], big)
                                            and cands[j]['area'] < big['area'] * WRAP_INNER_AREA_RATIO]
