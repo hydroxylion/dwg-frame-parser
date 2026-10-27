@@ -2270,19 +2270,98 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         #   40% 门槛居中留余量，且"两页上下排布"这种最常见拼版仍安全通过。
         #   R62c 单页尺寸替换路径要求页框 ≥95%×块 bbox，比本门槛更严，不受影响。
         _bb_area = 0.0
+        _bb_box = None
         try:
             from ezdxf import bbox as _bbox_mod
             _defbb = _bbox_mod.extents(_blk, fast=True)
             _bb_area = ((_defbb.extmax.x - _defbb.extmin.x)
                         * (_defbb.extmax.y - _defbb.extmin.y))
+            _bb_box = (_defbb.extmin.x, _defbb.extmin.y,
+                       _defbb.extmax.x, _defbb.extmax.y)
         except Exception:
             _bb_area = 0.0
+            _bb_box = None
         if _bb_area > 0:
             _kept_page = []
             for _a in _maximal:
                 _a_area = (_a[2] - _a[0]) * (_a[3] - _a[1])
                 if _a_area >= _bb_area * 0.40:
                     _kept_page.append(_a)
+            # R103：拼版图纸块兜底 —— 块本身就是「一叠图纸页」时不受 40% 门槛限制。
+            #
+            #   问题图（AC-P02、E01、D03-B.dwg）：块 Ax-S-E01（scale=1:1）内含两页
+            #   图纸 —— 105100×59400 与 52550×29700，各带一圈按比例内缩的内框
+            #   （101600×57400 / 50800×28700，内缩 3.33%/3.37%）。块 bbox 是两页
+            #   并集 152100×119931，故单页只占 34.2% / 8.6%，都不到 R89 的 40%
+            #   → 两页全被剔 → R60 拿不到 ≥2 页 → 退回把块 bbox 152100×119931
+            #   当成一个图框（误报），两页真图框全漏（用户报：识 2 张实际 3 张）。
+            #
+            #   为何不能只降 40% 门槛：R89 的反例（构件轮廓）占 11.3%~15.8%，与
+            #   本例真页框 8.6% / 34.2% **区间重叠**，单看占比永远分不开。故补三条
+            #   **结构性**判据（不依赖把阈值调到某个值）：
+            #     ① maximal 页框数 ≤ 4 —— 拼版图纸页数有限。反例 S-0-SLAB-THCK
+            #        8 页、9#商业 12 页、北区商业街 20/23 页
+            #     ② 每页都有「配对内框」—— 被自己严格包含、且按比例内缩
+            #        0.5%~10% 的矩形。这是制图规范的双线画法（裁切线+图框线），
+            #        构件轮廓不会有这种精确内缩配对
+            #     ③ 页框并集贴合块 bbox —— 宽或高方向覆盖 ≥98%。真页框就是块的
+            #        外边界；反例的框全悬在巨型块中间（北区商业街块 bbox
+            #        5073141×1202765，页框离块边几十万，并集只覆盖 0.688）
+            #
+            #   影响面实测（185 个缓存 DXF 全扫，共 19 个「块内页框占比<40%」样本）：
+            #   三条判据合计只命中 **Ax-S-E01 一条**。被挡掉的有 S-0-SLAB-THCK /
+            #   S-0-COLS（无配对内框）、A$C214059D9（无配对内框）、-1ffhfq0406 /
+            #   -2ffhfq0406（无配对内框）、10#商业-平面图（7 页，超①）、
+            #   9#商业-平面图（12 页，超①）、北区商业街 / 09-AW-FP001（并集
+            #   0.688/0.816，超③）、邮电学院-10.20 / 13013-11（无配对内框）。
+            #
+            #   仅在 len(_maximal) ≥ 2 时启用 → R62c 单页尺寸替换（判 len==1）
+            #   完全不受影响。开关 FRAME_PARSER_NO_SHEET_BLOCK=1 回退。
+            if (len(_kept_page) < 2 and len(_maximal) >= 2
+                    and _bb_box is not None
+                    and os.environ.get('FRAME_PARSER_NO_SHEET_BLOCK') != '1'):
+                _r103_ok = False
+                if len(_maximal) <= 4:                      # ① 页数少
+                    _bx1, _by1, _bx2, _by2 = _bb_box
+                    _bw = max(_bx2 - _bx1, 1e-9)
+                    _bh = max(_by2 - _by1, 1e-9)
+                    _ux1 = min(_pa[0] for _pa in _maximal)
+                    _uy1 = min(_pa[1] for _pa in _maximal)
+                    _ux2 = max(_pa[2] for _pa in _maximal)
+                    _uy2 = max(_pa[3] for _pa in _maximal)
+                    _fill = max((_ux2 - _ux1) / _bw, (_uy2 - _uy1) / _bh)   # ③
+                    _all_paired = True
+                    for _pa in _maximal:                     # ② 每页都有配对内框
+                        _paw = _pa[2] - _pa[0]
+                        _pah = _pa[3] - _pa[1]
+                        if _paw <= 0 or _pah <= 0:
+                            _all_paired = False
+                            break
+                        _found = False
+                        for _pb in _raw:
+                            if _pb is _pa:
+                                continue
+                            if (_pb[0] >= _pa[0] - 1.0
+                                    and _pb[1] >= _pa[1] - 1.0
+                                    and _pb[2] <= _pa[2] + 1.0
+                                    and _pb[3] <= _pa[3] + 1.0):
+                                _rw = 1.0 - (_pb[2] - _pb[0]) / _paw
+                                _rh = 1.0 - (_pb[3] - _pb[1]) / _pah
+                                if 0.005 <= _rw <= 0.10 and 0.005 <= _rh <= 0.10:
+                                    _found = True
+                                    break
+                        if not _found:
+                            _all_paired = False
+                            break
+                    _r103_ok = _all_paired and _fill >= 0.98
+                if _r103_ok:
+                    _pct = sorted(round(((_qa[2] - _qa[0]) * (_qa[3] - _qa[1]))
+                                        / _bb_area * 100, 1) for _qa in _maximal)
+                    safe_log(f'  [R103·拼版图纸块] 块 {_bn}: {len(_maximal)} 页'
+                             f'（单页占比 {_pct}%，均低于 R89 的 40%），'
+                             f'但每页都有配对内框且并集贴合块 bbox'
+                             f'（覆盖 {_fill:.3f}）→ 判为拼版图纸页，整组保留')
+                    _kept_page = list(_maximal)
             _maximal = _kept_page
         return _maximal
 

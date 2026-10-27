@@ -4054,4 +4054,181 @@ else:
     print('SKIP  R102 真实图用例（未找到 总平面1116_t3.dwg）')
 
 
+# ---- 用例 129：R103 拼版图纸块 —— 块内页框占比<40% 但块本身就是一叠图纸 ----
+# 场景：AC-P02、E01、D03-B.dwg 的块 Ax-S-E01（scale=1:1）内含 2 页图纸，
+#   105100×59400 与 52550×29700，各带一圈按比例内缩 3.33%/3.37% 的内框
+#   （101600×57400 / 50800×28700）。块 bbox 是两页并集 152100×119931，
+#   故单页只占 34.2% / 8.6%，都被 R89 的 40% 门槛剔掉 → R60 拿不到 2 页
+#   → 退回把块 bbox 当成一个图框（误报 152100×119931），两页真图框全漏。
+# R103 判据（三条结构性特征，不依赖占比阈值）：
+#   ① maximal 页框数 ≤ 4        ② 每页都有配对内框（内缩 0.5%~10%）
+#   ③ 页框并集贴合块 bbox ≥98%   且仅在 len(maximal) ≥ 2 时启用（不动 R62c）
+def _build_r103_sheet_block(pages, inner_inset=0.0333, with_inner=True):
+    """构造一个「块内 N 页图纸」的场景。
+
+    pages: [(w, h), ...] 按横向排布，页与页之间留 gap
+    块 bbox = 各页并集（不额外留空），使并集贴合判据成立
+    inner_inset: 内框按比例内缩（双线画法）
+    """
+    d = make_doc()
+    msp = d.modelspace()
+    blk = d.blocks.new('SHEET_BLK')
+    gap = 5000.0
+    x = 0.0
+    base_y = 0.0
+    max_h = 0.0
+    rects = []
+    for w, h in pages:
+        rects.append((x, base_y, w, h))
+        if with_inner:
+            iw = w * (1 - inner_inset)
+            ih = h * (1 - inner_inset)
+            # 内框贴外框中心（四周等距内缩）
+            add_closed_rect(blk, x + (w - iw) / 2, base_y + (h - ih) / 2, iw, ih)
+        add_closed_rect(blk, x, base_y, w, h)
+        x += w + gap
+        max_h = max(max_h, h)
+    # 用一个 1:1 实例引用（块内坐标即世界坐标）
+    msp.add_blockref('SHEET_BLK', (0, 0))
+    return to_bytes(d)
+
+
+# 目标形态：两页（一大一小），占比 34.2% / 8.6% 量级
+data = _build_r103_sheet_block([(105100, 59400), (52550, 29700)])
+
+
+def _r103_split():
+    """返回 (fc, 尺寸列表)；整组被剔时会抛「未检测到图框」→ 视为 0。"""
+    try:
+        r = parse(data)
+        return (r['frame_count'],
+                sorted((c['width'], c['height']) for c in r['candidates']))
+    except Exception:
+        return (0, [])
+
+
+check('R103拼版图纸块: 块内2页(占比34.2%/8.6%<40%)均带配对内框→整组保留并拆分',
+      _r103_split,
+      lambda t: (t[0] == 2
+                 and (105100, 59400) in t[1] and (52550, 29700) in t[1]))
+
+
+# 对照①：页框没有配对内框（构件轮廓形态）→ 仍受 R89 40% 门槛剔除
+#   注意断言方向：两页被剔后，**块 bbox 自己会成为一个候选**（这是 R89 的既有
+#   行为，不是本次改动引入的）。所以断言"页框尺寸不出现"，而不是 fc==0。
+data = _build_r103_sheet_block([(105100, 59400), (52550, 29700)], with_inner=False)
+
+
+def _r103_no_inner():
+    try:
+        r = parse(data)
+        return sorted((c['width'], c['height']) for c in r['candidates'])
+    except Exception:
+        return []
+
+
+check('R103对照: 页框无配对内框(构件轮廓形态)仍被R89的40%门槛剔除',
+      _r103_no_inner,
+      lambda lst: (105100, 59400) not in lst and (52550, 29700) not in lst)
+
+
+# 对照②：A/B 开关对照 —— 同一张图关掉 R103 应回到旧行为（页框被 R89 剔掉）。
+#   这是本护栏最直接的因果证明：差异只能来自 FRAME_PARSER_NO_SHEET_BLOCK。
+#   注：判据①「maximal 页框数 ≤4」在当前架构下无法端到端独立观测 —— 块内有
+#   ≥5 个互不嵌套页框时，块 bbox 必然被页框并集撑大，R26 会以「无闭合边框
+#   证据（闭合框长边 < 块长边×50%）」直接拒块，从而落入 R40「块内图框救援」
+#   分支（该分支不看页数，逐个提升闭合矩形）。也就是说页数一旦超标，R40 先行
+#   接管，R103 无从参与。故①按防御性判据保留（R40 若调整可兜底），此处不写
+#   假的端到端断言。
+data = _build_r103_sheet_block([(105100, 59400), (52550, 29700)])
+
+
+def _r103_switch_off():
+    import os as _os
+    _os.environ['FRAME_PARSER_NO_SHEET_BLOCK'] = '1'
+    try:
+        r = parse(data)
+        return sorted((c['width'], c['height']) for c in r['candidates'])
+    except Exception:
+        return []
+    finally:
+        _os.environ.pop('FRAME_PARSER_NO_SHEET_BLOCK', None)
+
+
+check('R103开关对照: 关闭 R103(FRAME_PARSER_NO_SHEET_BLOCK=1)后页框回到被剔除状态',
+      _r103_switch_off,
+      lambda lst: (105100, 59400) not in lst and (52550, 29700) not in lst)
+
+
+# 对照③：页框并集不贴合块 bbox（框悬在巨型块中间）→ 超判据③，仍被剔除
+def _build_r103_scattered():
+    """两页带内框，但块内另有一大圈闭合框把 bbox 撑大 → 并集覆盖远 <98%。"""
+    d = make_doc()
+    msp = d.modelspace()
+    blk = d.blocks.new('SHEET_BLK')
+    # 两页（带内框）放在左下角
+    for (px, w, h) in [(0.0, 105100, 59400), (110100.0, 52550, 29700)]:
+        add_closed_rect(blk, px + w * 0.0333 / 2, h * 0.0333 / 2,
+                        w * (1 - 0.0333), h * (1 - 0.0333))
+        add_closed_rect(blk, px, 0.0, w, h)
+    # 一个巨型外圈把块 bbox 撑到 4 倍，使并集覆盖 <98%
+    add_closed_rect(blk, -400000.0, -400000.0, 800000.0, 700000.0)
+    msp.add_blockref('SHEET_BLK', (0, 0))
+    return to_bytes(d)
+
+
+data = _build_r103_scattered()
+
+
+def _r103_scattered():
+    try:
+        r = parse(data)
+        return sorted((c['width'], c['height']) for c in r['candidates'])
+    except Exception:
+        return []
+
+
+check('R103对照: 页框并集不贴合块bbox(悬于巨型块中)不触发拼版兜底',
+      _r103_scattered,
+      lambda lst: (105100, 59400) not in lst and (52550, 29700) not in lst)
+
+
+# ---- 用例 130：R103 真实图端到端 ----
+_R103_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\电子图纸-元素级-测试数据\AC-P02、E01、D03-B (1).dwg',
+    r'C:\Users\hui_ou\Desktop\电子图纸-元素级-测试数据\AC-P02、E01、D03-B.dwg',
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\AC-P02、E01、D03-B.dwg',
+]
+_R103_TARGET = next((p for p in _R103_CANDIDATES if os.path.exists(p)), None)
+if _R103_TARGET:
+    def _r103_e2e():
+        with open(_R103_TARGET, 'rb') as _f:
+            _data = _f.read()
+        return get_bounding_box_from_bytes(
+            _data, 'AC-P02、E01、D03-B.dwg', 'polyline', 'mm', 'smart')
+
+    _r103_res = None
+    try:
+        _r103_res = _r103_e2e()
+    except Exception as _e:
+        print('  R103 端到端解析异常:', str(_e)[:120])
+
+    if _r103_res is not None:
+        check('R103真实图: AC-P02、E01、D03-B 识3框(84100x59400 + 105100x59400 + 52550x29700)',
+              lambda: _r103_res,
+              lambda r: (r['frame_count'] == 3
+                         and sorted((c['width'], c['height'])
+                                    for c in r['candidates'])
+                         == sorted([(84100, 59400), (105100, 59400),
+                                    (52550, 29700)])))
+        # 误报 152100x119931（块 bbox）必须消失
+        check('R103真实图: 块 Ax-S-E01 的 bbox 152100x119931 不再作为图框(误报已损)',
+              lambda: _r103_res,
+              lambda r: not any(abs(c['width'] - 152100) < 200
+                                and abs(c['height'] - 119931) < 200
+                                for c in r['candidates']))
+else:
+    print('SKIP  R103 真实图用例（未找到 AC-P02、E01、D03-B.dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
