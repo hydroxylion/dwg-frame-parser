@@ -4305,4 +4305,148 @@ else:
     print('SKIP  R104 真实图用例（未找到 电.dwg）')
 
 
+# ---- 用例 133：R105 双线画法通道（条件J）----
+# 场景：纸面量级真图框（1051×594 = A1 的 1/4 加长）画在混杂空间里，面积占比被
+# 远距离散件稀释到 <0.1%，条件A（15%）与条件C（10%）都够不着。唯一的结构证据是
+# 「外框 + 按比例内缩的配对内框」的双线画法。
+# A/B 对照：同一构造，唯一变量是那对配对内框在不在。
+def _build_r105_double_line(with_inner):
+    d = make_doc()
+    msp = d.modelspace()
+    add_closed_rect(msp, 0.0, 0.0, 1051.0, 594.0)          # 外框（A1 1/4 加长）
+    if with_inner:
+        add_closed_rect(msp, 17.5, 10.0, 1016.0, 574.0)     # 内框（单边内缩 17.5/10）
+    # 远距离散件把 layout 包围盒撑到 26000×26000 → 图框 area_ratio 仅 0.09%
+    # 注意：必须用纯正交线段，斜线会被「整体倾斜图纸」判定触发全局旋转矫正
+    msp.add_line((20000.0, 20000.0), (26000.0, 20000.0))
+    msp.add_line((20000.0, 20000.0), (20000.0, 26000.0))
+    return to_bytes(d)
+
+
+def _r105_double_line(with_inner):
+    try:
+        r = parse(_build_r105_double_line(with_inner))
+        return sorted((c['width'], c['height']) for c in r['candidates'])
+    except Exception:
+        return []
+
+
+check('R105-A: 外框带按比例内缩的配对内框(双线画法) → 占比极低也认作图框',
+      lambda: _r105_double_line(True),
+      lambda lst: (1051, 594) in lst)
+
+check('R105-B: 同构造去掉配对内框 → 面积占比不足，不认作图框',
+      lambda: _r105_double_line(False),
+      lambda lst: (1051, 594) not in lst)
+
+
+# ---- 用例 134：R105 图框模板阵列剔除 ----
+# 场景：**布局空间**里铺一堆同款空图框（每框都带配对内框、框内无图纸内容）——
+# 这是图框模板库/排版阵列，不是出图页。三条判据（份数≥6 / ≥3 行规则网格 /
+# 框内无图形内容）全满足 → 整组剔除。
+# 注：判据只作用于布局空间——模型空间里排一叠空图框是整本图纸的分页框
+# （春风公寓2 的 1237×842×8 排成 4 行 2 列，要算 8 张），不能被剔。
+def _build_r105_array(rows, cols, in_layout=True):
+    d = make_doc()
+    target = d.layouts.new('R105布局') if in_layout else d.modelspace()
+    for _r in range(rows):
+        for _c in range(cols):
+            _x = _c * 1200.0
+            _y = _r * 900.0
+            add_closed_rect(target, _x, _y, 1051.0, 594.0)
+            add_closed_rect(target, _x + 17.5, _y + 10.0, 1016.0, 574.0)
+    return to_bytes(d)
+
+
+def _r105_array(rows, cols, in_layout=True):
+    try:
+        r = parse(_build_r105_array(rows, cols, in_layout))
+        return sorted((c['width'], c['height']) for c in r['candidates'])
+    except Exception:
+        return []
+
+
+check('R105-C: 布局空间 8行×2列同款空图框阵列 → 判为模板库，全部剔除',
+      lambda: _r105_array(8, 2),
+      lambda lst: (1051, 594) not in lst and (841, 594) not in lst)
+
+check('R105-D: 布局空间 1行×8列同款空图框（横排多页，非模板阵列）→ 不触发阵列剔除',
+      lambda: _r105_array(1, 8),
+      lambda lst: (1051, 594) in lst)
+
+check('R105-E: 模型空间 4行×2列同款空图框（整本图纸的分页框）→ 不触发阵列剔除',
+      lambda: _r105_array(4, 2, in_layout=False),
+      lambda lst: (1051, 594) in lst)
+
+
+# ---- 用例 135：R105 真实图端到端 ----
+_R105_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\A-N02~N05-A.dwg',
+]
+_R105_TARGET = next((p for p in _R105_CANDIDATES if os.path.exists(p)), None)
+if _R105_TARGET:
+    _r105_res = None
+    try:
+        with open(_R105_TARGET, 'rb') as _f:
+            _r105_data = _f.read()
+        _r105_res = get_bounding_box_from_bytes(
+            _r105_data, 'A-N02~N05-A.dwg', 'polyline', 'mm', 'smart')
+    except Exception as _e:
+        print('  R105 端到端解析异常:', str(_e)[:120])
+
+    if _r105_res is not None:
+        check('R105真实图: A-N02~N05-A 识2框(模型空间 1051x594 + 841x594)',
+              lambda: _r105_res,
+              lambda r: (r['frame_count'] == 2
+                         and sorted((c['width'], c['height'])
+                                    for c in r['candidates'])
+                         == [(841, 594), (1051, 594)]
+                         and all(c['layout'] == '模型空间'
+                                 for c in r['candidates'])))
+        check('R105真实图: 布局 11-21楼栋说明 的 24 个模板图框不再计入',
+              lambda: _r105_res,
+              lambda r: not any(c['layout'].startswith('布局')
+                                for c in r['candidates']))
+else:
+    print('SKIP  R105 真实图用例（未找到 A-N02~N05-A.dwg）')
+
+
+# ---- 用例 136：R105 同面积横竖混排时主框取向必须确定 ----
+# 场景：模型空间里横竖混排同一纸幅（594×841 与 841×594，面积数学上完全相等）。
+# 面积是鞋带公式逐顶点累加出来的，顶点起点/顺序不同会差 1 个 ULP
+# （实测 4995540000.000001 vs 4995540000.0），list.sort 稳定排序下这粒浮点
+# 噪声会让某一朝向「严格大于」另一朝向，主框方向完全由上游插入顺序决定 ——
+# 1#,8#住宅0721出图_t5.dwg 就是这样从 59400×84100 抖成 84100×59400 的
+# （fc 与尺寸集合一字未变）。修法：相对容差内归组 → 组内用「高→宽→bbox」全序。
+# A/B 对照：只改「哪种朝向有几份」，主框朝向必须**不随份数变**，恒取长边作高。
+def _build_r105_tie(n_portrait, n_landscape):
+    d = make_doc()
+    msp = d.modelspace()
+    _x = 0.0
+    for _ in range(n_portrait):          # 竖版 594×841
+        add_closed_rect(msp, _x, 0.0, 594.0, 841.0)
+        _x += 700.0
+    for _ in range(n_landscape):         # 横版 841×594（与竖版面积相等）
+        add_closed_rect(msp, _x, 0.0, 841.0, 594.0)
+        _x += 950.0
+    return to_bytes(d)
+
+
+def _r105_tie_best(n_portrait, n_landscape):
+    try:
+        r = parse(_build_r105_tie(n_portrait, n_landscape))
+        return (r['width'], r['height'])
+    except Exception as e:
+        return ('ERR', str(e)[:60])
+
+
+check('R105-F: 同面积横竖混排(竖4份/横1份) → 主框取高≥宽朝向 594x841',
+      lambda: _r105_tie_best(4, 1),
+      lambda wh: wh == (594, 841))
+
+check('R105-G: 同面积横竖混排(竖1份/横4份) → 份数变了主框朝向不跟着变，仍 594x841',
+      lambda: _r105_tie_best(1, 4),
+      lambda wh: wh == (594, 841))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

@@ -233,13 +233,23 @@ def get_polyline_vertices(entity):
     return vertices
 
 def polygon_area(vertices):
+    """多边形面积（鞋带公式）。
+
+    R105：先平移到首顶点再算。鞋带公式是「大数相减」，坐标量级 1e12 时
+    乘积达 1e24，而 double 只有 ~16 位有效数字 → 误差 ~1e8 完全淹没真实面积
+    （A-N02~N05-A.dwg 的布局坐标 3.18e12，所有候选面积被算成同一个魔数
+    536870912 = 2^29，area_ratio 飙到 2068% → 被「area_ratio>1 异常」判据
+    全部剔除，布局 0 候选）。面积对平移不变，减去首顶点后可把坐标压回图元
+    自身尺度，数值精度恢复，结果与原始坐标量级无关。
+    """
     n = len(vertices)
     if n < 3:
         return 0.0
+    ox, oy = vertices[0]
     area = 0.0
     for i in range(n):
-        x1, y1 = vertices[i]
-        x2, y2 = vertices[(i + 1) % n]
+        x1, y1 = vertices[i][0] - ox, vertices[i][1] - oy
+        x2, y2 = vertices[(i + 1) % n][0] - ox, vertices[(i + 1) % n][1] - oy
         area += x1 * y2 - x2 * y1
     return abs(area) / 2.0
 
@@ -3916,9 +3926,12 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         # R27 回归修复：各 layout 被 R27 闭合通道拒绝、但构件证据合格的内容块最大面积，
         # 计回条件C 的 rel 分母（恢复 R26 时代分母状态，防止塌缩后家具级候选涌入）
         _r27_rejected_max_area = {}
+        # R105：各 layout 的总包围盒面积，作为 rel 分母上限（物理护栏，见下方计回处）
+        _layout_total_by_name = {}
 
         msp = doc.modelspace()
         msp_total = calculate_layout_total_bbox(msp, doc)
+        _layout_total_by_name['模型空间'] = msp_total
         _msp_cands, _msp_rej = collect_candidates_from_layout(msp, doc, '模型空间')
         _r27_rejected_max_area['模型空间'] = _msp_rej
         for c in _msp_cands:
@@ -3930,6 +3943,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 continue
             layout_total = calculate_layout_total_bbox(layout, doc)
             _lay_name = f'布局 "{layout.name}"'
+            _layout_total_by_name[_lay_name] = layout_total
             _lay_cands, _lay_rej = collect_candidates_from_layout(layout, doc, _lay_name)
             _r27_rejected_max_area[_lay_name] = _lay_rej
             for c in _lay_cands:
@@ -4557,6 +4571,29 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             # 原本被 10% 门槛压住的家具矩形（rel 1.9~9.7%）全部涌入条件C 并靠互证链
             # 逃生 → fc 0→11。取 max 计回天然自限：只修"塌缩"，无塌缩的图零影响。
             _rej_ma = _r27_rejected_max_area.get(c['layout'], 0)
+            if _rej_ma > 0:
+                # R105：计回面积不得大于该 layout 自身总面积——物理上 rel 分母是
+                #   「layout 里最大的那张图框」，不可能比整个 layout 的包围盒还大。
+                #   反例（A-N02~N05-A.dwg 布局 11-21楼栋说明）：块 Ax-tk-comp-keyplan
+                #   定义里挂着一个远距离小实例（BH1 插入点 (512417,557667)、scale
+                #   0.001），块定义 bbox 被撑成 49565×89774（ezdxf 只认 152×692）→
+                #   R27 拒块时按这个虚 bbox 记账 4.45e9 计回 rel 分母，而 layout
+                #   总面积只有 2.60e7（差 171 倍）→ 真图框 1051×594 的 rel 从 100%
+                #   被稀释到 0.0001，条件C 全灭、条件A 2.40% 也不够 → 布局 0 候选、
+                #   整图 fc=0。
+                #   处置：超限的计回**整条作废**（不是截断）——截到 layout_total 仍有
+                #   41 倍虚高（2.60e7 vs 真图框 6.24e5），真图框还是过不了 10%。
+                #   作废后分母回落到 layout 内最大真实候选，与「块 bbox 本就在 layout
+                #   之外、不可能是页框分母」这一事实一致。正常图纸计回值本就
+                #   < layout_total，零影响。
+                _lt_cap = _layout_total_by_name.get(c['layout'], 0)
+                if _lt_cap > 0 and _rej_ma > _lt_cap:
+                    safe_log(f"  [R105·计回作废] {c['layout']} R27 拒块记账面积 "
+                             f"{_rej_ma:,.0f} 超过 layout 总面积 {_lt_cap:,.0f}"
+                             f"（块 bbox 被远距离散件撑大，超出的量级不可能是页框）"
+                             f"→ 不计回 rel 分母")
+                    _rej_ma = 0
+                    _r27_rejected_max_area[c['layout']] = 0
             # R74：判据④命中（_giant_kicked_layouts）的 layout 已有 TTLB 页面
             #   体系作真分母——R27 拒内容块的计回反而污染分母（本图计回
             #   3.137e9 > TTLB 主导框 2.813e9 → 21000×14850 rel 从 11.1% 被压
@@ -4715,6 +4752,33 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         break
             return _n
 
+        def _has_paired_inner(c):
+            """R105：框内是否存在「按比例内缩的配对内框」（双线画法证据）。
+
+            图框在制图规范里永远是双线：外框（裁切线）+ 内框（图框线），内框相对
+            外框单边内缩 0.5%~10%（实测 A-N02~N05-A.dwg 模型空间：1051→1016 总缩
+            3.33%、841→806 总缩 3.37%；R103 案例 3.30%/3.37%）。内容轮廓/构件外框
+            没有这种"按比例精确内缩"的配对结构。判据用总内缩占边长 1%~20% 表达
+            单边 0.5%~10%，宽高各自独立判定（非等比内缩的双线框也认）。
+            """
+            _x1, _y1, _x2, _y2 = c['bbox']
+            _w = _x2 - _x1
+            _h = _y2 - _y1
+            if _w <= 0 or _h <= 0:
+                return False
+            for _o in all_candidates:
+                if _o is c or _o['layout'] != c['layout']:
+                    continue
+                _ox1, _oy1, _ox2, _oy2 = _o['bbox']
+                # 严格包含（不贴边）
+                if not (_ox1 > _x1 and _oy1 > _y1 and _ox2 < _x2 and _oy2 < _y2):
+                    continue
+                _gw = (_w - (_ox2 - _ox1)) / _w
+                _gh = (_h - (_oy2 - _oy1)) / _h
+                if 0.01 <= _gw <= 0.20 and 0.01 <= _gh <= 0.20:
+                    return True
+            return False
+
         def is_frame_like(c):
             if not (FRAME_RATIO_MIN <= c['ratio'] <= FRAME_RATIO_MAX):
                 return False
@@ -4818,6 +4882,38 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         _near_sqrt2 and
                         c['rel_area_ratio'] >= REL_AREA_THRESHOLD):
                     c['_via'] = 'B'
+                    return True
+            # 条件J（R105）：双线画法 + A 系/加长页面尺寸 —— 纸面量级的真图框在混杂
+            #   空间里面积占比可能极低，但结构证据是制图规范级的。
+            #   场景（A-N02~N05-A.dwg 模型空间）：2 张真图框 1051×594（A1 的 1/4 加长）
+            #   与 841×594（A1），都带按比例内缩的配对内框（1051→1016、841→806，
+            #   内缩总量 3.33%/3.37%），但模型空间里还堆着 73 条 LINE、52 个 INSERT、
+            #   576 个 PROXY 实体，总包围盒 3951×2591 → 1051×594 的 area_ratio
+            #   6.10%、rel 6.10%，条件 A（15%）与条件 C（10%）全灭 → fc=0。
+            #   判据（全部满足，均为结构性证据，不看占比）：
+            #     ① 显式类型（闭合多段线/直线矩形）+ 短边 400~2000mm（纸面量级）
+            #     ② 尺寸规整（图框尺寸几乎总是整数）
+            #     ③ 比例命中 A 系标准（√2±10%）或 √2×加长倍率（±1%）
+            #     ④ **框内有配对内框**（严格包含 + 总内缩占边长 1%~20%，即单边
+            #        0.5%~10%）——双线画法是图框的制图规范：外框=裁切线、内框=图框线，
+            #        内容轮廓/构件外框不会有"按比例精确内缩"的配对框（R103 已验证）。
+            #   风险面：任意带内框的 A 系矩形都会被收 → 由 ②③④ 三重约束收窄；且
+            #   「图框模板阵列剔除」（见 frame_like 之后）会清掉成网格排布的空模板。
+            if c['type'] in EXPLICIT_TYPES and MIN_FRAME_SHORT_SIDE <= c['short_side'] <= MAX_FRAME_SHORT_SIDE:
+                # 短边必须是 A 系纸幅的整数倍（594/420/297/210/148/105 × n，±1mm）：
+                #   纸面量级的图框尺寸必然是"纸"，而家具/设备/装饰框的短边几乎不会
+                #   落在 A 系上（回归实测：800×1200、1500×2000、1530×2180、3900×2720、
+                #   570×830、3640×1600、600×400 全部不是 A 系倍数）。这一条把条件J
+                #   从"任何带内框的整数矩形"收窄到"纸幅"。
+                _as_side = any(abs(c['short_side'] - _a * _n) <= 1.0
+                               for _a in A_SERIES_SHORT_SIDES
+                               for _n in range(1, 7))
+                if (_as_side and
+                        abs(c['width'] - round(c['width'])) <= SIZE_ROUNDNESS_EPS and
+                        abs(c['height'] - round(c['height'])) <= SIZE_ROUNDNESS_EPS and
+                        (_near_sqrt2 or is_mult_ratio(c['ratio'])) and
+                        _has_paired_inner(c)):
+                    c['_via'] = 'J'
                     return True
             # 条件D：同尺寸重复的 √2 直线矩形（套图小页框，绕过条件C 的 10% rel 门槛）
             #   直线矩形 + 长宽比接近 √2 + 同 layout 同尺寸 ≥2 份 + 相对面积 ≥1%
@@ -4985,6 +5081,125 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
 
         frame_like = [c for c in all_candidates if is_frame_like(c)]
 
+        # ---------- 「图框模板阵列」剔除（R105） ----------
+        # 场景（A-N02~N05-A.dwg 布局 11-21楼栋说明）：一个布局里铺了 8 行 × 3 列
+        #   共 24 个同款图框（每行 1051×594 + 841×594 + 841×594，每个都带标题栏块
+        #   与 1 个视口，且 24 个视口全部指向模型空间同一区域），框内除零星几条线
+        #   外没有任何图纸内容 —— 这是**图框模板库/排版阵列**，不是 24 张出图页。
+        #   用户口径：这种布局算 0 个图框。
+        # 判据（三条全满足，都是结构性的，与面积占比无关）：
+        #   ① 同 layout 同尺寸（±2mm）候选 ≥6 份；
+        #   ② 中心点构成 ≥3 行 × ≥2 列 且行/列间距均匀（相邻间距 max/min ≤1.10）
+        #      的规则网格 —— 真·多页出图通常排成 1~2 行（附图03-柱状图 12 个 420×297
+        #      全在同一 y 上、紧密相贴），模板库才会成 8 行 3 列；
+        #   ③ 每份框内**几乎没有独立图形内容**（严格内部包含的图形实体 <5；统计时
+        #      排除框线/内框多段线、标题栏块 INSERT、VIEWPORT、文字标注）—— 附图03
+        #      每框内是柱状图（实体远多于 5），本图每框 0~3 条线。
+        #   三条缺一不可：①防单例、②防「多页真出图」、③防「阵列排布的真页框」。
+        _ARRAY_MIN_COUNT = 6        # 同尺寸份数下限
+        _ARRAY_MIN_ROWS = 3         # 规则网格行数下限
+        _ARRAY_MIN_COLS = 1         # 列数下限（单列竖排也算阵列：本图 1051×594 就是 8 行 1 列）
+        _ARRAY_MAX_GRAPHICS = 5     # 框内独立图形实体数上限（超过即视为真有内容）
+        _ARRAY_CLUSTER_TOL = 2.0    # 行/列聚类容差（mm）
+
+        def _frame_inner_graphics(_c):
+            """框内「独立图形实体」数量（排除框线/内框/标题栏块/视口/文字）。"""
+            _ln = _c['layout']
+            if _ln not in _array_ent_cache:
+                if _ln == '模型空间':
+                    _lay = msp
+                else:
+                    try:
+                        _lay = doc.layouts.get(_ln[3:-1] if _ln.startswith('布局 "') else _ln)
+                    except Exception:
+                        _lay = None
+                _items = []
+                if _lay is not None:
+                    for _ent in _lay:
+                        _t = _ent.dxftype()
+                        if _t in ('LWPOLYLINE', 'POLYLINE', 'INSERT', 'VIEWPORT',
+                                  'TEXT', 'MTEXT', 'ATTDEF', 'ATTRIB'):
+                            continue   # 框线/内框/标题块/视口/文字都不算图纸内容
+                        if _t not in ('LINE', 'ARC', 'CIRCLE', 'ELLIPSE', 'SPLINE',
+                                      'HATCH', 'SOLID', 'DIMENSION', 'LEADER',
+                                      'MLEADER', 'IMAGE', 'ACAD_PROXY_ENTITY'):
+                            continue
+                        try:
+                            if _t == 'LINE':
+                                _bb = (min(_ent.dxf.start.x, _ent.dxf.end.x),
+                                       min(_ent.dxf.start.y, _ent.dxf.end.y),
+                                       max(_ent.dxf.start.x, _ent.dxf.end.x),
+                                       max(_ent.dxf.start.y, _ent.dxf.end.y))
+                            else:
+                                _bb4 = get_entity_bbox(_ent, doc)
+                                if _bb4 is None:
+                                    continue
+                                _bb = tuple(_bb4[:4])
+                        except Exception:
+                            continue
+                        _items.append(_bb)
+                _array_ent_cache[_ln] = _items
+            _x1, _y1, _x2, _y2 = _c['bbox']
+            _n = 0
+            for _bx1, _by1, _bx2, _by2 in _array_ent_cache[_ln]:
+                if (_bx1 >= _x1 + 1.0 and _by1 >= _y1 + 1.0 and
+                        _bx2 <= _x2 - 1.0 and _by2 <= _y2 - 1.0):
+                    _n += 1
+                    if _n >= _ARRAY_MAX_GRAPHICS:
+                        return _n
+            return _n
+
+        _array_ent_cache = {}
+        _array_groups = {}
+        for _c in frame_like:
+            _gk = (_c['layout'], round(_c['width']), round(_c['height']))
+            _array_groups.setdefault(_gk, []).append(_c)
+
+        _array_drop = set()
+        for (_gk_ln, _gk_w, _gk_h), _grp in _array_groups.items():
+            # 只作用于**布局空间**：布局里排一叠同款空图框是「图框模板库/排版样板」
+            # （本图 8 行 × 3 列 24 份）；而模型空间里排一叠空图框通常是整本图纸的
+            # 分页框（春风公寓2：1237×842 ×8 排成 4 行 2 列，用户口径要算 8 张）。
+            if _gk_ln == '模型空间':
+                continue
+            if len(_grp) < _ARRAY_MIN_COUNT:
+                continue
+
+            def _cluster_1d(_vals):
+                _vs = sorted(_vals)
+                _cl = [[_vs[0]]]
+                for _v in _vs[1:]:
+                    if _v - _cl[-1][-1] <= _ARRAY_CLUSTER_TOL:
+                        _cl[-1].append(_v)
+                    else:
+                        _cl.append([_v])
+                return [sum(_x) / len(_x) for _x in _cl]
+
+            def _spacing_uniform(_vals):
+                if len(_vals) < 2:
+                    return True
+                _d = [_vals[_i + 1] - _vals[_i] for _i in range(len(_vals) - 1)]
+                _d = [_x for _x in _d if _x > 0]
+                if not _d:
+                    return True
+                return max(_d) / min(_d) <= 1.10
+
+            _cxs = _cluster_1d([(_c['bbox'][0] + _c['bbox'][2]) / 2 for _c in _grp])
+            _cys = _cluster_1d([(_c['bbox'][1] + _c['bbox'][3]) / 2 for _c in _grp])
+            if len(_cys) < _ARRAY_MIN_ROWS or len(_cxs) < _ARRAY_MIN_COLS:
+                continue
+            if not (_spacing_uniform(_cys) and _spacing_uniform(_cxs)):
+                continue
+            if any(_frame_inner_graphics(_c) >= _ARRAY_MAX_GRAPHICS for _c in _grp):
+                continue
+            safe_log(f"  [R105·图框模板阵列] {_gk_ln} {_gk_w}×{_gk_h} 共 {len(_grp)} 份，"
+                     f"排成 {len(_cys)} 行 × {len(_cxs)} 列 规则网格且框内无图纸内容"
+                     f"（<{_ARRAY_MAX_GRAPHICS} 个图形实体）→ 判为图框模板库，整组剔除")
+            for _c in _grp:
+                _array_drop.add(id(_c))
+        if _array_drop:
+            frame_like = [c for c in frame_like if id(c) not in _array_drop]
+
 
         pass_feature_count = len(frame_like)
 
@@ -5126,6 +5341,18 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     if not _drs:
                         continue
                     if not any(abs(c['ratio'] - _r) / _r <= COND_H_RATIO_TOL for _r in _drs):
+                        continue
+                    # R105：救援候选的尺寸量级必须自洽——
+                    #   短边 <20000（纸面/详图量级）时，比例必须在页面形状上限内
+                    #   （ratio ≤2.15，与条件C 闭合多段线上限同口径）。否则就是把
+                    #   细长的内容框救进来：g001、g003~g017.dwg 基线 32 框（全是
+                    #   42000~89100 的 1:100 图幅），条件J 新增候选改变了"主导比例"
+                    #   统计后，H 把 3640×1600 内容框（ratio 2.275、框内实体多）补了
+                    #   进来 → fc 32→33。
+                    #   不用"A 系倍数"判：春风公寓2 的 10735×7432（ratio 1.446，真
+                    #   页框，短边 7432 不是 A 系倍数）会被误挡 → fc 21→20。
+                    _h_ss = min(c['width'], c['height'])
+                    if _h_ss < 20000 and c['ratio'] > _CLOSED_POLY_C_RATIO_MAX:
                         continue
                     _h_cands.append(c)
                 if _h_cands:
@@ -7430,7 +7657,43 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             else:
                 c['weighted_area'] = c['area']
 
+        # R105：主框选取必须**确定**，且不能被浮点毛刺左右。
+        #   ① 平局极常见：同一张纸上横竖混排的标准纸幅面积数学上完全相等
+        #      （59400×84100 与 84100×59400 都是 4,995,540,000）。但 area 是鞋带
+        #      公式逐顶点累加出来的，顶点起点/顺序不同 → 末位差 1 个 ULP
+        #      （实测 4995540000.000001 vs 4995540000.0，相对误差 2e-16）。
+        #      list.sort 稳定排序下，这粒噪声让横版"严格大于"竖版，平局判定失效，
+        #      主框方向完全由上游 frame_like 的插入顺序决定——R105 只改了几处
+        #      append 顺序，1#,8#住宅0721出图_t5.dwg 的 best 就从 59400×84100
+        #      翻成 84100×59400（fc 与尺寸集合一字未变，纯排序抖动）。这类抖动
+        #      会让回归假红，也让用户看到的图纸尺寸随版本漂移。
+        #   ② 修法：先按 weighted_area 降序稳定排序，再把**相对容差内相等**的
+        #      连续项视为同一面积组（1e-9 相对容差 ≈ 4.5 个 ULP，只吸收求和顺序
+        #      噪声，不会把真正的面积差抹平），组内改用与输入顺序无关的全序键：
+        #      高 → 宽 → bbox（降序）。面积相同时"高更大的"就是长边作高那一份，
+        #      等价于把混排的 A 系纸幅规范成「高 ≥ 宽」的竖版口径再比 —— 尺寸
+        #      展示口径统一，且与历史基线一致（1#,8#住宅0721出图_t5 59400×84100、
+        #      P_10#给排水平面图 59400×84100、总平面1116_t3 841×1189 都是高＞宽）。
+        #      注意**不能**改用「同尺寸份数多的朝向优先」：份数在混排里没有语义
+        #      上的优先权（总平面1116_t3 横版 3 份 vs 竖版 1 份，主流朝向反而是
+        #      错的），且份数打平时还得退回宽度兜底，等于换个地方继续抖。
+        _EPS_REL = 1e-9
         valid_candidates.sort(key=lambda c: c['weighted_area'], reverse=True)
+        _ordered = []
+        _i = 0
+        while _i < len(valid_candidates):
+            _head_wa = valid_candidates[_i]['weighted_area']
+            _tol = abs(_head_wa) * _EPS_REL
+            _grp = [valid_candidates[_i]]
+            _j = _i + 1
+            while (_j < len(valid_candidates)
+                   and _head_wa - valid_candidates[_j]['weighted_area'] <= _tol):
+                _grp.append(valid_candidates[_j])
+                _j += 1
+            _grp.sort(key=lambda c: (c['height'], c['width'], c['bbox']), reverse=True)
+            _ordered.extend(_grp)
+            _i = _j
+        valid_candidates[:] = _ordered
 
         safe_log("========== 检测结果 ==========")
         safe_log(f"全部候选: {len(all_candidates)} | 通过特征: {pass_feature_count} | 去包裹框: {wrap_stripped_count} | 去重后: {dedup_count} | 上限后: {len(frame_like)}")
