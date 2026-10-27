@@ -1645,6 +1645,44 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     for layer in doc.layers:
         if not layer.is_on() or layer.is_frozen():
             invisible_layers.add(layer.dxf.name)
+    # R104：图层「不打印」(DXF 组码 290 = 0) —— 这类层上的闭合矩形不作为图框候选。
+    #
+    #   问题图（电.dwg）：模型空间顶层有 8 个 84100×59400 真图框（TEL_TITLE 层，
+    #   plot=1），但另有 4 个块 Ax-S-P01&P02 被插在页框位置上，块内 Defpoints 层
+    #   自带一份**同尺寸双线框图**（外框 84100 + 内框 80600 + 标题栏 7000）；其中
+    #   3 个块与真页框精确重合被去重合并，第 4 个块插入点被手动上移 16468 →
+    #   块内副本与真页框错开 → 多算 1 个 84100×59400。
+    #   同时块内嵌套子块 Ax-S-comp-wall-01&02 还在 Defpoints 层带一套
+    #   **A3 缩印版**双线框图（42050×29700 + 内框 40300×28700 + 标题栏 3500，
+    #   恰好是 A0 组的精确 1/2），4 个块实例各 1 套 → R40 块内图框救援全部提升
+    #   → 再多 4 个 42050×29700。用户口径：模型空间只有 8 个，均为 84100×59400。
+    #
+    #   为何不能用「半尺寸副本」判据：P_10#给排水平面图.dwg 同一个块里同时有
+    #   3 套 84100×59400 和 3 套 42050×29700（后者的内框 40300×28700 也跟 A0 组
+    #   完全同构，同样是精确 1/2），但那些 A3 在 A-ANNO-TTLB 层 plot=1，是**真
+    #   页框**，且是用户确认过的基线（fc=14）→ 按尺寸倍率判会直接误伤。
+    #
+    #   真正分开两者的是「能不能打印」：Defpoints 是 AutoCAD 的定义点层，
+    #   默认不打印，制图规范里不可能把交付图框画在上面；A-ANNO-TTLB / X-Tlbk /
+    #   TEL_TITLE 都是 plot=1。
+    #   注意层名 '0'（随块插入层）不纳入 —— 其实际打印属性由插入层决定，
+    #   按 '0' 层自身 flag 判会误伤。
+    _noplot_layers = set()
+    for layer in doc.layers:
+        try:
+            _ln = layer.dxf.name
+            if _ln == '0':
+                continue
+            # 只认「显式」写了组码 290=0 的层。ezdxf 的 Layer 对缺失的 290 会
+            # 补成 0（实测：ezdxf 自己写出的 DXF，plot=1 的层因等于默认值被
+            # 省略 290，读回 hasattr('plot')=True 且值为 0）——若按 getattr 默认
+            # 值判断，所有未写 290 的普通图层都会被当成"不可打印"，图框全灭。
+            # 真实 DWG 转出的 DXF 里，普通层（TEL_TITLE/A-ANNO-TTLB/X-Tlbk）
+            # hasattr('plot')=False，只有 Defpoints 显式写了 290=0。
+            if layer.dxf.hasattr('plot') and not int(layer.dxf.get('plot', 1)):
+                _noplot_layers.add(_ln)
+        except Exception:
+            continue
     all_entities = list(layout)
     layer_filtered = [e for e in all_entities if e.dxf.layer not in invisible_layers]
     visible_entities = [e for e in layer_filtered if getattr(e.dxf, 'invisible', 0) != 1]
@@ -2221,6 +2259,8 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         for _e2 in _blk:
             try:
                 if _e2.dxftype() != 'LWPOLYLINE':
+                    continue
+                if _e2.dxf.layer in _noplot_layers:   # R104：不打印层不出图框
                     continue
                 if not is_polyline_closed(_e2):
                     continue
@@ -3065,6 +3105,8 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                                          round(getattr(_ent_in.dxf, 'rotation', 0), 3)))
                                     continue
                                 if _ent_in.dxftype() != 'LWPOLYLINE':
+                                    continue
+                                if _ent_in.dxf.layer in _noplot_layers:   # R104
                                     continue
                                 if not is_polyline_closed(_ent_in):
                                     continue

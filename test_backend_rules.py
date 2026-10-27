@@ -24,10 +24,11 @@ def make_doc():
     return ezdxf.new('R2010', setup=False)
 
 
-def add_closed_rect(layout, x, y, w, h):
+def add_closed_rect(layout, x, y, w, h, layer=None):
+    _attr = {'layer': layer} if layer else None
     layout.add_lwpolyline(
         [(x, y), (x + w, y), (x + w, y + h), (x, y + h)],
-        close=True,
+        close=True, dxfattribs=_attr,
     )
 
 
@@ -4229,6 +4230,79 @@ if _R103_TARGET:
                                 for c in r['candidates']))
 else:
     print('SKIP  R103 真实图用例（未找到 AC-P02、E01、D03-B.dwg）')
+
+
+# ---- 用例 131：R104 不打印（plot=0）图层不作图框候选 ----
+# 场景：块内藏一叠同尺寸双线副本（内框 40300×28700 + 外框 42050×29700），
+# 被 R40「块内图框救援」当成拼版页框提升。真实图（电.dwg）里这些副本画在
+# Defpoints 层（显式 290=0，永不打印）；而交付图框一定画在可打印层上。
+# A/B 对照：同一份构造，唯一变量是那些副本所在图层的 plot 属性。
+_R104_LAYER = 'TEST_FRAME_LAYER'
+
+
+def _build_r104(plot_flag):
+    d = make_doc()
+    d.layers.add(_R104_LAYER)
+    # plot_flag=1 时等于 DXF 默认值，ezdxf 写出会省略 290（等同普通可打印层）
+    d.layers.get(_R104_LAYER).dxf.plot = plot_flag
+    msp = d.modelspace()
+    # 顶层真页框：A0 横，画在默认 '0' 层（可打印）
+    add_closed_rect(msp, 0.0, 0.0, 84100.0, 59400.0)
+    # 块内两份同尺寸 A3 双线副本，放在被测图层
+    blk = d.blocks.new('COPY_BLK')
+    for dx in (0.0, 50000.0):
+        add_closed_rect(blk, dx + 500.0, 500.0, 40300.0, 28700.0, _R104_LAYER)
+        add_closed_rect(blk, dx, 0.0, 42050.0, 29700.0, _R104_LAYER)
+    msp.add_blockref('COPY_BLK', (0.0, 80000.0))
+    return to_bytes(d)
+
+
+def _r104_run(plot_flag):
+    try:
+        r = parse(_build_r104(plot_flag))
+        return sorted((c['width'], c['height']) for c in r['candidates'])
+    except Exception:
+        return []
+
+
+check('R104-A: 块内副本在不可打印层(plot=0) → 不救援，仅识顶层 1 个 A0',
+      lambda: _r104_run(0),
+      lambda lst: lst == [(84100, 59400)])
+
+check('R104-B: 同构造改为可打印层(plot=1) → 副本被救援，共 3 个候选',
+      lambda: _r104_run(1),
+      lambda lst: lst == sorted([(42050, 29700), (42050, 29700), (84100, 59400)]))
+
+
+# ---- 用例 132：R104 真实图端到端 ----
+_R104_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\电.dwg',
+]
+_R104_TARGET = next((p for p in _R104_CANDIDATES if os.path.exists(p)), None)
+if _R104_TARGET:
+    _r104_res = None
+    try:
+        with open(_R104_TARGET, 'rb') as _f:
+            _r104_data = _f.read()
+        _r104_res = get_bounding_box_from_bytes(
+            _r104_data, '电.dwg', 'polyline', 'mm', 'smart')
+    except Exception as _e:
+        print('  R104 端到端解析异常:', str(_e)[:120])
+
+    if _r104_res is not None:
+        check('R104真实图: 电.dwg 识8框(均84100x59400, 模型空间)',
+              lambda: _r104_res,
+              lambda r: (r['frame_count'] == 8
+                         and all(abs(c['width'] - 84100) < 200
+                                 and abs(c['height'] - 59400) < 200
+                                 for c in r['candidates'])))
+        check('R104真实图: 块内 Defpoints 层 42050x29700 半幅副本不再误报',
+              lambda: _r104_res,
+              lambda r: not any(abs(c['width'] - 42050) < 200
+                                and abs(c['height'] - 29700) < 200
+                                for c in r['candidates']))
+else:
+    print('SKIP  R104 真实图用例（未找到 电.dwg）')
 
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
