@@ -4449,4 +4449,80 @@ check('R105-G: 同面积横竖混排(竖1份/横4份) → 份数变了主框朝�
       lambda wh: wh == (594, 841))
 
 
+# ---- 用例 137：R106 块内闭合框画在不打印层 → 不算「图框块」证据 ----
+# 场景：内容块（平面图 + 图外标注）的 bbox 恰好是「图框级尺寸」且长宽比落在图框
+# 区间内，块内唯一的闭合矩形边框却画在不可打印层（Defpoints 这类显式 290=0 层，
+# 永不打印）。R104 已定「不打印层不出图框」，但 R27/R36 的**证据**计算此前没遵守
+# 同口径 → 该闭合框仍被当成「这是图框块」的证明，块 bbox 被收纳为第二个图框。
+# 真实图 AC-M01-A.dwg：真页框只有顶层 1 个 42050×29700，块 Ax-1112-M01 的
+# 36800×28700 闭合框画在 Defpoints，块 bbox 被两个 A-Anno-Note 子块撑成 65346×49151
+# → 误报 fc=2。
+# A/B 对照：同一份构造，唯一变量是那条闭合框所在图层的 plot 属性。
+_R106_LAYER = 'R106_EVIDENCE'
+
+
+def _build_r106(evidence_plot):
+    d = make_doc()
+    d.layers.add(_R106_LAYER)
+    # plot=1 等于 DXF 默认值，ezdxf 写出会省略 290（等同普通可打印层）
+    d.layers.get(_R106_LAYER).dxf.plot = evidence_plot
+    msp = d.modelspace()
+    add_closed_rect(msp, 0.0, 0.0, 42050.0, 29700.0)          # 顶层真页框（A3×100）
+    blk = d.blocks.new('R106_CONTENT')
+    add_closed_rect(blk, 0.0, 0.0, 36800.0, 28700.0, _R106_LAYER)   # 块内唯一闭合框
+    # 两条正交散件把块 bbox 撑成 65000×49000（图框级尺寸 + 图框区间内的长宽比），
+    # 模拟"块 bbox 被图框之外的标注撑大"。必须正交——斜线会触发整体倾斜矫正。
+    blk.add_line((0.0, 0.0), (65000.0, 0.0))
+    blk.add_line((0.0, 0.0), (0.0, 49000.0))
+    msp.add_blockref('R106_CONTENT', (50000.0, 0.0))
+    return to_bytes(d)
+
+
+def _r106_run(evidence_plot):
+    try:
+        r = parse(_build_r106(evidence_plot))
+        return sorted((c['width'], c['height']) for c in r['candidates'])
+    except Exception:
+        return []
+
+
+check('R106-A: 块内闭合框在不可打印层(plot=0) → 不算图框块，仅识顶层 1 个 A3',
+      lambda: _r106_run(0),
+      lambda lst: lst == [(42050, 29700)])
+
+check('R106-B: 同构造改为可打印层(plot=1) → 块 bbox 依原逻辑作为候选，共 2 个',
+      lambda: _r106_run(1),
+      lambda lst: lst == sorted([(42050, 29700), (65000, 49000)]))
+
+
+# ---- 用例 138：R106 真实图端到端 ----
+_R106_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\AC-M01-A.dwg',
+]
+_R106_TARGET = next((p for p in _R106_CANDIDATES if os.path.exists(p)), None)
+if _R106_TARGET:
+    _r106_res = None
+    try:
+        with open(_R106_TARGET, 'rb') as _f:
+            _r106_data = _f.read()
+        _r106_res = get_bounding_box_from_bytes(
+            _r106_data, 'AC-M01-A.dwg', 'polyline', 'mm', 'smart')
+    except Exception as _e:
+        print('  R106 端到端解析异常:', str(_e)[:120])
+
+    if _r106_res is not None:
+        check('R106真实图: AC-M01-A 识1框(模型空间 42050x29700)',
+              lambda: _r106_res,
+              lambda r: (r['frame_count'] == 1
+                         and [(c['width'], c['height']) for c in r['candidates']]
+                         == [(42050, 29700)]
+                         and all(c['layout'] == '模型空间'
+                                 for c in r['candidates'])))
+        check('R106真实图: 内容块 Ax-1112-M01 的 65346x49151 不再计为图框',
+              lambda: _r106_res,
+              lambda r: not any(c['width'] > 60000 for c in r['candidates']))
+else:
+    print('SKIP  R106 真实图用例（未找到 AC-M01-A.dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

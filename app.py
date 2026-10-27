@@ -1991,6 +1991,28 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             return 0.0
         _visited.add(_name)
         _ev = 0.0
+        # R106：不打印图层（显式 290=0，典型如 Defpoints）内的图元不算「图框边框
+        #   证据」——与 R104「不打印层不出图框」同一口径。此前的一致性缺口让
+        #   AC-M01-A.dwg 的内容块 Ax-1112-M01 蒙混过关：它唯一的闭合矩形边框
+        #   （36800×28700）画在 Defpoints，候选收集链路已按 R104 排除，但 R27/R36
+        #   的**证据**计算仍把它算进来 → 闭合证据 36800 ≥ 块长边 64550×50% → 判为
+        #   「图框块」入库，块 bbox（被两个 A-Anno-Note 子块撑成 65346×49151）被当成
+        #   第二个图框 → fc=2（真框只有顶层 1 个）。
+        #   **但不能一刀切**：CAXA/电子图板导出的机械图（非圆减速器装配.dwg）整张图
+        #   都落在 EbLayer1..7 这类 plot=0 层上，图框（2378×1682 的 4 条 LINE）也是
+        #   —— 那里"不打印"是全图属性，不构成"这框是参考层垃圾"的证据，过滤掉会
+        #   把唯一的真图框删掉（fc 1 → 报"未检测到图框"）。
+        #   故只在**块内确实存在可打印图元**时才启用过滤：此时"不打印层"才具备区分
+        #   意义（同一块里既有可打印内容、又有参考层边框，后者不可能是出图图框）。
+        _blk_has_plot = False
+        try:
+            for _e0 in doc.blocks[_name]:
+                if _e0.dxf.layer != '0' and _e0.dxf.layer in _noplot_layers:
+                    continue
+                _blk_has_plot = True
+                break
+        except Exception:
+            _blk_has_plot = True
         _tol_p = max(1.0, _bb_len * 0.002)      # 平行线/端点重合容差
         _min_seg = _bb_len * 0.30               # 参与成框的边线最短长度
         _h_lines = []                           # (y, x1, x2) 近似水平线
@@ -1998,6 +2020,11 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         for _ent in doc.blocks[_name]:
             try:
                 _t = _ent.dxftype()
+                # R106：仅在「块内另有可打印图元」时才把参考层图元排除出证据（见上）。
+                #   '0' 层不跳过：块内 '0' 层图元的打印属性随插入层，按自身 flag 判会误伤。
+                if (_blk_has_plot and _ent.dxf.layer != '0'
+                        and _ent.dxf.layer in _noplot_layers):
+                    continue
                 if _t == 'LINE':
                     _s, _e = _ent.dxf.start, _ent.dxf.end
                     _dx, _dy = _e.x - _s.x, _e.y - _s.y
