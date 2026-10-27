@@ -29,5 +29,11 @@ tmp_*.py
 # 测试产出的临时 Excel
 tmp_*.xlsx
 
+# 诊断渲染截图（Viz 调试时 dump 的 PNG，命名沿用 tmp_ 前缀）
+tmp_*.png
+# 早期几轮没走 tmp_ 前缀的渲染截图
+r25v2_*.png
+r27_pj_*.png
+
 # R78b DXF 转换缓存（可随时整个删除，按 DWG mtime+size 自动重建）
 regress_dxf_cache/
