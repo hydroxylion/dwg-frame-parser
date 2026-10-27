@@ -17,7 +17,7 @@ import ezdxf
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from app import get_bounding_box_from_bytes
+from app import get_bounding_box_from_bytes, is_paper_short_side
 
 
 def make_doc():
@@ -4523,6 +4523,111 @@ if _R106_TARGET:
               lambda r: not any(c['width'] > 60000 for c in r['candidates']))
 else:
     print('SKIP  R106 真实图用例（未找到 AC-M01-A.dwg）')
+
+
+# ---- 用例 139：R107 条件J2「最大候选 × 纸幅 × 标准出图比例」（原现场识 0 实际 3） ----
+# 现场（AC-S01-A.dwg 模型空间）：3 张并排真图框 89100×157650（= 1:150 的 A1 加长
+# 594×1051，89100 = 594×150），图层 X-Tlbk，各带 86100×152400 内框
+# （单边内缩 3.37%/3.33%）。它们就是该空间**面积最大的候选**，本该是最没有争议
+# 的一页，却因为图里塞着比一页大 20 多倍的内容块（Ax-B1-P01-300 = 3.48e11），把
+# rel 稀释到 4.03%、area_ratio 压到 1.43%：
+#   · 条件C：rel 4.03% < 10%       → 灭
+#   · 条件A：area_ratio 1.43% < 15%（模型空间总包围盒被 A-Grid 149 条超大轴线
+#            撑到 1061262×927191）  → 灭
+#   · 条件B/J：短边上限 2000，89100 → 灭
+# 修法：条件J 之外单开一支 J2，放宽短边上限、改用「A 系短边 × 标准出图比例」，
+# 但**只认本 layout 面积最大的候选**。为什么必须限定最大候选：
+#   20130729地下室 里的 23780×16820（A0@1:20）与 21000×14850（A3@1:50）是标题栏框，
+#   纸幅、双线内缩（2.94%/2.38%）、图层（A-ANNO-TTLB）全与真页框同构，几何上无法
+#   区分 —— 但那张图的最大候选是 1611187×408405（总包络），它们都不是最大候选。
+# 下面这个构造同时复现「最大候选」与「rel 被巨型内容块稀释」两个条件。
+def _build_r107_denom(scale_side=89100.0):
+    """3 张双线图框 + 一个巨型内容块（逼 R27 计回污染 rel 分母）。
+
+    scale_side 默认 89100（A1 的 1:150，纸幅级）；传 87000 则短边不再是任何
+    「A 系纸幅 × 标准出图比例」→ J2 不成立，复现旧行为。
+    """
+    d = make_doc()
+    msp = d.modelspace()
+    W = float(scale_side)
+    H = round(W * 1051.0 / 594.0)       # 按 A1 加长（594×1051）的纸幅比例推长边
+    IX, IY = round(W * 0.03367), round(H * 0.03333)
+    for _k in range(3):
+        _x = _k * W
+        add_closed_rect(msp, _x, 0.0, W, H)
+        add_closed_rect(msp, _x + IX, IY, W - 2 * IX, H - 2 * IY)
+    # 巨型内容块：只有两条交叉轴线、没有闭合边框 → R27 判为内容块并拒绝入库，
+    # 但会把它的 bbox 面积计回 rel 分母（R27 回归修复的副作用）。bbox 460000×743000
+    # = 3.42e11，是图框的 24 倍，正是 AC-S01-A 现场 Ax-B1-P01-300 的比例关系。
+    blk = d.blocks.new('R107BIG')
+    blk.add_line((0.0, 0.0), (460000.0, 0.0))
+    blk.add_line((0.0, 0.0), (0.0, 743000.0))
+    msp.add_blockref('R107BIG', (0.0, 0.0))
+    return to_bytes(d)
+
+
+def _r107_denom(short):
+    try:
+        r = parse(_build_r107_denom(short))
+        return sorted((c['width'], c['height']) for c in r['candidates'])
+    except Exception:
+        return []
+
+
+check('R107-A: 最大候选 + 短边 89100(A1×1:150) + 双线内框 → J2 认出 3 张，占比重重不足也行',
+      lambda: _r107_denom(89100),
+      lambda lst: lst.count((89100, 157650)) == 3)
+
+check('R107-B: 同一构造把短边换成 87000（不是任何「A 系 × 标准比例」） → J2 不成立，认不出',
+      lambda: _r107_denom(87000),
+      lambda lst: (87000, 153934) not in lst and not lst)
+
+
+# ---- 用例 140：is_paper_short_side 口径边界（纯算术，不走 CAD 构造） ----
+# 注意这个函数只回答"这个短边像不像 A 系纸幅"，**不**回答"这个候选是不是图框"：
+# 20130729地下室 里的标题栏框 21000×14850 就是精确的 A3@1:50，同样返回 True。
+# 所以它只能用在"分母已经是页面参照物"这种语境里，不能拿来做图框判据。
+check('R107-C: 89100 = A1 短边 594×1:150（纸幅）；86100 = 内框尺寸（非纸幅）',
+      lambda: (is_paper_short_side(89100), is_paper_short_side(86100)),
+      lambda t: t == (True, False))
+
+check('R107-D: R105 那轮误收的 7 个假框短边，在标准比例口径下仍全部不是纸',
+      lambda: [is_paper_short_side(s) for s in (800, 1500, 1530, 3900, 570, 3640, 600)],
+      lambda lst: not any(lst))
+
+check('R107-E: 定位边界——精确的 A3@1:50 (14850) 也算「像纸」，它不是图框闸门',
+      lambda: (is_paper_short_side(14850), is_paper_short_side(16820)),
+      lambda t: t == (True, True))
+
+
+# ---- 用例 141：R107 真实图端到端 ----
+_R107_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\AC-S01-A.dwg',
+]
+_R107_TARGET = next((p for p in _R107_CANDIDATES if os.path.exists(p)), None)
+if _R107_TARGET:
+    _r107_res = None
+    try:
+        with open(_R107_TARGET, 'rb') as _f:
+            _r107_data = _f.read()
+        _r107_res = get_bounding_box_from_bytes(
+            _r107_data, 'AC-S01-A.dwg', 'polyline', 'mm', 'smart')
+    except Exception as _e:
+        print('  R107 端到端解析异常:', str(_e)[:120])
+
+    if _r107_res is not None:
+        check('R107真实图: AC-S01-A 识3框(模型空间 89100x157650 x3)',
+              lambda: _r107_res,
+              lambda r: (r['frame_count'] == 3
+                         and [(c['width'], c['height']) for c in r['candidates']]
+                         == [(89100, 157650)] * 3
+                         and all(c['layout'] == '模型空间'
+                                 for c in r['candidates'])))
+        check('R107真实图: 内框 86100x152400 不被当成独立图框',
+              lambda: _r107_res,
+              lambda r: not any(c['width'] == 86100 for c in r['candidates']))
+else:
+    print('SKIP  R107 真实图用例（未找到 AC-S01-A.dwg）')
 
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

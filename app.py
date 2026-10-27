@@ -978,6 +978,40 @@ def is_mult_ratio(r):
     return False
 
 
+# ---------- R107：纸幅短边识别（A 系纸幅 × 出图比例） ----------
+# 用途：判断一个「短边尺寸」是不是纸面量级的纸幅。两种情况都算：
+#   ① 1:1 出图（历史口径）：A 系短边 × 整数倍 n（n ≤ 6），绝对容差 ±1mm。
+#      这一支是 R105 条件J 的原有口径，保留是为了不改变既有行为。
+#   ② 按标准出图比例放大：A 系短边 × 标准比例（COMMON_PLOT_SCALES），
+#      相对容差 0.05%（≈ 纸面 0.3mm，与 ① 的 ±1mm 同量级）。
+# 为什么要 ②：图框按 1:100 / 1:150 放大画进模型空间是常规做法
+#   （59400×84100 = A1@1:100、89100×157650 = A1加长@1:150），只认 ① 等于
+#   假设全世界的图纸都按 1:1 画。
+# 注意：本函数只回答"这个短边像不像纸"，**不**回答"这个候选是不是图框"——
+#   21000×14850 就是精确的 A3@1:50（标题栏框），同样返回 True。
+_PAPER_BASES = (841, 594, 420, 297, 210, 148, 105)
+# 与主流程内的 COMMON_PLOT_SCALES（条件E 用）同一张表；本函数在模块级，
+# 取不到那个函数内局部变量，故另存一份，改动时两处需同步。
+_PAPER_SCALES = (1, 2, 2.5, 4, 5, 10, 20, 25, 40, 50, 75, 80,
+                 100, 150, 200, 250, 300, 400, 500)
+PAPER_SIDE_REL_TOL = 0.0005     # 相对容差 0.05%
+
+
+def is_paper_short_side(short):
+    """短边是否像 A 系纸幅（1:1 整数倍 或 ×标准出图比例）。"""
+    if not short or short <= 0:
+        return False
+    for _a in _PAPER_BASES:
+        for _n in range(1, 7):
+            if abs(short - _a * _n) <= 1.0:
+                return True
+    for _a in _PAPER_BASES:
+        for _s in _PAPER_SCALES:
+            if abs(short - _a * _s) <= max(1.0, _a * _s * PAPER_SIDE_REL_TOL):
+                return True
+    return False
+
+
 # ---------- R95：块内「子块实例页框」识别 ----------
 # 动机（02食堂sw-2014.9.3.dwg 识 5 实际 10）：
 #   漏掉的 5 张不是直接画的矩形，而是块 A$C7129040E 内 5 个
@@ -4926,6 +4960,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #        内容轮廓/构件外框不会有"按比例精确内缩"的配对框（R103 已验证）。
             #   风险面：任意带内框的 A 系矩形都会被收 → 由 ②③④ 三重约束收窄；且
             #   「图框模板阵列剔除」（见 frame_like 之后）会清掉成网格排布的空模板。
+            #   R107 追加第五类通道「最大候选 × 纸幅 × 标准出图比例」（见下）。
             if c['type'] in EXPLICIT_TYPES and MIN_FRAME_SHORT_SIDE <= c['short_side'] <= MAX_FRAME_SHORT_SIDE:
                 # 短边必须是 A 系纸幅的整数倍（594/420/297/210/148/105 × n，±1mm）：
                 #   纸面量级的图框尺寸必然是"纸"，而家具/设备/装饰框的短边几乎不会
@@ -4942,6 +4977,35 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                         _has_paired_inner(c)):
                     c['_via'] = 'J'
                     return True
+            # 条件J2（R107）：**本空间最大候选** + 纸幅 × 标准出图比例。
+            #   场景（AC-S01-A.dwg 模型空间）：3 张并排真图框 89100×157650，图层
+            #   `X-Tlbk`，各带 86100×152400 内框（内缩 3.37%/3.33%），89100 = 594×150
+            #   —— 1:150 出图的 A1 加长。它们就是该空间**面积最大的候选**，本该是最
+            #   没有争议的一页，却因为这张图里塞着比一页大 20 多倍的内容块
+            #   （`Ax-B1-P01-300` 460204×756759），把 rel 稀释到 4.03%、area_ratio
+            #   压到 1.43%，条件 A/C 全灭；短边 89100 又超出 B/J 的 2000 上限。
+            #   为什么单独一支、不加进上面的条件J：
+            #     · 放开短边上限 + 换用「A 系 × 标准比例」后，20130729地下室 会被
+            #       误收 23780×16820（A0@1:20）与 21000×14850（A3@1:50）——它们是
+            #       标题栏框，纸幅、双线内缩（2.94%/2.38%）、图层（A-ANNO-TTLB）
+            #       全与真页框同构，几何上无法区分。但那两张图的最大候选分别是
+            #       1611187×408405（总包络）和更大的页框，这些标题栏框都**不是**
+            #       最大候选 → 「必须是本空间最大候选」这一条把它们全部挡在外面。
+            #     · 更关键：一旦让放宽后的分支把 59450×42050 这类候选也标成 _via='J'，
+            #       下游「按尺寸组提升」的逻辑会改选内框 41050×57700，尺寸全漂。
+            #       限定为最大候选后，正常图纸里 J2 根本不会触发，零副作用面。
+            #   语义：一页图纸不可能同时"面积占比极低"又"不是本空间最大的东西"——
+            #   若它连最大候选都不是，那它只是众多矩形之一，不够格走兜底通道。
+            if (c['type'] in EXPLICIT_TYPES
+                    and c['short_side'] >= MIN_FRAME_SHORT_SIDE
+                    and c['area'] >= layout_max_area.get(c['layout'], 0) * (1 - 1e-9)
+                    and is_paper_short_side(c['short_side'])
+                    and abs(c['width'] - round(c['width'])) <= SIZE_ROUNDNESS_EPS
+                    and abs(c['height'] - round(c['height'])) <= SIZE_ROUNDNESS_EPS
+                    and (_near_sqrt2 or is_mult_ratio(c['ratio']))
+                    and _has_paired_inner(c)):
+                c['_via'] = 'J'
+                return True
             # 条件D：同尺寸重复的 √2 直线矩形（套图小页框，绕过条件C 的 10% rel 门槛）
             #   直线矩形 + 长宽比接近 √2 + 同 layout 同尺寸 ≥2 份 + 相对面积 ≥1%
             #   + 短边 ≥500 → 判为刻意重复排版的图纸页（电子称皮带输送系统：
