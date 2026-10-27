@@ -17,7 +17,8 @@ import ezdxf
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from app import get_bounding_box_from_bytes, is_paper_short_side
+from app import (get_bounding_box_from_bytes, is_paper_short_side,
+                 detect_rectangles_from_lines)
 
 
 def make_doc():
@@ -4628,6 +4629,79 @@ if _R107_TARGET:
               lambda r: not any(c['width'] == 86100 for c in r['candidates']))
 else:
     print('SKIP  R107 真实图用例（未找到 AC-S01-A.dwg）')
+
+
+# ---- 用例 142：R108 轴网交叉格子不算图框（AC-U01-A.dwg 识3实际2） ----
+# 现场（AC-U01-A.dwg 模型空间）：真图框 52550×29700 与 42050×29700 都是闭合多段线，
+# 但轴网层 A-Grid 的轴线两两交叉被「横线对 × 竖线对」配出两个 7300×5690 的假候选
+# （ratio 1.2830 擦线过 √2±10%、同尺寸 2 份过条件D、框内 14~15 个构件线过
+# COND_D_MIN_ENTITIES）。它们不仅自身是假框，还让包裹框剔除看到「真图框内 2 个
+# 同尺寸候选」→ 把 rel=100%、area_ratio 第一的 52550×29700 当外包络剔掉，
+# 真图框反而失踪（fc=3 全是错的）。
+# 实测这格子的四条边全是贯穿线：下/上边 span 16144..28495（外伸 2885 = 39.5%×宽），
+# 左/右边 span 9316..36247（外伸 15569 = 273.6%×高）。
+# 判据：**四边全部**大幅外伸 → 交叉线围出的格子，不是画出来的框。只认「四边全超」
+# 而非「任一边超」，是为了放过拼版共边（2~3 张图并排时横向边线贯穿整排，但中间的
+# 分隔竖线自成一体 → 有一边是专为该框画的）。
+# 断言直接落在检测段 detect_rectangles_from_lines：走端到端会被「未检测到图框 →
+# 全实体包围盒降级」干扰（降级结果恰好也是矩形，分不清是"没认出"还是"认出降级框"）。
+def _r108_grid_rects(dedicated):
+    """轴网交叉格子 7300×5690。
+
+    dedicated=False：4 条贯穿线（轴线中段），两两交叉出格子；
+    dedicated=True ：同样的 7300×5690，但四边是专为这个框画的线（对照组）。
+    """
+    d = make_doc()
+    msp = d.modelspace()
+    if dedicated:
+        add_line_rect(msp, 1000.0, 0.0, 7300.0, 5690.0)
+    else:
+        msp.add_line((-2000.0, 0.0), (10000.0, 0.0))            # 横轴线，比格子宽 1.6×
+        msp.add_line((-2000.0, 5690.0), (10000.0, 5690.0))
+        msp.add_line((1000.0, -2000.0), (1000.0, 8000.0))        # 竖轴线，比格子高 1.8×
+        msp.add_line((8300.0, -2000.0), (8300.0, 8000.0))
+    return [(round(r[2] - r[0]), round(r[3] - r[1]))
+            for r in detect_rectangles_from_lines(list(msp))]
+
+
+check('R108-A: 四条贯穿线交叉出的 7300x5690 格子 → 不当候选（轴线中段不是框边）',
+      lambda: _r108_grid_rects(False),
+      lambda lst: (7300, 5690) not in lst)
+
+check('R108-B: 同样尺寸但四边专为此框而画 → 照常是候选（只剔"四边全贯穿"的格子）',
+      lambda: _r108_grid_rects(True),
+      lambda lst: (7300, 5690) in lst)
+
+
+# ---- 用例 143：R108 真实图端到端 ----
+_R108_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\AC-U01-A.dwg',
+]
+_R108_TARGET = next((p for p in _R108_CANDIDATES if os.path.exists(p)), None)
+if _R108_TARGET:
+    _r108_res = None
+    try:
+        with open(_R108_TARGET, 'rb') as _f:
+            _r108_data = _f.read()
+        _r108_res = get_bounding_box_from_bytes(
+            _r108_data, 'AC-U01-A.dwg', 'polyline', 'mm', 'smart')
+    except Exception as _e:
+        print('  R108 端到端解析异常:', str(_e)[:120])
+
+    if _r108_res is not None:
+        check('R108真实图: AC-U01-A 识2框(52550x29700 + 42050x29700)',
+              lambda: _r108_res,
+              lambda r: (r['frame_count'] == 2
+                         and sorted((c['width'], c['height'])
+                                    for c in r['candidates'])
+                         == [(42050, 29700), (52550, 29700)]
+                         and all(c['layout'] == '模型空间'
+                                 for c in r['candidates'])))
+        check('R108真实图: 7300x5690 轴网格子不被当成图框',
+              lambda: _r108_res,
+              lambda r: not any(c['width'] == 7300 for c in r['candidates']))
+else:
+    print('SKIP  R108 真实图用例（未找到 AC-U01-A.dwg）')
 
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

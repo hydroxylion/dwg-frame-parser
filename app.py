@@ -768,6 +768,69 @@ def detect_rectangles_from_lines(entity_list, rot=None):
                 return True
         return False
 
+    # ---------- R108：轴网交叉格子剔除 ----------
+    # 场景（AC-U01-A.dwg）：模型空间是平面图，轴网层 A-Grid 画了密集轴线。4 条轴线
+    #   的两两交叉被「横线对 × 竖线对」配对成矩形，凑出两个 7300×5690 的候选
+    #   （ratio 1.2830 擦线过 √2±10%、同尺寸 2 份过条件D、框内 14~15 个构件线
+    #   过 COND_D_MIN_ENTITIES），而真图框 52550×29700 / 42050×29700 是闭合多段线。
+    #   后果不止多 2 个假框：包裹框剔除看到真图框内「含 2 个同尺寸候选」，把
+    #   52550×29700（rel=100%、area_ratio 占比第一）当外包络剔掉 → 真图框反而失踪。
+    # 根因：那 4 条"边"根本不是为这个框画的，是轴线的**中段**。实测
+    #   格子 7300×5690：下/上边线 span 16144..28495（外伸 2885 = 39.5%×宽），
+    #   左/右边线 span 9316..36247（外伸 15569 = 273.6%×高），四条全是 A-Grid。
+    # 判据：**四边全部**大幅外伸 → 交叉线围出的格子，不是画出来的框。任一边
+    #   存在「专为该框画的边线」（外伸 ≤ max(5mm, 10%×该边长)）就放行——
+    #   所以拼版共边（2~3 张图并排时横向边线贯穿整排，但中间分隔竖线自成一体）
+    #   不会被误杀，这也是只认「四边全超」而不认「任一边超」的原因。
+    _GRID_CELL_OVERHANG_REL = 0.10   # 边长相对容差
+    _GRID_CELL_OVERHANG_ABS = 5.0    # 绝对容差（mm），覆盖画框时角部的小过头
+
+    def _h_side_overhang(coord, lo, hi):
+        """覆盖 [lo,hi] 的横线里最小的外伸量；无完整覆盖线返回 None"""
+        _i = _bisect.bisect_left(h_cs, coord - LINE_CLUSTER_EPS - 1e-6)
+        _j = _bisect.bisect_right(h_cs, coord + LINE_CLUSTER_EPS + 1e-6)
+        _best = None
+        for _k in range(_i, _j):
+            _c, _l, _h = h_sorted[_k]
+            if (abs(_c - coord) <= LINE_CLUSTER_EPS
+                    and _l <= lo + LINE_CLUSTER_EPS and _h >= hi - LINE_CLUSTER_EPS):
+                _ov = max(lo - _l, _h - hi)
+                if _best is None or _ov < _best:
+                    _best = _ov
+        return _best
+
+    def _v_side_overhang(coord, lo, hi):
+        """覆盖 [lo,hi] 的竖线里最小的外伸量；无完整覆盖线返回 None"""
+        _i = _bisect.bisect_left(v_cs, coord - LINE_CLUSTER_EPS - 1e-6)
+        _j = _bisect.bisect_right(v_cs, coord + LINE_CLUSTER_EPS + 1e-6)
+        _best = None
+        for _k in range(_i, _j):
+            _c, _l, _h = v_sorted[_k]
+            if (abs(_c - coord) <= LINE_CLUSTER_EPS
+                    and _l <= lo + LINE_CLUSTER_EPS and _h >= hi - LINE_CLUSTER_EPS):
+                _ov = max(lo - _l, _h - hi)
+                if _best is None or _ov < _best:
+                    _best = _ov
+        return _best
+
+    def is_grid_cell(xa, ya, xb, yb):
+        """四边是否全部由"贯穿线"构成（轴网/网格交叉格子，不是画出来的框）"""
+        _w = xb - xa
+        _h = yb - ya
+        for _coord, _lo, _hi, _span in ((ya, xa, xb, _w), (yb, xa, xb, _w)):
+            _ov = _h_side_overhang(_coord, _lo, _hi)
+            if _ov is None:
+                return False     # 无完整覆盖线：交给调用方的 P1 判定处理
+            if _ov <= max(_GRID_CELL_OVERHANG_ABS, _span * _GRID_CELL_OVERHANG_REL):
+                return False     # 这条边是为本框画的
+        for _coord, _lo, _hi, _span in ((xa, ya, yb, _h), (xb, ya, yb, _h)):
+            _ov = _v_side_overhang(_coord, _lo, _hi)
+            if _ov is None:
+                return False
+            if _ov <= max(_GRID_CELL_OVERHANG_ABS, _span * _GRID_CELL_OVERHANG_REL):
+                return False
+        return True              # 四边全部大幅外伸 → 格子
+
     v_by_xa = sorted(v_pairs, key=lambda p: p[0])
     v_xas = [p[0] for p in v_by_xa]
     # 竖线对公共覆盖总长预计算：覆盖总长 < 矩形高的竖对必然纵跨不住 [ya,yb]，
@@ -828,6 +891,9 @@ def detect_rectangles_from_lines(entity_list, rot=None):
                 if min(w, h) < MIN_LINE_RECT_SIDE:
                     continue
                 if has_internal_divider(xa, ya, xb, yb):
+                    continue
+                # R108：四条边全部由贯穿线（轴网/网格）构成 → 是交叉格子，不是图框
+                if is_grid_cell(xa, ya, xb, yb):
                     continue
                 key = (round(xa, 3), round(ya, 3), round(xb, 3), round(yb, 3))
                 if key in seen:
