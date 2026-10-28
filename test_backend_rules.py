@@ -3005,8 +3005,12 @@ check('R84页级尺寸护栏: 构件符号不算独立页, 真图框不被判巨
 # 开关回退对照：关掉页级尺寸护栏 → 7.8×12 构件符号被当独立页 → 真图框判巨型
 # 包络踢出分母 → 分母塌缩到格子面积 → 格子 rel 暴涨过条件C → 真图框反被包裹框
 # 剔除、图签格子当选（复现原 bug）
-check('R84开关回退: NO_GIANT_PAGE_MIN=1 时真图框被判包络丢失, 图签格子当选',
-      lambda: _parse_env(data, FRAME_PARSER_NO_GIANT_PAGE_MIN='1'),
+# R115 注：判据④ 现有**两道**页级护栏——R84 的相对门槛（短边 ≥ 外框×5%）
+#   与 R115 的绝对门槛（短边 ≥15000 或像纸）。7.8×12 恰好两道都挡得住，
+#   故复现旧行为须两个开关同时关。
+check('R84开关回退: NO_GIANT_PAGE_MIN+MINSIZE=1 时真图框被判包络丢失, 图签格子当选',
+      lambda: _parse_env(data, FRAME_PARSER_NO_GIANT_PAGE_MIN='1',
+                         FRAME_PARSER_NO_GIANT_PAGE_MINSIZE='1'),
       lambda r: r['frame_count'] > 1
       and not any(abs(c['width'] - 892) < 5 for c in r['candidates'])
       and any(abs(c['width'] - 49) < 2 for c in r['candidates']))
@@ -5217,6 +5221,159 @@ if _R114_TARGET:
                                      for c in r['candidates'])))
 else:
     print('SKIP  R114 真实图用例（未找到 10(AC-M01-A).dwg）')
+
+
+# ---- 用例 159：R115 判据④「页级尺寸」绝对门槛（15(AC-D04-A).dwg 场景） ----
+# 现场（识 11 实际 1）：真图框 37150×21000（A2 加长@1:50，area_ratio 100%），
+# 框内是一整张**门窗大样**——每樘门窗立面 = 外框 + 按比例内缩配对内框的双线
+# 矩形（1800×3200 / 1700×2500 / 1600×2600 / 1000×2275 / 900×2175…），尺寸就是
+# 真实洞口尺寸（900~1800mm）。
+# 故障链（三段，每段单独看都"合理"）：
+#   ① 判据④ 把真图框当"巨型页面外包络"踢出 rel 分母 —— 因为框内有同尺寸
+#      （1700×2500 ×2）位置分离、比例近√2 的"独立页"；
+#   ② 分母塌缩到 3247×5900（一个图例块）→ 真图框 rel 虚报成 4072%、门窗 rel
+#      从真实的 0.25~0.74% 放大 40.7 倍到 10~30% → 全部越过条件C 的 10% 门槛；
+#   ③ 真图框反被「包裹框剔除」当成"内含 ≥2 个图框候选的外包络"删掉 → 输出 11 个门窗。
+# 为什么 R84 的 5% 相对门槛挡不住：门槛 = 外框短边 21000 × 5% = 1050mm，而门窗
+#   短边 900~1800mm 全部在门槛之上（最大 1800/21000 = 8.57%，顶到门槛 4 倍）。
+#   相对门槛的标尺是"外框尺度"，外框越大标尺越松；"是不是纸"却有绝对答案。
+# 修法：被罩候选须 短边 ≥15000（建筑页下限）**或** 像纸（is_paper_short_side）。
+#   门窗 900/1000/1200/1400/1500/1600/1700/1800 两条全 False；真页 16820/21000/
+#   40000/42000/42050/59400/84100 至少命中一条（42050 靠 ≥15000，4200 靠像纸）。
+def _r115_door_window_sheet(paper_guard_on=True):
+    """合成复现：A2 加长图框内一整张门窗大样（12 樘双线门窗立面）。"""
+    d = make_doc()
+    _fb = d.blocks.new('A2PLUS_R115')
+    add_closed_rect(_fb, 0, 0, 743, 420)          # A2 加长 743×420 @×50 = 37150×21000
+    msp = d.modelspace()
+    _fi = msp.add_blockref('A2PLUS_R115', (0.0, 0.0))
+    _fi.dxf.xscale = 50.0
+    _fi.dxf.yscale = 50.0
+    # 12 樘门窗：外框 + 按比例内缩的配对内框（复刻双线画法，使 J/D 等通道结构同真框）
+    _winches = [
+        (2000, 2000, 1800, 3200), (6000, 2000, 1000, 2275),
+        (10000, 2000, 1700, 2500), (15000, 2000, 1700, 2500),   # 同尺寸 + x 分离
+        (20000, 2000, 1600, 2600), (24000, 2000, 1400, 2100),
+        (28000, 2000, 1800, 2400), (31000, 2000, 1200, 1800),
+        (2000, 9000, 1500, 2450), (6000, 9000, 1800, 2600),
+        (11000, 9000, 900, 2175), (15000, 9000, 1800, 3200),
+    ]
+    for _x, _y, _w, _h in _winches:
+        add_closed_rect(msp, _x, _y, _w, _h)                       # 洞口外框
+        add_closed_rect(msp, _x + _w * 0.05, _y + _h * 0.03,      # 门窗框（内缩 ~5%/3%）
+                        _w * 0.90, _h * 0.94)
+    return to_bytes(d)
+
+
+_r115_data = _r115_door_window_sheet()
+
+check('R115-A: 门窗大样图只认 1 个真图框 37150x21000，框内 12 樘双线门窗不算图框',
+      lambda: parse(_r115_data),
+      lambda r: (r['frame_count'] == 1
+                 and (round(r['candidates'][0]['width']),
+                      round(r['candidates'][0]['height'])) == (37150, 21000)
+                 and r['candidates'][0]['layout'] == '模型空间'))
+
+# 开关回退对照：关掉 R115 绝对门槛 → 门窗被当"独立页" → 真图框判巨型包络踢出
+# rel 分母 → 分母塌缩 → 门窗 rel 暴涨过条件C → 真图框反被包裹框剔除（复现原 bug）
+check('R115-B: 开关回退——关掉绝对门槛即复现"真图框被当包络、门窗当选"，证明判据落在页级尺寸而非尺寸容差',
+      lambda: _parse_env(_r115_data, FRAME_PARSER_NO_GIANT_PAGE_MINSIZE='1'),
+      lambda r: (r['frame_count'] > 1
+                 and not any((round(c['width']), round(c['height'])) == (37150, 21000)
+                             for c in r['candidates'])
+                 and any(min(c['width'], c['height']) < 5000 for c in r['candidates'])))
+
+
+# ---- 用例 160：R115 正向守卫 —— 真多页拼版仍须踢出外框分母 ----
+# 全图外包络 400000×270000（ratio 1.4815，近√2 逃过判据③的近正方形窗口）内并排
+# 2 张真页 84100×59400（短边 59400 ≥15000 → 仍认作"页"）→ 判据④ 照旧生效，
+# 页 rel=100% 过条件C，外框不入库。远端散点撑大 total 复刻真实场景。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 0, 0, 400000, 270000)            # 外包络（ratio 1.4815）
+add_closed_rect(msp, 5000, 5000, 84100, 59400)        # 页 1
+add_closed_rect(msp, 5000, 70000, 84100, 59400)       # 页 2（y 分离）
+for _k in range(14):                                  # 页内内容（条件F 内容证据用）
+    msp.add_line((6000 + _k * 400, 6000), (6000 + _k * 400, 63000))
+msp.add_line((3000000, 3000000), (3100000, 3000000))  # 离群实体撑大 total
+data_r115_multi = to_bytes(doc)
+check('R115-C: 真多页拼版（2 张 A1 页并排）仍踢外框作 rel 分母，fc=2 且外框不入库',
+      lambda: parse(data_r115_multi),
+      lambda r: (r['frame_count'] == 2
+                 and sum(1 for c in r['candidates']
+                         if abs(c['width'] - 84100) < 5) == 2
+                 and not any(abs(c['width'] - 400000) < 5 for c in r['candidates'])))
+
+
+# ---- 用例 161：R115 「像纸」分支 —— 小尺度真页（A4@1:20 = 4200×2970）仍认作页 ----
+# 绝对门槛 15000 会挡住纸面/小比例页，故「像纸」分支必须兜住：4200 不是 ≥15000，
+# 但 4200 = 297×? / 210×20 = 4200 精确命中 A 系×出图比例 → 仍算"页"→ 判据④ 生效。
+doc = make_doc()
+msp = doc.modelspace()
+add_closed_rect(msp, 0, 0, 42000, 30000)              # 外包络（ratio 1.4 近√2）
+add_closed_rect(msp, 1000, 1000, 4200, 2970)          # 页 1（A4@1:20）
+add_closed_rect(msp, 1000, 6000, 4200, 2970)          # 页 2（y 分离）
+msp.add_line((300000, 300000), (310000, 300000))      # 离群实体撑大 total
+data_r115_smallpage = to_bytes(doc)
+check('R115-D: 小尺度真页（A4@1:20=4200x2970）经「像纸」分支仍算页，判据④ 照旧生效 fc=2',
+      lambda: parse(data_r115_smallpage),
+      lambda r: (r['frame_count'] == 2
+                 and sum(1 for c in r['candidates']
+                         if abs(c['width'] - 4200) < 5) == 2
+                 and not any(abs(c['width'] - 42000) < 5 for c in r['candidates'])))
+
+
+# ---- 用例 162：R115 页级尺寸口径边界（纯算术，不走 CAD 构造） ----
+def _r115_page_size_boundary():
+    from app import is_paper_short_side, GIANT_PAGE_MEMBER_MIN_SHORT
+    _pages = {}
+    for _s in (900, 1000, 1200, 1400, 1500, 1600, 1700, 1800,        # 门窗洞口
+               2100, 4200, 2970,                                      # 小尺度真页
+               15000, 16820, 21000, 40000, 42050, 59400, 84100):      # 建筑页
+        _pages[_s] = (_s >= GIANT_PAGE_MEMBER_MIN_SHORT or is_paper_short_side(_s))
+    return _pages
+
+
+check('R115-E: 页级尺寸口径——门窗洞口(900~1800)全不算页；建筑页与小尺度纸页都算页',
+      _r115_page_size_boundary,
+      lambda m: (not any(m[_s] for _s in (900, 1000, 1200, 1400, 1500, 1600, 1700, 1800))
+                 and all(m[_s] for _s in (4200, 2970, 15000, 16820, 21000,
+                                          40000, 42050, 59400, 84100))
+                 # 40000 不是精确纸幅（最近的是 210×200=42000、105×400=42000），
+                 # 靠「短边 ≥15000」兜住——这条边界即「不能单用 is_paper_short_side」
+                 # 的原因：真页常带边距/非标加长，纸幅判据会漏，绝对尺寸兜底。
+                 and not is_paper_short_side(40000)
+                 and not is_paper_short_side(900)
+                 # 42050 恰好是 A0×50（841×50）→ 纸幅判据本身也认，两条护栏重叠覆盖
+                 and is_paper_short_side(42050)
+                 and m[40000]))
+
+
+# ---- 用例 163：R115 真实图端到端 ----
+_R115_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\15(AC-D04-A).dwg',
+]
+_R115_TARGET = next((p for p in _R115_CANDIDATES if os.path.exists(p)), None)
+if _R115_TARGET:
+    _r115_res = None
+    try:
+        with open(_R115_TARGET, 'rb') as _f:
+            _r115_bin = _f.read()
+        _r115_res = get_bounding_box_from_bytes(
+            _r115_bin, '15(AC-D04-A).dwg', 'polyline', 'mm', 'smart')
+    except Exception as _e:
+        print('  R115 端到端解析异常:', str(_e)[:120])
+
+    if _r115_res is not None:
+        check('R115真实图: 15(AC-D04-A) 识1框 37150x21000（框内 12 樘门窗大样不入库）',
+              lambda: _r115_res,
+              lambda r: (r['frame_count'] == 1
+                         and (round(r['candidates'][0]['width']),
+                              round(r['candidates'][0]['height'])) == (37150, 21000)
+                         and not any(min(c['width'], c['height']) < 5000
+                                     for c in r['candidates'])))
+else:
+    print('SKIP  R115 真实图用例（未找到 15(AC-D04-A).dwg）')
 
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

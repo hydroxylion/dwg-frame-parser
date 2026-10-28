@@ -1245,6 +1245,15 @@ def is_paper_short_side(short):
     return False
 
 
+# R115：判据④（巨型页面外包络踢出 rel 分母）认定「内页」的**绝对**尺寸下限。
+#   建筑图纸页在 1:100 级比例下短边不会小于 15000mm（A4@1:100 = 21000，
+#   加长/缩印下限约 15000）；与 R95 判据③ 的「短边 ≥ 15000」同一口径。
+#   低于此值的候选只有"像纸"（is_paper_short_side）才认作页——纸面坐标系里
+#   841/595/297 级页面、A4@1:20 = 4200 之类小尺度页仍走得通。
+#   动机见 collect_candidates_from_layout 内判据④ R115 段注释。
+GIANT_PAGE_MEMBER_MIN_SHORT = 15000
+
+
 # ---------- R95：块内「子块实例页框」识别 ----------
 # 动机（02食堂sw-2014.9.3.dwg 识 5 实际 10）：
 #   漏掉的 5 张不是直接画的矩形，而是块 A$C7129040E 内 5 个
@@ -4752,6 +4761,29 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             _gp_min_short = 0.0
             if os.environ.get('FRAME_PARSER_NO_GIANT_PAGE_MIN') != '1':
                 _gp_min_short = min(c['width'], c['height']) * 0.05
+            # R115 页级尺寸护栏（绝对口径）：被罩候选必须是**图纸页量级**——
+            #   ① 短边 ≥ GIANT_PAGE_MEMBER_MIN_SHORT（15000mm，建筑图 1:100 级
+            #      页面的下限，与 R95 判据③ 同一口径），或
+            #   ② 短边像纸（is_paper_short_side：A 系幅面整数倍 / ×标准出图比例，
+            #      覆盖纸面坐标系的 841/595/297 级页面，以及 A4@1:20 = 4200 之类
+            #      小尺度页）。
+            #   为什么 R84 的 5% 相对门槛不够（15(AC-D04-A).dwg 识 11 实际 1）：
+            #     该图真图框 37150×21000（A2 加长@1:50，area_ratio 100%），框内是
+            #     一整张**门窗大样**——一樘门窗立面就是一个"外框 + 按比例内缩配对
+            #     内框"的双线矩形（1800×3200 / 1600×2600 / 1500×2450 / 1000×2275 /
+            #     900×2175…），尺寸是真实洞口尺寸（900~1800mm）。
+            #     5% 相对门槛 = 21000×5% = 1050mm → 门窗全部**高于**门槛，护栏形同
+            #     虚设（实测最大的 1800/21000 = 8.57%，已经顶到门槛 4 倍）。
+            #   为什么单用 is_paper_short_side 也不行：真页常带边距而非精确纸幅
+            #     （用例 97b/97d 的真页 59450×42050，短边 42050 与 A2×100=42000
+            #     差 50mm → False），单用会把真页挡在外面、让判据④ 失效。
+            #   实测分离度（本图门窗 vs 全库已知判据④ 真页）：
+            #     门窗短边 900/1000/1200/1400/1500/1600/1700/1800 → 两条全 False；
+            #     真页短边 16820/21000/40000/42000/42050/59400/84100 → ① 或 ② 命中。
+            #   这一条只**收窄**判据④的踢出范围（少踢 = 分母不被无故搬走），
+            #   不会让原本保留的分母被踢走 —— 方向安全。
+            #   开关 FRAME_PARSER_NO_GIANT_PAGE_MINSIZE=1 回退到只看 5% 相对门槛。
+            _gp_minsize_req = os.environ.get('FRAME_PARSER_NO_GIANT_PAGE_MINSIZE') != '1'
             _mems = []
             for _f in all_candidates:
                 if _f is c or _f['layout'] != _ln or _f['area'] > c['area'] * 0.5:
@@ -4760,6 +4792,10 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     continue
                 if min(_f['width'], _f['height']) < _gp_min_short:
                     continue  # 非页级尺寸（构件符号/表格格子），不算"独立图纸页"
+                if _gp_minsize_req:
+                    _fs = min(_f['width'], _f['height'])
+                    if _fs < GIANT_PAGE_MEMBER_MIN_SHORT and not is_paper_short_side(_fs):
+                        continue  # R115：门窗洞口/构件轮廓，不是"图纸页"
                 _fb = _f['bbox']
                 if (_fb[0] >= _cx1 - 1 and _fb[1] >= _cy1 - 1 and
                         _fb[2] <= _cx2 + 1 and _fb[3] <= _cy2 + 1):
@@ -4823,8 +4859,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 if _kicked_4:
                     # R74：判据④命中 = 该 layout 内存在"页面体系"（≥2 页近√2
                     #   分离对），塌缩防护不得将此空间 rel 置 0
-                    _giant_kicked_layouts.add(c['layout'])
-            # R88 判据⑤：内含 ≥2 个「同尺寸且位置分离」页面级候选的大框不作
+                    _giant_kicked_layouts.add(c['layout'])            # R88 判据⑤：内含 ≥2 个「同尺寸且位置分离」页面级候选的大框不作
             #   分母（本图 638744×306556 包络 → 16 页 rel 8.61% 恢复到 100%，
             #   全部靠条件C 正常入选，不再依赖条件I/H3/R63 三条救援通道）。
             #   命中即视为"页面体系存在"，同判据④ 一并豁免塌缩防护。
