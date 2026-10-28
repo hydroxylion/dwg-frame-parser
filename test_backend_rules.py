@@ -4943,4 +4943,74 @@ else:
     print('SKIP  R111 真实图用例（未找到 AC-M03~4-A.dwg）')
 
 
+# ---- 用例 150：R112 不可见实体（组码 60=1）不得充当图框证据 ----
+# 现场（05-08 AC-(E05-E08)-A.dwg 识 8 实际 4）：4 个平面装配块各含一个
+# invisible=1 的嵌套碎片块（整张原图被误粘贴进来的残留，含 5 对图框），
+# 证据/页框扫描一路照收 → 4 个内容块被报告成 4 个 59400×42000 图框。
+# 这里用最小复现：1 个可见真框块 + 1 个含碎片块的平面装配块。
+def _r112_plan_block(scrap_invisible=True):
+    d = make_doc()
+    # 可见真图框块：59450×42000
+    _fr = d.blocks.new('REALFRAME')
+    add_closed_rect(_fr, 0, 0, 59450, 42000)
+    # 误粘贴的碎片块：图框画在 PUB_TITLE 层（R82b 会专门扫这类层）
+    _sc = d.blocks.new('SCRAP')
+    add_closed_rect(_sc, 0, 0, 59400, 42000, layer='PUB_TITLE')
+    add_closed_rect(_sc, 1750, 1000, 55900, 40000, layer='PUB_TITLE')
+    # 平面装配块：碎片（可设为不可见）+ 可见内容线
+    _pl = d.blocks.new('PLAN')
+    _ins = _pl.add_blockref('SCRAP', (0.0, 0.0))
+    if scrap_invisible:
+        _ins.dxf.invisible = 1
+    for _k in range(6):
+        _pl.add_line((0.0, 2000.0 + _k * 6000), (120000.0, 2000.0 + _k * 6000))
+    _msp = d.modelspace()
+    _msp.add_blockref('REALFRAME', (0.0, 0.0))
+    _msp.add_blockref('PLAN', (0.0, 100000.0))
+    return to_bytes(d)
+
+
+check('R112-A: 平面块内碎片块 invisible=1 → 碎片里的 59400x42000 不算图框，只认真框 59450x42000',
+      lambda: parse(_r112_plan_block(True)),
+      lambda r: (r['frame_count'] == 1
+                 and (round(r['candidates'][0]['width']),
+                      round(r['candidates'][0]['height'])) == (59450, 42000)))
+
+check('R112-B: 对照——同一碎片块去掉 invisible 即照旧被提升为图框，证明判据落在可见性而非尺寸',
+      lambda: parse(_r112_plan_block(False)),
+      lambda r: (r['frame_count'] == 2
+                 and any((round(c['width']), round(c['height'])) == (59400, 42000)
+                         for c in r['candidates'])))
+
+
+# ---- 用例 151：R112 真实图端到端 ----
+_R112_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\建筑项目图纸 - 非标\资阳恒大城\恒大项目二期施工图（16-21#）'
+    r'\恒大项目二期施工图（11-21#）\1建筑\2011-066-Y\05-08 AC-(E05-E08)-A.dwg',
+]
+_R112_TARGET = next((p for p in _R112_CANDIDATES if os.path.exists(p)), None)
+if _R112_TARGET:
+    _r112_res = None
+    try:
+        with open(_R112_TARGET, 'rb') as _f:
+            _r112_data = _f.read()
+        _r112_res = get_bounding_box_from_bytes(
+            _r112_data, '05-08 AC-(E05-E08)-A.dwg', 'polyline', 'mm', 'smart')
+    except Exception as _e:
+        print('  R112 端到端解析异常:', str(_e)[:120])
+
+    if _r112_res is not None:
+        check('R112真实图: 05-08 AC-(E05-E08)-A 识4框，全为 59450x42000',
+              lambda: _r112_res,
+              lambda r: (r['frame_count'] == 4
+                         and all((round(c['width']), round(c['height'])) == (59450, 42000)
+                                 for c in r['candidates'])))
+        check('R112真实图: 不可见碎片内的 59400x42000 一个都不入库',
+              lambda: _r112_res,
+              lambda r: not any((round(c['width']), round(c['height'])) == (59400, 42000)
+                                for c in r['candidates']))
+else:
+    print('SKIP  R112 真实图用例（未找到 05-08 AC-(E05-E08)-A.dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

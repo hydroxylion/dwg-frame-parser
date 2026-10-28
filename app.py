@@ -268,6 +268,33 @@ def is_polyline_closed(entity):
     vertices = get_polyline_vertices(entity)
     return len(vertices) >= 3 and vertices[0] == vertices[-1]
 
+# R112 开关：置 1 回退「不可见实体（组码 60=1）不作图框证据」
+_FILTER_INVISIBLE_ENTITIES = os.environ.get('FRAME_PARSER_NO_INVISIBLE_FILTER') != '1'
+
+
+def is_entity_invisible(entity):
+    """实体级不可见（DXF 组码 60=1）判定。
+
+    R112：图形里被标成 invisible 的实体在 CAD 里**不显示、不出图**（组码 60
+    是实体级开关，与图层开关/不打印层是两回事）。它们不能充当图框证据 ——
+    尤其不能当「这个块里有个图框」的页框来源。
+
+    现场（05-08 AC-(E05-E08)-A.dwg 识 8 实际 4）：4 个平面装配块 Ax-Y-E01~E04
+    各含一个**不可见的**嵌套块 A$C085D3A53（10234 实体，是整张原图被误粘贴
+    进来的碎片，invisible=1）。该碎片里有 5 对图框（外 59400×42000 画在
+    A2$0$PUB_TITLE 层、内 55900×40000），全部不可见 —— 用户肉眼看模型空间
+    只有 4 个 59450×42000 的 FGY76576YRTY。但 R82b「块内标题栏层页框」扫描
+    只读块定义、不查可见性，照单全收 → 4 个平面块的报告尺寸被替换成
+    59400×42000 → 4 个内容块冒充成 4 个图框 → fc=8。
+    """
+    if not _FILTER_INVISIBLE_ENTITIES:
+        return False
+    try:
+        return int(entity.dxf.get('invisible', 0) or 0) == 1
+    except Exception:
+        return False
+
+
 def get_entity_bbox(entity, doc):
     """单个实体的包围盒 (x1, y1, x2, y2)，失败返回 None。
     注意：ezdxf 实体没有 bounding_box() 方法（旧代码在此静默失败导致
@@ -1967,6 +1994,9 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         for _ent in doc.blocks[_name]:
             try:
                 _t = _ent.dxftype()
+                # R112：不可见实体的尺寸不算「构件证据」（见 is_entity_invisible）
+                if is_entity_invisible(_ent):
+                    continue
                 if _t == 'LINE':
                     _s, _e = _ent.dxf.start, _ent.dxf.end
                     _mx = max(_mx, _math.hypot(_e.x - _s.x, _e.y - _s.y))
@@ -2128,6 +2158,9 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 #   '0' 层不跳过：块内 '0' 层图元的打印属性随插入层，按自身 flag 判会误伤。
                 if (_blk_has_plot and _ent.dxf.layer != '0'
                         and _ent.dxf.layer in _noplot_layers):
+                    continue
+                # R112：不可见实体不算「闭合边框证据」（见 is_entity_invisible）
+                if is_entity_invisible(_ent):
                     continue
                 if _t == 'LINE':
                     _s, _e = _ent.dxf.start, _ent.dxf.end
@@ -2401,6 +2434,9 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             try:
                 if _e2.dxftype() != 'LWPOLYLINE':
                     continue
+                # R112：不可见实体不能当「块内页框」（见 is_entity_invisible）
+                if is_entity_invisible(_e2):
+                    continue
                 if _e2.dxf.layer in _noplot_layers:   # R104：不打印层不出图框
                     continue
                 if not is_polyline_closed(_e2):
@@ -2594,6 +2630,9 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             try:
                 if _e2.dxftype() != 'LINE':
                     continue
+                # R112：不可见实体不能当「块内页框」（见 is_entity_invisible）
+                if is_entity_invisible(_e2):
+                    continue
                 _s2, _t2 = _e2.dxf.start, _e2.dxf.end
                 _dx2 = abs(_t2.x - _s2.x)
                 _dy2 = abs(_t2.y - _s2.y)
@@ -2702,6 +2741,11 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         for _e2 in _blk:
             try:
                 _t2 = _e2.dxftype()
+                # R112：不可见实体不能当「块内页框」——本例 05-08 AC-(E05-E08)-A
+                #   的 4 个平面块各含一个 invisible 的嵌套碎片，碎片里 5 对图框
+                #   全被当成标题栏层页框（见 is_entity_invisible）
+                if is_entity_invisible(_e2):
+                    continue
                 if _t2 == 'INSERT':
                     # R86：递归子块页框 → 变换到本块坐标系（限深 3 层防环）
                     if _depth < 3:
@@ -2872,6 +2916,9 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         for _e2 in _blk:
             try:
                 if _e2.dxftype() != 'INSERT':
+                    continue
+                # R112：不可见的子块实例不能当页框（见 is_entity_invisible）
+                if is_entity_invisible(_e2):
                     continue
                 _r = _inst_world_rect(_e2, 1.0, 1.0)
                 if _r is None:
@@ -3232,6 +3279,11 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                         _resc_scanned.add(_scan_key)
                         for _ent_in in doc.blocks[_blk_name]:
                             try:
+                                # R112：不可见实体（组码 60=1）不能当「块内图框族」证据。
+                                #   本例 4 个平面块各含一个 invisible 的嵌套碎片，碎片里
+                                #   5 对图框被 R40 当成图框族全数提升（20 个假候选）。
+                                if is_entity_invisible(_ent_in):
+                                    continue
                                 if _ent_in.dxftype() == 'INSERT':
                                     if _depth >= 1:
                                         continue
