@@ -5107,4 +5107,116 @@ else:
     print('SKIP  R113 真实图用例（未找到 09 AC-S01-A.dwg）')
 
 
+# ---- 用例 155：R114 外部参照块内提升的页框不算本图页框 ----
+# 现场（10(AC-M01-A).dwg 识 16 实际 1）：块 `AC-（P06-P09）-A·DWG 加餐梯`
+# 是整张外部图纸**绑定**进来的底图（BLOCK 组码 1 = 参照 dwg 绝对路径）。
+# 块内 4 套 A1 双线图框（外 84100×59400 + 内 80600×57400）× 5 个重叠实例，
+# 被 R95「块内子块实例页框」提升成 16 个 84100×59400；本图真正的图框是
+# 顶层直接插入的「A2 加长」块 A2+（743×420 @×50 = 37150×21000）。
+# 最小复现：绑定参照块（页框子块 ×4 + 溢出内容撑大 bbox）+ 5 个重叠实例，
+# 外加一个本图自有 A2 加长图框块。
+def _r114_bound_xref(is_xref=True, with_own=True, pages=4):
+    d = make_doc()
+    # 参照文件里的「单页图框」子块：A1@1:100 双线画法
+    for i in range(pages):
+        _sb = d.blocks.new(f'PAGE{i}')
+        add_closed_rect(_sb, 0, 0, 84100, 59400)
+        add_closed_rect(_sb, 1750, 1000, 80600, 57400)
+    # 绑定进本图的外部参照块：页框子块实例 + 溢出内容（把块 bbox 撑到远大于单页，
+    # 这样 R27 会判"块内无够长的边框证据" → 走 R40 救援 / R95 提升）
+    _attr = {'xref_path': 'EXT_DWG.dwg'} if is_xref else None
+    _xb = d.blocks.new('EXT_DWG', dxfattribs=_attr)
+    for i in range(pages):
+        _xb.add_blockref(f'PAGE{i}', ((i % 2) * 84100.0, (i // 2) * 59400.0))
+    _xb.add_line((0.0, 0.0), (200000.0, 240000.0))
+    _msp = d.modelspace()
+    for k in range(5):      # 5 个高度重叠的参照实例（现场就是这个数量）
+        _msp.add_blockref('EXT_DWG', (k * 8000.0, k * 6000.0))
+    if with_own:
+        _ob = d.blocks.new('A2PLUS')
+        add_closed_rect(_ob, 0, 0, 743, 420)     # A2 加长 743×420
+        _i = _msp.add_blockref('A2PLUS', (0.0, -300000.0))
+        _i.dxf.xscale = 50.0
+        _i.dxf.yscale = 50.0
+    return to_bytes(d)
+
+
+check('R114-A: 绑定参照块内的 A1 页框不算本图图框，只认本图自有的 A2 加长 37150x21000',
+      lambda: parse(_r114_bound_xref(True, True)),
+      lambda r: (r['frame_count'] == 1
+                 and (round(r['candidates'][0]['width']),
+                      round(r['candidates'][0]['height'])) == (37150, 21000)
+                 and r['candidates'][0]['layout'] == '模型空间'))
+
+check('R114-B: 对照——同一块去掉 xref_path（变成普通块）即照旧计入参照页框，证明判据落在外部参照标记而非尺寸/结构',
+      lambda: parse(_r114_bound_xref(False, True)),
+      lambda r: (r['frame_count'] > 1
+                 and any((round(c['width']), round(c['height'])) == (84100, 59400)
+                         for c in r['candidates'])))
+
+
+# ---- 用例 156：R114 护栏 —— 本图没有自有页框时保留参照页框 ----
+# 不能一刀切"外部参照块一律不算"：d008.dwg 整个出图页就在绑定参照块里
+# （基线 fc=1 = 200700×126150），参照页就是本图页。
+check('R114-C: 全图只有参照页框、本图无自有图框 → 参照页框照旧计入（不清零）',
+      lambda: parse(_r114_bound_xref(True, False)),
+      lambda r: (r['frame_count'] >= 1
+                 and any((round(c['width']), round(c['height'])) == (84100, 59400)
+                         for c in r['candidates'])))
+
+
+# ---- 用例 157：is_xref_block 口径边界（纯算术，不走 CAD 构造） ----
+# 组码 1 非空 ≠ 外部参照：AutoCAD 给内部匿名块（*U67）填 `*U`，机械构造器
+# （AVE_RENDER 的 HEX_FLANGE_SCREW_-_10_MM_T 等螺钉/螺母库块）填不带扩展名
+# 的模板名。只有 .dwg/.dxf 结尾的才是真正的参照文件。
+def _r114_is_xref_boundary():
+    from app import is_xref_block
+    d = make_doc()
+    _cases = {
+        'PLAIN': None,
+        'ANON': '*U',
+        'BOLT': 'HEX_FLANGE_10MM_TOP',
+        'PATH_DWG': r'F:\Kindergarden\AC-（P06-P09）-A·DWG 加餐梯.dwg',
+        'REL_DWG': r'.\13013-11-AW-FP.dwg',
+        'DXF': 'X-总图排水底图.DXF',
+    }
+    for _n, _p in _cases.items():
+        d.blocks.new(_n, dxfattribs=({'xref_path': _p} if _p else None))
+    return {_n: is_xref_block(d.blocks[_n]) for _n in _cases}
+
+
+check('R114-D: is_xref_block 只认 .dwg/.dxf 结尾；*U 匿名块、无扩展名构造器模板都不算参照',
+      _r114_is_xref_boundary,
+      lambda m: (m['PLAIN'] is False and m['ANON'] is False and m['BOLT'] is False
+                 and m['PATH_DWG'] is True and m['REL_DWG'] is True
+                 and m['DXF'] is True))
+
+
+# ---- 用例 158：R114 真实图端到端 ----
+_R114_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\10(AC-M01-A).dwg',
+]
+_R114_TARGET = next((p for p in _R114_CANDIDATES if os.path.exists(p)), None)
+if _R114_TARGET:
+    _r114_res = None
+    try:
+        with open(_R114_TARGET, 'rb') as _f:
+            _r114_data = _f.read()
+        _r114_res = get_bounding_box_from_bytes(
+            _r114_data, '10(AC-M01-A).dwg', 'polyline', 'mm', 'smart')
+    except Exception as _e:
+        print('  R114 端到端解析异常:', str(_e)[:120])
+
+    if _r114_res is not None:
+        check('R114真实图: 10(AC-M01-A) 识1框 37150x21000（绑定参照里的 16 个 A1 页框不入库）',
+              lambda: _r114_res,
+              lambda r: (r['frame_count'] == 1
+                         and (round(r['candidates'][0]['width']),
+                              round(r['candidates'][0]['height'])) == (37150, 21000)
+                         and not any((round(c['width']), round(c['height'])) == (84100, 59400)
+                                     for c in r['candidates'])))
+else:
+    print('SKIP  R114 真实图用例（未找到 10(AC-M01-A).dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

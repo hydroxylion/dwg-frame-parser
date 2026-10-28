@@ -295,6 +295,44 @@ def is_entity_invisible(entity):
         return False
 
 
+def is_xref_block(block):
+    """外部参照块判定（R114）：BLOCK 的 DXF 组码 1 = 参照文件路径。
+
+    不能只看「组码 1 非空」——AutoCAD 会把内部匿名块（`*U67` 等）的组码 1
+    填成 `'*U'`，机械构造器（AVE_RENDER 的 `HEX_FLANGE_SCREW_-_10_MM_T` 等
+    螺钉/螺母库块）填的是**不带扩展名**的模板名。只有以 `.dwg` / `.dxf`
+    结尾的才是真正的「外部参照文件」。
+
+    R114 现场（10(AC-M01-A).dwg 识 16 实际 1）：块
+    `AC-（P06-P09）-A·DWG 加餐梯` 的组码 1 是
+    `F:\\Kindergarden\\AC-（P06-P09）-A·DWG 加餐梯.dwg` —— 整张外部图纸被
+    **绑定**进本图当底图，块内 4 套 A1 双线图框（外 84100×59400 + 内
+    80600×57400）被 R40 块内图框救援当成「本图页框」全数提升，5 个重叠实例
+    → 16 个假候选，还把本图真正的 37150×21000 图框当「被包裹框」去重掉。
+    """
+    if block is None:
+        return False
+    try:
+        _p = (block.block.dxf.get('xref_path', '') or '').strip().lower()
+    except Exception:
+        return False
+    return _p.endswith('.dwg') or _p.endswith('.dxf')
+
+
+def xref_block_names(doc):
+    """当前文档里全部「外部参照块」的块名集合（R114）。"""
+    _names = set()
+    if doc is None:
+        return _names
+    try:
+        for _b in doc.blocks:
+            if is_xref_block(_b):
+                _names.add(_b.name)
+    except Exception:
+        pass
+    return _names
+
+
 def block_rect_list(block, doc=None):
     """块定义内的「图框级矩形」清单（块定义坐标），R113。
 
@@ -1114,6 +1152,11 @@ def has_title_stripe(h_segs, v_segs, rect):
 FRAME_RATIO_MIN = 1.05
 FRAME_RATIO_MAX = 5.5
 
+# R114：外部参照块「被反复叠放」的重叠比门槛（交集 / 较小者面积）。
+#   真出图页不会互相压在一起；同一参照块的两个实例 bbox 有这么高的重叠，
+#   就是把整张参照图当底图一层层压上去（10(AC-M01-A).dwg 实测 73%~90%）。
+XREF_OVERLAY_RATIO = 0.5
+
 def normalized_ratio(width, height):
     if width <= 0 or height <= 0:
         return float('inf')
@@ -1918,6 +1961,9 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         except Exception:
             continue
     all_entities = list(layout)
+    # R114：外部参照块名集合（组码 1 指向 .dwg/.dxf）。块内几何属参照文件，
+    #   不是本图作者拼装的 —— R40 块内图框救援对这类块不适用（见 is_xref_block）。
+    _xref_bns = xref_block_names(doc)
     layer_filtered = [e for e in all_entities if e.dxf.layer not in invisible_layers]
     visible_entities = [e for e in layer_filtered if getattr(e.dxf, 'invisible', 0) != 1]
     skipped_layer = len(all_entities) - len(layer_filtered)
@@ -3108,6 +3154,26 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 _bpx, _bpy = _bp.x, _bp.y
             except Exception:
                 _bpx = _bpy = 0.0
+            # R114：本实例的世界 bbox（口径同下方 _bbox，只是提前算出来 —— R95 的
+            #   子块页框提升在 _bbox 之前就发生，需要在提升时把父实例位置带上）。
+            try:
+                _ibp = [((_bb_def[0] - _bpx) * _xs, (_bb_def[1] - _bpy) * _ys),
+                        ((_bb_def[2] - _bpx) * _xs, (_bb_def[1] - _bpy) * _ys),
+                        ((_bb_def[2] - _bpx) * _xs, (_bb_def[3] - _bpy) * _ys),
+                        ((_bb_def[0] - _bpx) * _xs, (_bb_def[3] - _bpy) * _ys)]
+                if _ins_rot:
+                    _rb0 = _math.radians(_ins_rot)
+                    _cb0, _sb0 = _math.cos(_rb0), _math.sin(_rb0)
+                    _ibp = [(_p[0] * _cb0 - _p[1] * _sb0,
+                             _p[0] * _sb0 + _p[1] * _cb0) for _p in _ibp]
+                _ibp = [(_p[0] + _entity.dxf.insert.x,
+                         _p[1] + _entity.dxf.insert.y) for _p in _ibp]
+                if _rot is not None:
+                    _ibp = [_rot_pt(_p[0], _p[1]) for _p in _ibp]
+                _insbb = (min(p[0] for p in _ibp), min(p[1] for p in _ibp),
+                          max(p[0] for p in _ibp), max(p[1] for p in _ibp))
+            except Exception:
+                _insbb = None
 
             # ---------- R95：块内「子块实例页框」提升 ----------
             # 图框常被做成独立页框块，再以块参照嵌进"整页装配块/底图块"里
@@ -3177,6 +3243,10 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                         # R95：来源标记，便于日志与后续判据区分
                         'from_block_inst': _bn,
                         'page_hint': _pwhy,
+                        # R114：父块是外部参照块 → 该页框属参照文件，非本图页框；
+                        #   parent_bbox 记父实例世界 bbox，供判「参照被反复叠放」
+                        'from_xref': _bn in _xref_bns,
+                        'parent_bbox': _insbb,
                     })
 
             _bx1, _by1, _bx2, _by2 = (_bb_def[0]-_bpx, _bb_def[1]-_bpy,
@@ -3573,6 +3643,10 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                                 'inst_sx_neg': _xs < 0,
                                 'inst_sy_neg': _ys < 0,
                                 'inst_abs': (round(abs(_xs), 6), round(abs(_ys), 6)),
+                                # R114：被救援的容器块是外部参照块 → 块内图框属
+                                #   参照文件，不是本图作者拼装的页框
+                                'from_xref': _bn in _xref_bns,
+                                'parent_bbox': _insbb,
                             })
                             _n_up += 1
                         if _n_up:
@@ -3656,6 +3730,9 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                                 'inst_sx_neg': _xs < 0,
                                 'inst_sy_neg': _ys < 0,
                                 'inst_abs': (round(abs(_xs), 6), round(abs(_ys), 6)),
+                                # R114：拼版容器是外部参照块 → 页框属参照文件
+                                'from_xref': _bn in _xref_bns,
+                                'parent_bbox': _insbb,
                             })
                             _mp_added += 1
                         if _mp_added:
@@ -7229,6 +7306,91 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     _lay_objs_wrap[_lname] = doc.layouts.get(_lname.strip('"').strip('“”'))
                 except Exception:
                     pass
+        # ---------- R114：外部参照块内提升的页框不算本图页框 ----------
+        # 场景（10(AC-M01-A).dwg 识 16 实际 1）：块 `AC-（P06-P09）-A·DWG 加餐梯`
+        #   是整张外部图纸**绑定**进来的底图（BLOCK 组码 1 =
+        #   `F:\Kindergarden\AC-（P06-P09）-A·DWG 加餐梯.dwg`）。块内 4 套 A1
+        #   双线图框（外 84100×59400 + 内 80600×57400）× 5 个高度重叠的实例，
+        #   被 R95「块内子块实例页框」全数提升成 16 个 84100×59400；本图真正
+        #   的图框是模型空间顶层直接插入的「A2 加长」块 `A2+`（743×420 @×50
+        #   = 37150×21000）。用户口径：模型空间只有这 1 个。
+        #
+        #   判据（两级）：候选的**来源容器块**是外部参照块（见 is_xref_block）时
+        #   打 `from_xref` 标记；再看这个参照块在本 layout 里是否**被反复叠放**
+        #   （≥2 个实例、实例 bbox 相互重叠 ≥ XREF_OVERLAY_RATIO）——是的话，
+        #   这块参照是压在图纸上的底图，它提升出来的页框不是本图出图页。
+        #   只按"是不是参照"一刀切会误伤一整个族群：P_10#/P_9#（参照里 14 页就是
+        #   本图的出图页，基线 fc=14）、d006/d008（整张图就是参照页）、
+        #   AC-P02、E01、D03-B（参照块 `Ax-S-E01` 贡献 2 页）、邮电学院、water-2014
+        #   ——它们的参照块都只有 1 个实例、或实例各自摆开，页框互不重叠。
+        #   护栏：本图**完全**没有自有页框时保留（d008.dwg 整张出图页就在绑定
+        #   参照块里，这时参照页就是本图页）。
+        #
+        #   时序是关键，两处都不能挪：
+        #     · 必须在**特征筛选之后**——rel_area_ratio 的分母取「同 layout 最大
+        #       候选」，参照里那 16 个 84100×59400 正是分母；提前剔掉，本图真框
+        #       的 rel 从 15.6% 塌到 0.4%，条件C 直接灭（实测 fc=0）。
+        #     · 必须在**去重之前**——否则本图真框先被参照大框当"包裹内容"剔掉
+        #       （现场 debug：37150x21000 被 84100x59400 去重剔除），事后再捞
+        #       也捞不回一条已经不在 frame_like 里的候选。
+        #   开关 FRAME_PARSER_NO_XREF_PAGE_FILTER=1 回退。
+        if os.environ.get('FRAME_PARSER_NO_XREF_PAGE_FILTER') != '1':
+            # 判据二（决定性的那一条）：**同一参照块在同一个 layout 里被反复叠放**。
+            #   真出图页不会互相叠在一起；所以"同一外部参照块的多个实例，实例 bbox
+            #   相互高度重叠"= 把整张参照图当底图一层层压上去，它的页框不是本图的
+            #   出图页。单实例、或实例各自摆开的参照（P_10#/P_9#/d006/d008/
+            #   AC-P02、E01、D03-B 等，整张图纸本身就是参照页）不受影响。
+            #   现场数据：本图 5 个实例两两重叠 73%~90%。
+            _rd = set()
+            _grp = {}
+            for _c in frame_like:
+                if not _c.get('from_xref'):
+                    continue
+                _sb = _c.get('src_block')
+                _pb = _c.get('parent_bbox')
+                if not _sb or not _pb:
+                    continue        # 拿不到父实例位置（R94 自动加载的参照页）→ 保留
+                _grp.setdefault((_c['layout'], _sb), []).append((_c, _pb))
+            for _lst in _grp.values():
+                _pbs = []
+                for _c, _pb in _lst:
+                    if _pb not in _pbs:
+                        _pbs.append(_pb)
+                if len(_pbs) < 2:
+                    continue
+                _mx = 0.0
+                for _i in range(len(_pbs)):
+                    for _j in range(_i + 1, len(_pbs)):
+                        _a, _b = _pbs[_i], _pbs[_j]
+                        _ix = min(_a[2], _b[2]) - max(_a[0], _b[0])
+                        _iy = min(_a[3], _b[3]) - max(_a[1], _b[1])
+                        if _ix <= 0 or _iy <= 0:
+                            continue
+                        _aa = (_a[2] - _a[0]) * (_a[3] - _a[1])
+                        _ab = (_b[2] - _b[0]) * (_b[3] - _b[1])
+                        _mn = min(_aa, _ab)
+                        if _mn > 0 and _ix * _iy / _mn > _mx:
+                            _mx = _ix * _iy / _mn
+                if _mx >= XREF_OVERLAY_RATIO:
+                    for _c, _pb in _lst:
+                        _rd.add(id(_c))
+            _xr_like = [c for c in frame_like if id(c) in _rd]
+            # 护栏：本图**完全**没有自有页框时保留（d008.dwg 整张出图页就在
+            #   绑定参照块里，这时参照页就是本图页）。
+            _own_like = [c for c in frame_like if id(c) not in _rd]
+            if _xr_like and _own_like:
+                _xr_cnt = {}
+                for _c in _xr_like:
+                    _k = (round(_c['width']), round(_c['height']))
+                    _xr_cnt[_k] = _xr_cnt.get(_k, 0) + 1
+                _xr_desc = ', '.join('%dx%d×%d' % (k[0], k[1], n)
+                                     for k, n in sorted(_xr_cnt.items()))
+                frame_like = _own_like
+                pass_feature_count = len(frame_like)
+                safe_log(f"  [R114·参照页框剔除] 外部参照块被反复叠放，其提升的 "
+                         f"{len(_xr_like)} 个页框（{_xr_desc}）不作本图图框"
+                         f"——残留 {len(_own_like)} 个本图自有候选")
+
         frame_like, wrap_removed, _wrap_removed_items = strip_wrapping_frames(
             frame_like, _all_bboxes_by_layout, _lay_objs_wrap)
         wrap_stripped_count = len(frame_like)
