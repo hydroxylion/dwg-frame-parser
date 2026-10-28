@@ -1157,6 +1157,19 @@ FRAME_RATIO_MAX = 5.5
 #   就是把整张参照图当底图一层层压上去（10(AC-M01-A).dwg 实测 73%~90%）。
 XREF_OVERLAY_RATIO = 0.5
 
+# R116：块 bbox 去「离群散件」的门槛。
+#   块定义里常挂着一个远距离垃圾实例（拖进来的墙线/详图碎片），把 bbox 撑到量级
+#   失真：16(AC-T01-A).dwg 的 A1 图框块 84100x59400，因块内挂了一个 Wall 层嵌套
+#   INSERT（展开后跨 4952977x8972222），bbox 变成 5032724x8978306 → R27 边框证据
+#   分母虚高 100 倍，整块被判「内容块」剔除，fc=0。
+#   TRIM_MIN_ENTS：实体数太少时中位数不可靠，不判断。
+#   TRIM_MULT    ：以「实体中心偏移距离的中位数」为尺度，20 倍之外算散件。这个倍数
+#                  故意取得很宽——多页拼版块里每页都有成百实体，中心分布本来就很散，
+#                  只有「孤零零一两个实体在几百万之外」才会被切掉（实测散件距离是中
+#                  位偏移的 340 倍，真内容全部在 3 倍以内）。
+BLOCK_BBOX_TRIM_MIN_ENTS = 4
+BLOCK_BBOX_TRIM_MULT = 20.0
+
 def normalized_ratio(width, height):
     if width <= 0 or height <= 0:
         return float('inf')
@@ -2062,7 +2075,31 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     import math as _math
     _block_bbox_cache = {}
     def _get_block_world_bbox(_name, _visited=None):
-        """递归求块的 bbox（块定义内坐标，未应用 INSERT xscale/yscale）。"""
+        """递归求块的 bbox（块定义内坐标，未应用 INSERT xscale/yscale）。
+
+        R116：bbox 去「离群散件」。块定义里常挂着一个远距离垃圾实例，把 bbox 撑到
+          量级失真，而块的真实内容只占其中很小一块。现场（16(AC-T01-A).dwg 识 0
+          实际 1，841x594 = A1）：
+            q234325435 是 A1 图框装配块（X-Tlbk 层 84100x59400 外框 + 80700x57500
+            内框 + 图签子块 + 属性，78 个贡献点位的实体），但块内还挂了一个 Wall 层
+            嵌套 INSERT（展开后跨 4952977x8972222，离图框 500 万单位），bbox 被撑成
+            5032724x8978306。后果两条：
+              ① R27 边框证据分母虚高：块内 84100 的图框矩形只占「块长边」0.94%
+                 < 50% → 整块被判「非图框内容块」剔除，入库 0 个 → fc=0；
+              ② 世界尺寸虚高：实例 scale 0.01，真框世界尺寸 841x594（A1 纸面 mm），
+                 却被算成 50327x89783。
+          判据用**实体分布**，不是几何极值：以实体中心的中位数为中心，取各实体中心
+            偏移距离的中位数 md，半径 R = 20xmd 之外的实体视为散件。中位数对个别
+            极端值免疫——78 个实体里 1 个在 500 万之外，动不了 md（实测 md≈1.5e4，
+            R≈3e5，散件 5.1e6 被剔，77 个真内容全在 4e4 内不受影响）。
+          护栏（保守，只缩不放）：
+            ① 实体数 >= 4 才判断（太少时中位数本身不可靠）；
+            ② 剔除数 <= max(1, n/10) —— 超过 10% 不是「个别散件」而是块真这么分布
+               （多页拼版块每页都有成百实体，不会被误削）；
+            ③ 剩余实体 >= 3；
+            ④ 只可能缩小 bbox，永不放大。
+          开关 FRAME_PARSER_NO_BLOCK_BBOX_TRIM=1 回退到纯几何极值。
+        """
         if _name in _block_bbox_cache:
             return _block_bbox_cache[_name]
         if _visited is None:
@@ -2072,8 +2109,11 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         if _name not in doc.blocks:
             return None
         _visited.add(_name)
-        _pts = []
+        # R116：按实体分组收集点位（原实现拍平成一个点表，丢掉了「哪个实体」这个
+        #   信息，无法做「实体分布」判据）。
+        _ent_pts = []
         for _ent in doc.blocks[_name]:
+            _pts = []
             try:
                 _t = _ent.dxftype()
                 if _t == 'LWPOLYLINE':
@@ -2111,11 +2151,74 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                             _pts.append((_ipt[0] + _p[0], _ipt[1] + _p[1]))
             except Exception:
                 continue
-        if not _pts:
+            if _pts:
+                _ent_pts.append(_pts)
+        if not _ent_pts:
             _block_bbox_cache[_name] = None
             return None
-        _bb_ret = (min(p[0] for p in _pts), min(p[1] for p in _pts),
-                   max(p[0] for p in _pts), max(p[1] for p in _pts))
+        # ---------- R116：块 bbox 去离群散件（见函数 docstring） ----------
+        _keep_pts = _ent_pts
+        if (os.environ.get('FRAME_PARSER_NO_BLOCK_BBOX_TRIM') != '1'
+                and len(_ent_pts) >= BLOCK_BBOX_TRIM_MIN_ENTS):
+            _ctrs = []
+            for _ps in _ent_pts:
+                _sx = 0.0; _sy = 0.0
+                for _p in _ps:
+                    _sx += _p[0]; _sy += _p[1]
+                _n = len(_ps)
+                _ctrs.append((_sx / _n, _sy / _n))
+            _mcx = sorted(p[0] for p in _ctrs)[len(_ctrs) // 2]
+            _mcy = sorted(p[1] for p in _ctrs)[len(_ctrs) // 2]
+            _dists = [_math.hypot(p[0] - _mcx, p[1] - _mcy) for p in _ctrs]
+            _mdist = sorted(_dists)[len(_dists) // 2]
+            _rad = _mdist * BLOCK_BBOX_TRIM_MULT
+            _kept = [_ent_pts[_i] for _i, _d in enumerate(_dists) if _d <= _rad]
+            _drop_n = len(_ent_pts) - len(_kept)
+            # R116 护栏（退化情形）：多数实体中心重合时中位偏移 = 0，半径塌成 0，
+            #   会把「只偏了一点点」的正常实体当散件剔掉（实测 4 个实体里 3 个
+            #   中心重合 → 第 4 个哪怕只偏 100mm 也被剔）。所以再验两条：
+            #   ① 主体区跨度必须非退化（>= 1mm）；
+            #   ② 散件到主体区 bbox 的距离必须 >= 主体区跨度的 2 倍——「离群」
+            #     是相对主体自身尺度说的，不是相对 0 说的。真实散件相距 100 万，
+            #     主体区跨度只有 62mm（sdeg）或 84100mm（图框块），两个量级都远超。
+            if 1 <= _drop_n <= max(1, len(_ent_pts) // 10) and len(_kept) >= 3:
+                _kx = [p[0] for _ps in _kept for p in _ps]
+                _ky = [p[1] for _ps in _kept for p in _ps]
+                _kb = (min(_kx), min(_ky), max(_kx), max(_ky))
+                _kspan = max(_kb[2] - _kb[0], _kb[3] - _kb[1])
+                _min_gap = None
+                for _i, _d in enumerate(_dists):
+                    if _d <= _rad:
+                        continue
+                    _c = _ctrs[_i]
+                    _gx = max(_kb[0] - _c[0], _c[0] - _kb[2], 0.0)
+                    _gy = max(_kb[1] - _c[1], _c[1] - _kb[3], 0.0)
+                    _g = _math.hypot(_gx, _gy)
+                    if _min_gap is None or _g < _min_gap:
+                        _min_gap = _g
+                if _kspan >= 1.0 and _min_gap is not None and _min_gap >= _kspan * 2.0:
+                    # R116 第二道收口：**只有当块的主体本身就是一张图幅时**，才有独立
+                    #   证据说"其余散件不属于这个块"——图幅装配块（图框 + 图签 + 属性）
+                    #   的主体必然是一整张纸，而纸的尺寸有绝对答案（A 系幅面整数倍 / ×
+                    #   标准出图比例，或 ≥15000mm 的建筑页下限，与 R115 判据④ 同口径）。
+                    #   没有这条，凡是"小块 + 远处几个散件"都会被削：实测 1#,8#住宅 里
+                    #   螺栓详图块 wetwwtwt（真实内容 2463×6003，4 个散件在 78m 外）
+                    #   被削成 2463×6003，父块 ewtewtwey 的 bbox 随之变干净 → R27 从
+                    #   "拒绝"翻成"接受"，R40 块内救援不再触发，5 张 52550×29700 表格页
+                    #   只剩 2 张（fc 23→20）。详图块的范围该按原始几何算，本就不该削。
+                    _kw = _kb[2] - _kb[0]
+                    _kh = _kb[3] - _kb[1]
+                    _kshort = min(_kw, _kh)
+                    if (_kshort >= GIANT_PAGE_MEMBER_MIN_SHORT
+                            or is_paper_short_side(_kshort)):
+                        _keep_pts = _kept
+                        safe_log(
+                            f"  [R116·块 bbox 去散件] 块 {_name}：{len(_ent_pts)} 个实体中 "
+                            f"{_drop_n} 个离主体 {_rad:.0f}mm 之外（主体 {_kw:.0f}×{_kh:.0f}"
+                            f"＝一张图幅，最近散件相距 {_min_gap:.0f}mm）→ 不作 bbox 范围")
+        _all = [p for _ps in _keep_pts for p in _ps]
+        _bb_ret = (min(p[0] for p in _all), min(p[1] for p in _all),
+                   max(p[0] for p in _all), max(p[1] for p in _all))
         _block_bbox_cache[_name] = _bb_ret
         return _bb_ret
 

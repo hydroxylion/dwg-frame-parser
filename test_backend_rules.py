@@ -5376,4 +5376,135 @@ else:
     print('SKIP  R115 真实图用例（未找到 15(AC-D04-A).dwg）')
 
 
+# ============================================================================
+# R116：块 bbox 去「离群散件」
+#   现象（16(AC-T01-A).dwg 识 0 实际 1，841x594）：A1 图框装配块 q234325435 定义
+#   84100x59400，块内却挂着一个远距离嵌套实例（展开后跨 500 万 x 900 万），bbox 被
+#   撑成 5032724x8978306 → R27 边框证据的分母虚高 100 倍，块内 84100 的图框矩形只占
+#   「块长边」0.94% < 50% → 整块被判「非图框内容块」剔除、入库 0 个 → fc=0。
+#   真实污染链是两层的：sdeg 块里两个只有 0.54mm 的 bh1 点相隔 1,024,835mm，把 sdeg
+#   的 bbox 从 62x47 撑到 102 万宽；sdeg 又被图框块以 scale=10 + 旋转 166° 插入。
+#   判据：以实体中心的中位数为心、各实体中心偏移距离的中位数为尺度，20 倍之外算散件。
+# ============================================================================
+
+def _r116_frame_block_with_stray(trims_ok=True):
+    """合成复现：A1 图框块（定义 84100x59400）+ 块内一个远距离垃圾实例。
+
+    图框块按 1:100 画在块定义里（84100x59400），再以 scale=0.01 插入 →
+    世界尺寸 841x594（A1 纸面 mm），与真实现场同构。
+    """
+    d = make_doc()
+    # 垃圾块：一条细线（复刻 sdeg 里的散件）
+    _junk = d.blocks.new('JUNK_R116')
+    _junk.add_line((0, 0), (50, 0))
+
+    _fb = d.blocks.new('A1FRAME_R116')
+    add_closed_rect(_fb, 0, 0, 84100, 59400)              # 外框
+    add_closed_rect(_fb, 2500, 1000, 80600, 57400)        # 内框（双线画法）
+    for _k in range(10):                                  # 图签区 10 条横线 → 实体数足够
+        _yy = 1500 + _k * 900
+        _fb.add_line((70000, _yy), (82000, _yy))
+    # 远距离垃圾实例：离图框 500 万单位（真实现场 7498949 / -1580678）
+    _fb.add_blockref('JUNK_R116', (5000000.0, -1000000.0))
+
+    _fi = d.modelspace().add_blockref('A1FRAME_R116', (0.0, 0.0))
+    _fi.dxf.xscale = 0.01
+    _fi.dxf.yscale = 0.01
+    return to_bytes(d)
+
+
+_r116_stray = _r116_frame_block_with_stray()
+
+check('R116-A: A1 图框块内挂着 500 万外的垃圾实例，仍须认 1 框 841x594（bbox 去散件）',
+      lambda: parse(_r116_stray),
+      lambda r: (r['frame_count'] == 1
+                 and (round(r['candidates'][0]['width']),
+                      round(r['candidates'][0]['height'])) == (841, 594)))
+
+# 开关回退对照：不裁 bbox → 块长边 500 万，84100 的图框矩形只占 1.68% → R27 判内容块
+# → INSERT 入库 0 个 → 答案退化成「全实体包围盒」= 该块的污染足迹 50000x10594
+#   （真实图 16(AC-T01-A) 同一条链最终直接「未检测到图框」，因为图里还有 831 个
+#   非 INSERT 实体，兜底包围盒也过不了特征筛选）
+check('R116-B: 开关回退——不裁 bbox 时该块被判内容块（入库 0），答案退化成 50000x10594 的污染足迹',
+      lambda: _parse_env(_r116_stray, FRAME_PARSER_NO_BLOCK_BBOX_TRIM='1'),
+      lambda r: (r['candidates'][0]['type'] == '全实体包围盒'
+                 and r['candidates'][0]['width'] > 10000))
+
+# ---- 用例 166：R116 正向守卫 —— 块内真两页并排，不能被「去散件」削成一页 ----
+# 块定义 84100x118800 = 上下两张 A1 页（各 84100x59400），每页 14 个实体（人口均衡）。
+# 以 scale=0.01 插入 → 世界 841x1188（A0 = 2x A1）。若去散件误伤，会退化成 841x594。
+doc = make_doc()
+_fb2 = doc.blocks.new('A0TWOPAGE_R116')
+add_closed_rect(_fb2, 0, 0, 84100, 59400)          # 页 1
+add_closed_rect(_fb2, 0, 59400, 84100, 59400)      # 页 2（y 紧贴，真拼版画法）
+for _k in range(12):                               # 页 1 内容
+    _fb2.add_line((1000 + _k * 600, 2000), (1000 + _k * 600, 56000))
+for _k in range(12):                               # 页 2 内容
+    _fb2.add_line((1000 + _k * 600, 61400), (1000 + _k * 600, 115400))
+_fi2 = doc.modelspace().add_blockref('A0TWOPAGE_R116', (0.0, 0.0))
+_fi2.dxf.xscale = 0.01
+_fi2.dxf.yscale = 0.01
+data_r116_twopage = to_bytes(doc)
+check('R116-C: 块内两页真拼版（人口均衡）不被去散件削成一页，仍按整块 841x1188 认',
+      lambda: parse(data_r116_twopage),
+      lambda r: (r['frame_count'] == 1
+                 and (round(r['candidates'][0]['width']),
+                      round(r['candidates'][0]['height'])) == (841, 1188)))
+
+
+# ---- 用例 167：R116 第二道收口 —— 非图幅块不许削 ----
+# 只在「块主体本身就是一张图幅」时才用主体范围当 bbox。反例现场（1#,8#住宅0721出图
+# _t5）：螺栓详图块 wetwwtwt 真实内容 2463x6003，4 个散件在 78m 外；把它削成 2463x6003
+# 后父块 bbox 变干净 → R27 从「拒绝」翻成「接受」→ R40 块内救援不再触发 → 5 张
+# 52550x29700 表格页只剩 2 张（fc 23→20）。详图块的范围该按原始几何算。
+# 本例：详图块 2463x6003 + 4 个 78m 外散件 → bbox 保持 102126x6003（ratio 17 超上限，
+# 预筛剔除），不产生 2463x6003 候选；同时同图放一张真 A1 图框保证有结果。
+doc = make_doc()
+_junkmk = doc.blocks.new('BOLTMARK_R116')
+_junkmk.add_line((0, 0), (28, 0))
+_bolt = doc.blocks.new('BOLTDETAIL_R116')
+add_closed_rect(_bolt, 0, 0, 2463, 6003)
+for _k in range(4):
+    _bolt.add_blockref('BOLTMARK_R116', (78000.0 + _k * 100, 0.0))
+_fb3 = doc.blocks.new('A1FRAME_R116D')
+add_closed_rect(_fb3, 0, 0, 84100, 59400)
+add_closed_rect(_fb3, 2500, 1000, 80600, 57400)
+_fi3 = doc.modelspace().add_blockref('A1FRAME_R116D', (0.0, 0.0))
+_fi3.dxf.xscale = 0.01
+_fi3.dxf.yscale = 0.01
+doc.modelspace().add_blockref('BOLTDETAIL_R116', (0.0, -200000.0))
+data_r116_detail = to_bytes(doc)
+check('R116-D: 螺栓详图块（2463x6003 + 78m 外 4 个散件）不被去散件，不产生 2463x6003 候选',
+      lambda: parse(data_r116_detail),
+      lambda r: (r['frame_count'] == 1
+                 and (round(r['candidates'][0]['width']),
+                      round(r['candidates'][0]['height'])) == (841, 594)
+                 and not any(abs(round(c['width']) - 2463) < 5 for c in r['candidates'])))
+
+
+# ---- 用例 168：R116 真实图端到端 ----
+_R116_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\16(AC-T01-A).dwg',
+]
+_R116_TARGET = next((p for p in _R116_CANDIDATES if os.path.exists(p)), None)
+if _R116_TARGET:
+    _r116_res = None
+    try:
+        with open(_R116_TARGET, 'rb') as _f:
+            _r116_bin = _f.read()
+        _r116_res = get_bounding_box_from_bytes(
+            _r116_bin, '16(AC-T01-A).dwg', 'polyline', 'mm', 'smart')
+    except Exception as _e:
+        print('  R116 端到端解析异常:', str(_e)[:120])
+
+    if _r116_res is not None:
+        check('R116真实图: 16(AC-T01-A) 识1框 841x594（A1 图框块内的远距离垃圾不影响）',
+              lambda: _r116_res,
+              lambda r: (r['frame_count'] == 1
+                         and (round(r['candidates'][0]['width']),
+                              round(r['candidates'][0]['height'])) == (841, 594)))
+else:
+    print('SKIP  R116 真实图用例（未找到 16(AC-T01-A).dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
