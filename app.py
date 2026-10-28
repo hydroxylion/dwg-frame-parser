@@ -295,6 +295,103 @@ def is_entity_invisible(entity):
         return False
 
 
+def block_rect_list(block, doc=None):
+    """块定义内的「图框级矩形」清单（块定义坐标），R113。
+
+    与 `_scan_line_page_rects`（要求矩形四边贴合块 bbox ≤0.5%）和
+    `_scan_block_max_page_rects`（只认闭合多段线、只留极大框）不同，本函数
+    **刻意不做**比例/贴合/极大性过滤——它只回答「块里画了哪些矩形」，由调用方
+    自己判断矩形之间的关系（R113 用来判「外框 + 内缩内框 = 双线画法」）。
+
+    这两条扫描都在 `collect_candidates_from_layout` 的闭包里，
+    `get_bounding_box_from_bytes` 一侧取不到，故单独提供模块级实现。
+
+    数据源两条：
+      · 闭合且矩形度 ≥98% 的 LWPOLYLINE（4 顶点、无 bulge 的常规画法）；
+      · 4 条 LINE 横竖配对围成的矩形（容差 0.01mm，口径同 `_scan_line_page_rects`）。
+
+    过滤口径与 R104/R106/R112 一致：不打印层（显式组码 290=0，典型 Defpoints）
+    与实体级不可见（组码 60=1）的图元不算图框证据。
+
+    返回 (x1, y1, x2, y2) 列表，坐标是块定义坐标（未应用实例缩放）。
+    """
+    _rects = []
+    if block is None:
+        return _rects
+    _noplot = set()
+    if doc is not None:
+        try:
+            for _lay in doc.layers:
+                try:
+                    _ln = _lay.dxf.name
+                    # 只认显式写了 290=0 的层（ezdxf 会把缺失的 290 补成 0，
+                    # 按 getattr 默认值判断会让所有普通层都变成"不可打印"）
+                    if (_ln != '0' and _lay.dxf.hasattr('plot')
+                            and not int(_lay.dxf.get('plot', 1))):
+                        _noplot.add(_ln)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    _tol = 0.01
+    _hlines = []    # (y, xmin, xmax)
+    _vlines = []    # (x, ymin, ymax)
+    for _e in block:
+        try:
+            if is_entity_invisible(_e):
+                continue
+            _el = _e.dxf.layer
+            if _el != '0' and _el in _noplot:
+                continue
+            _t = _e.dxftype()
+            if _t == 'LWPOLYLINE':
+                if not is_polyline_closed(_e):
+                    continue
+                _pts = get_polyline_vertices(_e)
+                if len(_pts) < 3:
+                    continue
+                _xs = [p[0] for p in _pts]
+                _ys = [p[1] for p in _pts]
+                _w = max(_xs) - min(_xs)
+                _h = max(_ys) - min(_ys)
+                if _w <= 0 or _h <= 0:
+                    continue
+                _a = polygon_area(_pts)
+                if _a <= 0 or abs(_a / (_w * _h) - 1.0) > 0.02:
+                    continue        # 矩形度 <98%（含圆弧/斜边/不规则边界）
+                _rects.append((min(_xs), min(_ys), max(_xs), max(_ys)))
+            elif _t == 'LINE':
+                _s, _t2 = _e.dxf.start, _e.dxf.end
+                _dx = abs(_t2.x - _s.x)
+                _dy = abs(_t2.y - _s.y)
+                if _dy <= _tol and _dx > _tol:
+                    _hlines.append((_s.y, min(_s.x, _t2.x), max(_s.x, _t2.x)))
+                elif _dx <= _tol and _dy > _tol:
+                    _vlines.append((_s.x, min(_s.y, _t2.y), max(_s.y, _t2.y)))
+        except Exception:
+            continue
+    for _i in range(len(_vlines)):
+        for _j in range(_i + 1, len(_vlines)):
+            # 竖线按发现顺序入列，x 不一定左小右大 → 必须排序后配对
+            _x1, _x2 = sorted((_vlines[_i][0], _vlines[_j][0]))
+            if _x2 <= _x1 + _tol:
+                continue
+            _ylo = max(_vlines[_i][1], _vlines[_j][1])
+            _yhi = min(_vlines[_i][2], _vlines[_j][2])
+            if _yhi - _ylo <= _tol:
+                continue
+            _ok = True
+            for _yy in (_ylo, _yhi):
+                if not any(abs(_h[0] - _yy) <= _tol
+                           and _h[1] <= _x1 + _tol
+                           and _h[2] >= _x2 - _tol for _h in _hlines):
+                    _ok = False
+                    break
+            if _ok:
+                _rects.append((_x1, _ylo, _x2, _yhi))
+    return _rects
+
+
 def get_entity_bbox(entity, doc):
     """单个实体的包围盒 (x1, y1, x2, y2)，失败返回 None。
     注意：ezdxf 实体没有 bounding_box() 方法（旧代码在此静默失败导致
@@ -6366,7 +6463,21 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                         #    被孤证 score=0 误剔。双线画法是图框
                                         #    强特征（内容矩形极少同层同心嵌套且
                                         #    面积比落 85%~99.5%），故单独加权互证。
+            'block_double_line':  1.0,  # ⑨ 块内双线画法自证（R113）：块参照插入候选
+                                        #    的**块定义内部**同时存在「LINE 四边围合
+                                        #    的页框」与「≥85%×85% 的内缩闭合矩形」。
+                                        #    ⑧ 只能看候选之间，块内部的内框从未入库
+                                        #    就永远拿不到分——09 AC-S01-A.dwg 全图
+                                        #    唯一图框（块 FGY76576YRTY，外框
+                                        #    59450×42000 是 4 条 LINE 画在 X-Tlbk，
+                                        #    内框 55950×40000 闭合多段线 94.1%×95.2%）
+                                        #    八通道全空被剔 → 整张图「解析失败」。
+                                        #    R45/R109 早已把「外框+内缩内框」定为
+                                        #    真图框判据，此处只是把它从候选间下沉到
+                                        #    块定义内部。
         }
+        # ⑨ 内框尺寸占外框的下限（与 R109 的 OWN_BORDER_RATIO 同源；上限 99.5%）
+        _SOLO_DOUBLE_LINE_RATIO = 0.85
         # ⑤ 图幅代号：A0~A9 独立词。(?<![a-z0-9]) 防匿名块名 A$C6A6C4DA6
         # （其 a6 前是字母数字无词边界）；(?![0-9]) 防 A31005 类图纸编号误伤。
         _SHEET_SIZE_NAME_RE = re.compile(r'(?<![a-z0-9])a[0-9](?![0-9])')
@@ -6455,6 +6566,54 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                              f"({_o.get('insert_layer')})")
                 _c['_double_line_inner'] = True  # R83：标记双线画法真图框，去重阶段免被空壳外包络剔小
                 break
+            # ⑨ R113：块内双线画法自证（块参照插入通道）
+            #   场景（09 AC-S01-A.dwg）：全图只有 1 个图框 —— 块 FGY76576YRTY。
+            #   外框 59450×42000 由 4 条 LINE 画在 X-Tlbk（图框层），内框
+            #   55950×40000 是闭合多段线（单边内缩 1750/1000，94.1%×95.2%）。
+            #   全图无同尺寸副本（①）、无同比例兄弟（②）、标题栏条纹藏在嵌套
+            #   「图签」块里检不出（③）、内框从未入库成候选（⑥⑦⑧ 都看不到它）
+            #   → score=0 → 唯一候选被剔 → 整张图报「未检测到图框」解析失败。
+            #   「外框 + 内缩一点的内框」正是图框的标准画法（R45/R109 已据此判
+            #   真图框），内容块不会给自己画一个 94% 的同心副本。故把该判据从
+            #   「候选之间」下沉到「块定义内部」。
+            #   但**块定义坐标里的比例是尺度无关的**，必须再加一道世界尺寸门槛：
+            #   中国水电泛悦国际-总平 的块定义只有 525×425（内含 500×400 内框，
+            #   95.2%×94.1%——与真图框一模一样的比例），却被放大 1391 倍插成
+            #   730112×425000 的总平面底图 → ⑨ 照样命中，fc 6→7 回归。
+            #   真图框的世界尺寸必然是「A 系纸幅 × 标准出图比例」（59450×42000
+            #   = A2@1:100；89100×126150 = A1@1:150），故要求短边是纸幅级
+            #   （复用 R107/R110 的 is_paper_short_side）。730112×425000 的短边
+            #   425000 不是任何纸幅 × 标准比例 → 被挡住。
+            if (_c.get('type') == '块参照插入'
+                    and is_paper_short_side(min(_c['width'], _c['height']))):
+                _bn9 = _c.get('block_name') or ''
+                if _bn9 in doc.blocks:
+                    try:
+                        _r9 = block_rect_list(doc.blocks[_bn9], doc)
+                    except Exception:
+                        _r9 = []
+                    if len(_r9) >= 2:
+                        _o9 = max(_r9, key=lambda r: (r[2] - r[0]) * (r[3] - r[1]))
+                        _ow9 = _o9[2] - _o9[0]
+                        _oh9 = _o9[3] - _o9[1]
+                        for _i9 in _r9:
+                            if _i9 is _o9 or _ow9 <= 0 or _oh9 <= 0:
+                                continue
+                            _iw9 = _i9[2] - _i9[0]
+                            _ih9 = _i9[3] - _i9[1]
+                            _rw9 = _iw9 / _ow9
+                            _rh9 = _ih9 / _oh9
+                            if not (_SOLO_DOUBLE_LINE_RATIO <= _rw9 <= 0.995
+                                    and _SOLO_DOUBLE_LINE_RATIO <= _rh9 <= 0.995):
+                                continue
+                            if not (_i9[0] >= _o9[0] - 1 and _i9[1] >= _o9[1] - 1
+                                    and _i9[2] <= _o9[2] + 1 and _i9[3] <= _o9[3] + 1):
+                                continue
+                            _score += _SOLO_WEIGHTS['block_double_line']
+                            _hits.append(f"⑨块内双线画法 {_iw9:.0f}x{_ih9:.0f}"
+                                         f"（{_rw9:.1%}×{_rh9:.1%} 于 "
+                                         f"{_ow9:.0f}x{_oh9:.0f}）")
+                            break
             return _score, _hits
 
         if _SOLO_RECHECK_ENABLED and frame_like:

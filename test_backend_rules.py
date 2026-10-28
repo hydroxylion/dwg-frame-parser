@@ -5013,4 +5013,98 @@ else:
     print('SKIP  R112 真实图用例（未找到 05-08 AC-(E05-E08)-A.dwg）')
 
 
+# ---- 用例 152：R113 块内双线画法自证（孤证复核 ⑨） ----
+# 现场（09 AC-S01-A.dwg 解析失败）：全图只有 1 个图框 —— 块 FGY76576YRTY，
+# 外框 59450×42000 由 4 条 LINE 画在 X-Tlbk（图框层），内框 55950×40000 是
+# 闭合多段线（94.1%×95.2%）。全图无同尺寸副本（①）、无同比例兄弟（②）、
+# 标题栏条纹藏在嵌套「图签」块里检不出（③）、内框从未入库成候选（⑥⑦⑧ 都
+# 看不到它）→ 孤证评分 score=0 → 唯一候选被剔 → 整张图报「未检测到图框」。
+# 这里用最小复现：单图框块（外框 LINE + 内框闭合多段线）+ 两条斜向长线把
+# layout bbox 撑大（让候选走条件C 且 area_ratio<5%，即必经孤证复核）。
+def _r113_lone_frame(inner=True):
+    d = make_doc()
+    _fr = d.blocks.new('FGY_TEST')
+    # 外框：4 条 LINE 画在 X-Tlbk（图框层），与真实图同款
+    for (_x1, _y1), (_x2, _y2) in (((0, 0), (59450, 0)), ((59450, 0), (59450, 42000)),
+                                   ((59450, 42000), (0, 42000)), ((0, 42000), (0, 0))):
+        _fr.add_line((_x1, _y1), (_x2, _y2), dxfattribs={'layer': 'X-Tlbk'})
+    if inner:
+        # 内框：闭合多段线，单边内缩 1750/1000 → 94.1% × 95.2%
+        add_closed_rect(_fr, 1750, 1000, 55950, 40000)
+    for _k in range(12):      # 图签区横条纹
+        _fr.add_line((0.0, 3000.0 + _k * 1000.0), (20000.0, 3000.0 + _k * 1000.0))
+    _msp = d.modelspace()
+    _msp.add_blockref('FGY_TEST', (0.0, 0.0))
+    # 两条斜线把 layout bbox 撑大（斜线避开 LINE 横竖配对，不构成矩形候选）
+    _msp.add_line((0.0, 0.0), (900000.0, 700000.0))
+    _msp.add_line((0.0, 700000.0), (900000.0, 0.0))
+    return to_bytes(d)
+
+
+check('R113-A: 孤证图框块内含 ≥85%×85% 内框（双线画法）→ 不被孤证复核剔除，识 1 框 59450x42000',
+      lambda: parse(_r113_lone_frame(True)),
+      lambda r: (r['frame_count'] == 1
+                 and (round(r['candidates'][0]['width']),
+                      round(r['candidates'][0]['height'])) == (59450, 42000)))
+
+check('R113-B: 对照——去掉内框后照旧判孤证剔除（整图无图框），证明判据落在双线画法而非尺寸',
+      lambda: _r113_lone_frame(False),
+      expect_error_no_frame)
+
+
+# ---- 用例 153：R113 ⑨ 的尺度门槛（世界尺寸须为纸幅级） ----
+# 纯「块内双线比例」会被尺度无关地误命中（中国水电泛悦国际-总平 回归）：
+# 块定义只有 525×425，内含 500×400 内框（95.2%×94.1%，与真图框比例一模一样），
+# 却被放大 1391 倍插成 730112×425000 的总平面底图 → ⑨ 命中、fc 6→7。
+# 真图框的世界尺寸必然是「A 系纸幅 × 标准出图比例」（59450×42000 = A2@1:100），
+# 故要求短边是纸幅级；425000 不是任何纸幅 × 标准比例 → 挡住。
+def _r113_overscaled_block():
+    d = make_doc()
+    _blk = d.blocks.new('SITE_PLAN')
+    for (_x1, _y1), (_x2, _y2) in (((0, 0), (525, 0)), ((525, 0), (525, 425)),
+                                   ((525, 425), (0, 425)), ((0, 425), (0, 0))):
+        _blk.add_line((_x1, _y1), (_x2, _y2))
+    add_closed_rect(_blk, 12, 13, 500, 400)      # 500×400 → 95.2% × 94.1%
+    _msp = d.modelspace()
+    _ins = _msp.add_blockref('SITE_PLAN', (0.0, 0.0))
+    # 非等比放大（真实图就是 sx≈1391 / sy=1000）：525×425 → 730275×425000
+    _ins.dxf.xscale = 1391.0
+    _ins.dxf.yscale = 1000.0
+    # 斜向长线把 layout bbox 撑到 4e6×3e6，让候选 area_ratio<5% 必经孤证复核
+    _msp.add_line((0.0, 0.0), (4000000.0, 3000000.0))
+    _msp.add_line((0.0, 3000000.0), (4000000.0, 0.0))
+    return to_bytes(d)
+
+
+check('R113-C: 块定义比例像图框但世界尺寸非纸幅级（525×425 放大 1391 倍）→ 不算图框',
+      lambda: _r113_overscaled_block(),
+      expect_error_no_frame)
+
+
+# ---- 用例 154：R113 真实图端到端 ----
+_R113_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\09 AC-S01-A.dwg',
+]
+_R113_TARGET = next((p for p in _R113_CANDIDATES if os.path.exists(p)), None)
+if _R113_TARGET:
+    _r113_res = None
+    try:
+        with open(_R113_TARGET, 'rb') as _f:
+            _r113_data = _f.read()
+        _r113_res = get_bounding_box_from_bytes(
+            _r113_data, '09 AC-S01-A.dwg', 'polyline', 'mm', 'smart')
+    except Exception as _e:
+        print('  R113 端到端解析异常:', str(_e)[:120])
+
+    if _r113_res is not None:
+        check('R113真实图: 09 AC-S01-A 识1框 59450x42000（全图唯一图框，不可见碎片内的 59400 不入库）',
+              lambda: _r113_res,
+              lambda r: (r['frame_count'] == 1
+                         and (round(r['candidates'][0]['width']),
+                              round(r['candidates'][0]['height'])) == (59450, 42000)
+                         and r['candidates'][0]['layout'] == '模型空间'))
+else:
+    print('SKIP  R113 真实图用例（未找到 09 AC-S01-A.dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
