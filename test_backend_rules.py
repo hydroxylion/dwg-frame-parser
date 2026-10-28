@@ -4773,4 +4773,86 @@ else:
     print('SKIP  R109 真实图用例（未找到 AC-D04-A.dwg）')
 
 
+# ---- 用例 146：R110 块内图框救援的短边门槛改「纸幅级」语义 ----
+# 现场（AC-D01~D03-A.dwg 识 1 实际 3）：3 张真图框全藏在块
+# `Ax-13.14.15.16.18D01~D03` 里（31525×14850 ×1 + 26275×14850 ×2，都在 `X-Tlbk`
+# 图框层，各配一个宽 -875、高 -500 的双线内框）。该块 bbox 87495×67420 被散件
+# 撑大 → R27 闭合证据只有 31525 < 87495×50% → 判「非图框内容块」剔除 → 走 R40
+# 块内图框族救援。但 R58 的短边下限是 **15000**，这三张的短边 14850 = 297×50
+# （A3@1:50）**差 150mm** 全部被拦 → 候选库清零 → 落到"未检测到图框"的
+# 全实体包围盒降级（89464×75416）。
+# 修法：把固定阈值换成它真正想表达的语义 —— 「是不是纸幅级尺寸」：
+#   · 收集门槛放宽到 10000（内框 14350 这类要能进来当「嵌套对」证人，
+#     否则外框的单份实例找不到证人，门槛反手把正确路径杀掉）；
+#   · 提升门槛 = 短边 ≥15000（R58 原行为）**或** 精确 A 系纸幅短边（复用 R107
+#     的 is_paper_short_side，容差 0.05%），下限 10000（覆盖到 A4@1:50 = 10500）。
+def _r110_block_frames(short):
+    """块内藏 3 张图框（31525×short + 26275×short ×2），块 bbox 被斜向散件撑大。
+
+    short=14850 是 A3@1:50（纸幅级）；14900 只差 50mm 但不是任何纸幅×标准出图比例
+    —— 用它做对照组，证明提升与否确实由「纸幅级」判据决定。
+    散件特意用斜线：水平/垂直散件会被 _block_closed_frame_len 的 LINE 横竖簇
+    配对认成一个 87525×67420 的大矩形，反而让 R27 判它「有闭合边框证据」而入库，
+    根本走不到 R40 救援分支。
+    """
+    d = make_doc()
+    blk = d.blocks.new('TB')
+    for x, w in ((0.0, 26275.0), (28000.0, 26275.0), (56000.0, 31525.0)):
+        add_closed_rect(blk, x, 0.0, w, short)                       # 外框
+        add_closed_rect(blk, x + 437.5, 250.0, w - 875.0, short - 500.0)  # 双线内框
+    blk.add_line((0.0, 0.0), (87525.0, 67420.0))
+    blk.add_line((0.0, 67420.0), (87525.0, 0.0))
+    d.modelspace().add_blockref('TB', (0.0, 0.0))
+    return to_bytes(d)
+
+
+check('R110-A: 块内 3 张图框短边 14850(A3@1:50) → 救援提升，识 3 框',
+      lambda: parse(_r110_block_frames(14850)),
+      lambda r: (r['frame_count'] == 3
+                 and sorted((round(c['width']), round(c['height']))
+                            for c in r['candidates'])
+                 == [(26275, 14850), (26275, 14850), (31525, 14850)]))
+
+check('R110-B: 对照——短边 14900(非纸幅级、差 50mm) 则照旧不提升，证明判据是纸幅级',
+      lambda: parse(_r110_block_frames(14900)),
+      lambda r: (r['frame_count'] == 1
+                 and not any(round(c['width']) in (26275, 31525)
+                             for c in r['candidates'])))
+
+check('R110-C: 双线内框(短边 14350, 非纸幅)不被单独提升为图框',
+      lambda: parse(_r110_block_frames(14850)),
+      lambda r: not any(round(c['height']) == 14350 for c in r['candidates']))
+
+
+# ---- 用例 147：R110 真实图端到端 ----
+_R110_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\AC-D01~D03-A.dwg',
+]
+_R110_TARGET = next((p for p in _R110_CANDIDATES if os.path.exists(p)), None)
+if _R110_TARGET:
+    _r110_res = None
+    try:
+        with open(_R110_TARGET, 'rb') as _f:
+            _r110_data = _f.read()
+        _r110_res = get_bounding_box_from_bytes(
+            _r110_data, 'AC-D01~D03-A.dwg', 'polyline', 'mm', 'smart')
+    except Exception as _e:
+        print('  R110 端到端解析异常:', str(_e)[:120])
+
+    if _r110_res is not None:
+        check('R110真实图: AC-D01~D03-A 识3框(31525x14850 + 26275x14850 x2)',
+              lambda: _r110_res,
+              lambda r: (r['frame_count'] == 3
+                         and sorted((round(c['width']), round(c['height']))
+                                    for c in r['candidates'])
+                         == [(26275, 14850), (26275, 14850), (31525, 14850)]
+                         and all(c['layout'] == '模型空间'
+                                 for c in r['candidates'])))
+        check('R110真实图: 块 bbox 87525x67420 不再作为图框输出',
+              lambda: _r110_res,
+              lambda r: not any(round(c['width']) > 87000 for c in r['candidates']))
+else:
+    print('SKIP  R110 真实图用例（未找到 AC-D01~D03-A.dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
