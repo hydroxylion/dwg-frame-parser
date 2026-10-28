@@ -2005,6 +2005,10 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     #   （递归×缩放）。内容块（平面图）的轮廓线是开放散线，单条再长也凑不成闭合
     #   矩形 → 闭合证据长边 < 块长边 × 50% → 判为内容块（主判）。
     #   R26 的构件判据降为辅判（主判通过、但最长直边 <30% 的碎线拼框）。
+    #   R111：闭合 LWPOLYLINE 这一路改为**必须本身是矩形**（_rect_only）——
+    #   「任何闭合多段线都算边框证据」会让不规则范围线/道路线给内容块伪造证据
+    #   （d012 的 38 顶点范围线、AC-M03~4-A 的 27 顶点道路线，见下方调用处）。
+    #   LINE 横竖簇配对路径天生只产生矩形，不受影响。
     _BLOCK_CLOSED_RATIO = 0.50
     _block_closed_cache = {}
 
@@ -3103,9 +3107,25 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             _bb_len = max(_bb_def[2] - _bb_def[0], _bb_def[3] - _bb_def[1])
             _reject_reason = None
             if _bb_len > 0:
-                _closed_len = _block_closed_frame_len(_bn, _bb_len)
+                # R111：边框证据改用「矩形」口径（_rect_only）——与 R36 让位判据、
+                #   R40 块内救援（本来就只认 _closed_polyline_rect_len）、R60 拼版
+                #   拆分三者统一。此前 R27 主判接受**任意**闭合多段线，凡是不规则
+                #   范围线/道路线碰巧够长，就能给内容块伪造出「图框边框」。
+                #   现场（AC-M03~4-A.dwg 模型空间多认 1 个 758121×927769）：整层
+                #   平面装配块 ax-b1-p02 把建筑内容按图层打成 5 个子块（Wall/Dim/
+                #   Car/cols/grid），每个子块里都复制了同一条 27 顶点闭合线
+                #   （G-Rdln 道路线，460204×756759，矩形度 0.4526）——R27 取到
+                #   756759 = 块长边 81.6% ≥ 50%，判「有边框」→ 整层平面入库，
+                #   面积全图最大 → rel=100% → 成为 best。改矩形口径后该块证据
+                #   掉到 6000mm，正确判为内容块。
+                #   注：洞口在「嵌套子块证据」也生效——_rect_only 会一路传进
+                #   递归调用，子块里的非矩形闭合线同样不算证据（本例正是靠这点）。
+                #   开关 FRAME_PARSER_NO_RECT_EVIDENCE=1 回退旧口径（任意闭合线）。
+                _closed_len = _block_closed_frame_len(
+                    _bn, _bb_len,
+                    _rect_only=os.environ.get('FRAME_PARSER_NO_RECT_EVIDENCE') != '1')
                 if _closed_len < _bb_len * _BLOCK_CLOSED_RATIO:
-                    _reject_reason = (f"无闭合边框证据（闭合框长边 {_closed_len:.0f}mm < 块长边 "
+                    _reject_reason = (f"无可作证据的闭合矩形（矩形框长边 {_closed_len:.0f}mm < 块长边 "
                                       f"{_bb_len:.0f}mm × {_BLOCK_CLOSED_RATIO:.0%}）")
                 else:
                     _member_len = _block_max_member_len(_bn)

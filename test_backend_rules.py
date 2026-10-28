@@ -1230,10 +1230,17 @@ check('R36非矩形边界块让位: 不规则块输给内含真框, fc=2=200700x
       and not any(abs(c['width'] - 518495) < 5 for c in r['candidates']))
 
 
-# ---- 用例 58：非矩形块但无内含真框 → 不让位、照常保留（防误杀守卫） ----
-# 让位规则的语义边界：块参照闭合成环但非矩形（范围线形态）时，只有当其 bbox
-# 内完全包含显式类型真框候选才让位。无内含真框的非矩形块（若通过全部条件）
-# 仍按原口径报告——本用例锁定该行为，防止规则过度外溢。
+# ---- 用例 58：非矩形边界块不再充当图框（R111 收窄 R36 的「照常保留」口径） ----
+# R36 时代的口径：块参照闭合成环但非矩形（范围线形态）时，只有当其 bbox 内
+# 完全包含显式类型真框候选才让位；无内含真框的则「若通过全部条件」仍按原口径
+# 报告。R111 把 R27 的边框证据收窄为「矩形」口径后，这类块在入口就不成候选了
+# —— 该「照常保留」分支随之消失。
+# 收窄的理由：**图幅必须是矩形**。不规则闭合线（用地红线/基坑范围/道路线）不管
+# 多长都不是图框边框；把它放行只会让它靠「留大剔小」吃掉框内真图框（d012 实测
+# 321093 吃掉 200700），或在没有真框时把范围线当图框报出去（AC-M03~4-A 模型
+# 空间凭空多出 758121×927769 的整层平面）。没有真图框的图就该如实报「未检测到
+# 图框」，而不是拿范围线顶上。
+# 注意：本用例保留原几何，同时继续守护「BZ 518495 不得复活」这条连锁。
 doc = make_doc()
 msp = doc.modelspace()
 add_closed_rect(msp, 2090800, -4552675, 518495, 335087)
@@ -1256,12 +1263,9 @@ msp.add_line((2300000, -4217000), (2352000, -4269000))
 add_line_rect(msp, 1000000, -1000000, 3000, 2000)
 add_line_rect(msp, 3500000, -5500000, 3000, 2000)
 data = to_bytes(doc)
-check('R36非矩形块无内含真框: 不让位照常保留, fc=2=321093x2 (smart)',
-      lambda: parse(data),
-      lambda r: r['frame_count'] == 2
-      and sum(1 for c in r['candidates']
-              if abs(c['width'] - 321093) < 5 and abs(c['height'] - 259386) < 5) == 2
-      and not any(abs(c['width'] - 518495) < 5 for c in r['candidates']))
+check('R111: 非矩形边界块无内含真框时不再充当图框 → 如实报「未检测到图框」(smart)',
+      lambda: expect_error_no_frame(data),
+      lambda ok: ok)
 
 
 # ---- 用例 59：d013 修复（R37）：空壳幽灵锚点 + 孤证 A 系纸（d013.dwg 3 实际 4 检出） ----
@@ -4853,6 +4857,90 @@ if _R110_TARGET:
               lambda r: not any(round(c['width']) > 87000 for c in r['candidates']))
 else:
     print('SKIP  R110 真实图用例（未找到 AC-D01~D03-A.dwg）')
+
+
+# ---- 用例 148：R111 边框证据必须是「矩形」，不规则闭合线不得给内容块伪造图框 ----
+# 真实几何取自 AC-M03~4-A.dwg 的块 Ax-B1-Comp-Wall-P02：一条 27 顶点闭合线，
+# 层 G-Rdln（道路线），bbox 460204.2×756759.3、矩形度 0.4526。它被原样复制进
+# 每个「按图层出块」的层子块里，于是 R27 的旧口径（任意闭合线都算边框证据）在
+# 装配块上取到 756759 = 块长边 81.6% ≥ 50% → 整层平面被当图框。
+_R111_ROADLINE = [
+    (282946.7, 0.0), (293356.8, 17076.5), (379887.7, 271941.5),
+    (446807.4, 471627.7), (459071.8, 539292.4), (460080.6, 675270.2),
+    (453912.3, 682900.4), (456567.7, 688305.9), (460197.7, 691063.1),
+    (460204.2, 692004.7), (117951.6, 692004.7), (61509.1, 756759.3),
+    (48541.8, 748455.2), (21650.3, 733298.1), (0.0, 726610.0),
+    (114029.7, 596030.3), (115936.9, 573242.0), (122006.3, 494542.9),
+    (182679.5, 440422.4), (192911.0, 381930.2), (256945.7, 354401.5),
+    (267179.7, 323945.4), (266629.3, 301476.0), (249734.7, 260247.3),
+    (223666.6, 242286.9), (207083.4, 202120.9), (151539.6, 67585.2),
+]
+
+
+def _r111_content_block(rect_border):
+    """模型空间「整层平面装配块」：建筑内容按图层打成子块（模拟 Ax-B1-Comp-*），
+    每个子块里都复制同一条闭合线。
+
+    rect_border=False → 27 顶点不规则道路线（真实现场形状）；
+    rect_border=True  → 换成同尺寸真矩形，做 A/B 对照，证明判据是「矩形性」
+                        而不是尺寸/比例/面积上的巧合。
+    """
+    d = make_doc()
+    for sub in ('WALL', 'GRID'):
+        blk = d.blocks.new(sub)
+        if rect_border:
+            add_closed_rect(blk, 0.0, 0.0, 460204.2, 756759.3, layer='G-Rdln')
+        else:
+            blk.add_lwpolyline(_R111_ROADLINE, close=True,
+                               dxfattribs={'layer': 'G-Rdln'})
+            # 一条道路中线：保证块内另有直边构件，证明「构件证据够长」也救不了它
+            blk.add_line((0.0, 0.0), (460204.2, 756759.3))
+    asm = d.blocks.new('ASM')
+    asm.add_blockref('WALL', (0.0, 0.0))
+    asm.add_blockref('GRID', (0.0, 0.0))
+    d.modelspace().add_blockref('ASM', (0.0, 0.0))
+    return to_bytes(d)
+
+
+check('R111-A: 装配块内只有 27 顶点不规则道路线 → 不算图框（旧口径会认成 460204x756759）',
+      lambda: parse(_r111_content_block(False)),
+      lambda r: not any(c.get('type') == '块参照插入' for c in r['candidates']))
+
+check('R111-B: 对照——同尺寸换成真矩形边框则照旧认成图框，证明判据落在矩形性上',
+      lambda: parse(_r111_content_block(True)),
+      lambda r: (r['frame_count'] == 1
+                 and (round(r['candidates'][0]['width']),
+                      round(r['candidates'][0]['height'])) == (460204, 756759)))
+
+
+# ---- 用例 149：R111 真实图端到端 ----
+_R111_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\AC-M03~4-A.dwg',
+]
+_R111_TARGET = next((p for p in _R111_CANDIDATES if os.path.exists(p)), None)
+if _R111_TARGET:
+    _r111_res = None
+    try:
+        with open(_R111_TARGET, 'rb') as _f:
+            _r111_data = _f.read()
+        _r111_res = get_bounding_box_from_bytes(
+            _r111_data, 'AC-M03~4-A.dwg', 'polyline', 'mm', 'smart')
+    except Exception as _e:
+        print('  R111 端到端解析异常:', str(_e)[:120])
+
+    if _r111_res is not None:
+        check('R111真实图: AC-M03~4-A 识2框(1635x841 + 1189x841)，全在布局 M03、M04',
+              lambda: _r111_res,
+              lambda r: (r['frame_count'] == 2
+                         and sorted((round(c['width']), round(c['height']))
+                                    for c in r['candidates'])
+                         == [(1189, 841), (1635, 841)]
+                         and all('M03' in c['layout'] for c in r['candidates'])))
+        check('R111真实图: 模型空间 0 个图框（整层平面装配块 ax-b1-p02 不再入库）',
+              lambda: _r111_res,
+              lambda r: not any(c['layout'] == '模型空间' for c in r['candidates']))
+else:
+    print('SKIP  R111 真实图用例（未找到 AC-M03~4-A.dwg）')
 
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
