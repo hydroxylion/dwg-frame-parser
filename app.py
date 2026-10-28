@@ -6418,6 +6418,10 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         # （2 个图框+间隔塞进外包络，每个 <50%，否则放不下）。
         WRAP_INNER_AREA_RATIO = 0.5
         WRAP_SIZE_EPS = 0.05  # 尺寸聚类容差：宽高相对差 <5% 视为同组（同图框重复画法）
+        # R109：「同心内框」判定阈值——big 内部存在宽高均 ≥ 该比例、且完全被 big 包含的
+        #   候选 → 是双线画法的内框，big 为真图框外框而非外包络。R45（空壳判定内）与
+        #   R109（包裹框剔除前置豁免）共用同一阈值，避免两处口径漂移。
+        OWN_BORDER_RATIO = 0.85
 
         # R34「空壳范围框」破例常量（d012.dwg 3 实际 4 检出）：√2 纸张保护候选取消
         # 豁免、直接判范围框的补充判据（四条全中才破例，见 √2 保护段内注释）。
@@ -6628,8 +6632,8 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                             _bc = cands[_bj]
                             if not _is_contained(_bc, big):
                                 continue
-                            if (_bc['width'] >= big['width'] * 0.85
-                                    and _bc['height'] >= big['height'] * 0.85):
+                            if (_bc['width'] >= big['width'] * OWN_BORDER_RATIO
+                                    and _bc['height'] >= big['height'] * OWN_BORDER_RATIO):
                                 _own_border = True
                                 break
                         if not _own_border:
@@ -6789,6 +6793,45 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                          f"（d012 场景）")
                                 continue
                         continue
+                    # R109「双线画法反证」：big 内含宽高均 ≥OWN_BORDER_RATIO 的同心内框候选
+                    #   → big 是「裁切线 + 图框线」双线画法里的外框，是真图框，不是外包络。
+                    #   外包络的本质是"整张图套一个外边界"，不会有几乎同尺寸的内缩副本；
+                    #   而真图框的标准画法恰恰是外框（裁切线）+ 内缩一点的内框（图框线）。
+                    #   与下面空壳判定里的 R45「自身内框反证」是同一几何事实——那里它只用来
+                    #   跳过空壳剔除，这里提升为包裹框剔除的通用豁免（同一事实判定应一致）。
+                    #   为什么 √2 保护挡不住本场景（AC-D04-A.dwg 识 2 实际 1）：真图框
+                    #   63050×29700 是**非标加长**图框（A3 高 297 加长到 630.5，ratio 2.12），
+                    #   远离 √2 → 上面整个 √2 保护块被跳过，块内的 R45 也随之失效。它内部除
+                    #   双线内框 61300×28700（97.2%×96.6%，面积 94% 已被 WRAP_INNER_AREA_RATIO
+                    #   排除在 inners 外）外，还有左侧目录栏 13298×28700（贴内框上下边的整高
+                    #   竖条）+ 标题栏小块 3000×2120 → 恰好凑够 MIN_WRAPPED_FRAMES=2 个"独立
+                    #   尺寸组"→ 真图框被当外包络剔除，目录栏逆袭成 best（fc=2，实际 1）。
+                    #   根子上的认知修正：「真图框必接近 √2」对**加长图框**不成立，所以这里
+                    #   改用画法证据（有没有同心内框）而非比例证据来判断"是不是图框"。
+                    #   拼版外包络内部若有 ≥85% 的候选，几何上意味着两条几乎重合的线，本身
+                    #   就是双线画法特征，不会出现在外包络上，故不误伤。
+                    #   开关 FRAME_PARSER_NO_WRAP_OWN_BORDER=1 回退。
+                    if os.environ.get('FRAME_PARSER_NO_WRAP_OWN_BORDER') != '1':
+                        _own_border_hit = None
+                        for _bj in indices:
+                            if _bj == i:
+                                continue
+                            _bc = cands[_bj]
+                            if not _is_contained(_bc, big):
+                                continue
+                            if (_bc['width'] >= big['width'] * OWN_BORDER_RATIO
+                                    and _bc['height'] >= big['height'] * OWN_BORDER_RATIO):
+                                _own_border_hit = _bc
+                                break
+                        if _own_border_hit is not None:
+                            _obr = max(big['width'], big['height']) / max(min(big['width'], big['height']), 1e-9)
+                            safe_log(f"  [R109·双线画法反证] {big['layout']} | "
+                                     f"{big['width']:.0f}×{big['height']:.0f}（ratio {_obr:.3f}）"
+                                     f"内含同心内框 {_own_border_hit['width']:.0f}×{_own_border_hit['height']:.0f}"
+                                     f"（{_own_border_hit['width'] / big['width'] * 100:.1f}%×"
+                                     f"{_own_border_hit['height'] / big['height'] * 100:.1f}%）"
+                                     f"→ 双线画法真图框，不判外包络")
+                            continue
                     # 收集 big 内部、面积显著小于 big 的候选（排除同图框重复画法本身的互相嵌套）
                     inners = [cands[j] for j in indices
                               if j != i and _is_contained(cands[j], big)

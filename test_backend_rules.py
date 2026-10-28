@@ -4704,4 +4704,73 @@ else:
     print('SKIP  R108 真实图用例（未找到 AC-U01-A.dwg）')
 
 
+# ---- 用例 144：R109 双线画法反证（非 √2 加长图框被当外包络剔掉） ----
+# 现场（AC-D04-A.dwg 识 2 实际 1）：真图框 63050×29700 是**非标加长**图框
+# （A3 高 297 加长到 630.5，ratio 2.123），远离 √2 → 包裹框剔除的 √2 保护整块被
+# 跳过（连带块内的 R45 自身内框反证也失效）。它内部除双线内框 61300×28700
+# （97.2%×96.6%，面积 94% 已被 WRAP_INNER_AREA_RATIO 排除在 inners 外）以外，
+# 还有左侧目录栏 13298×28700（贴内框上下边的整高竖条）+ 标题栏小块 3000×2120
+# → 恰好凑够 MIN_WRAPPED_FRAMES=2 个「独立尺寸组」→ 真图框被判外包络剔掉，
+# 目录栏逆袭成 best。
+# 判据：big 内含宽高均 ≥85% 的同心内框 → 这是双线画法（外框=裁切线、内框=图框线）
+# 里的**外框**，即真图框；外包络只是"整张图套一个外边界"，不会有几乎同尺寸的
+# 内缩副本。与空壳判定里的 R45「自身内框反证」是同一几何事实，这里把它提升为
+# 包裹框剔除的通用豁免（同一事实，两处判定必须一致）。
+# 根子上的认知修正：「真图框必接近 √2」这条前提对**加长图框**不成立，所以这里
+# 改用画法证据（有没有同心内框）而非比例证据来判断"是不是图框"。
+def _r109_elongated(own_border):
+    """非 √2 加长图框 + 2 个整高内容栏；own_border 控制是否画同心内框。"""
+    d = make_doc()
+    msp = d.modelspace()
+    add_closed_rect(msp, 0.0, 0.0, 63050.0, 29700.0)            # 真图框（ratio 2.123）
+    if own_border:
+        add_closed_rect(msp, 875.0, 500.0, 61300.0, 28700.0)    # 双线内框
+    add_closed_rect(msp, 875.0, 500.0, 20000.0, 28700.0)        # 内容栏 A（占比 28.8%）
+    add_closed_rect(msp, 20875.0, 500.0, 18000.0, 28700.0)      # 内容栏 B（占比 25.9%）
+    return to_bytes(d)
+
+
+check('R109-A: 加长图框(63050x29700)内含同心内框 → 不判外包络，识 1 框',
+      lambda: parse(_r109_elongated(True)),
+      lambda r: (r['frame_count'] == 1
+                 and [round(c['width']) for c in r['candidates']] == [63050]
+                 and [round(c['height']) for c in r['candidates']] == [29700]))
+
+check('R109-B: 对照——去掉同心内框则照旧判外包络（豁免确由内框触发，非尺寸巧合）',
+      lambda: parse(_r109_elongated(False)),
+      lambda r: (r['frame_count'] == 2
+                 and not any(round(c['width']) == 63050 for c in r['candidates'])))
+
+
+# ---- 用例 145：R109 真实图端到端 ----
+_R109_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\AC-D04-A.dwg',
+]
+_R109_TARGET = next((p for p in _R109_CANDIDATES if os.path.exists(p)), None)
+if _R109_TARGET:
+    _r109_res = None
+    try:
+        with open(_R109_TARGET, 'rb') as _f:
+            _r109_data = _f.read()
+        _r109_res = get_bounding_box_from_bytes(
+            _r109_data, 'AC-D04-A.dwg', 'polyline', 'mm', 'smart')
+    except Exception as _e:
+        print('  R109 端到端解析异常:', str(_e)[:120])
+
+    if _r109_res is not None:
+        check('R109真实图: AC-D04-A 识1框(63050x29700)',
+              lambda: _r109_res,
+              lambda r: (r['frame_count'] == 1
+                         and [(c['width'], c['height']) for c in r['candidates']]
+                         == [(63050, 29700)]
+                         and all(c['layout'] == '模型空间'
+                                 for c in r['candidates'])))
+        check('R109真实图: 目录栏 13298x28700 / 内框 61300x28700 不当独立图框',
+              lambda: _r109_res,
+              lambda r: not any(round(c['width']) in (13298, 61300)
+                                for c in r['candidates']))
+else:
+    print('SKIP  R109 真实图用例（未找到 AC-D04-A.dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
