@@ -1209,6 +1209,38 @@ XREF_OWN_OVERLAP_RATIO = 0.5
 BLOCK_BBOX_TRIM_MIN_ENTS = 4
 BLOCK_BBOX_TRIM_MULT = 20.0
 
+def _insert_ocs_mirrored(ent):
+    """R122：该 INSERT 是否需要在 OCS→WCS 时**x 取反**（镜像插入）。
+
+    DXF 规范：INSERT 的插入点（组码 10）、块内实体坐标都在 OCS 中表达，
+    extrusion（组码 210）非 (0,0,1) 时 OCS 与 WCS（或所在块定义坐标系）不同。
+    AutoCAD 的 MIRROR 命令镜像一个块参照，结果就是一个 extrusion=(0,0,-1) 的
+    同一个 INSERT（而不是新建块）—— 图纸里极其常见。
+
+    按 arbitrary axis 算法，N=(0,0,-1) 时：
+        Ax = Wy × N = (-1, 0, 0)
+        Ay = N × Ax = ( 0, 1, 0)
+    故 (x, y, z) → x·Ax + y·Ay + z·N = (-x, y, -z)，即平面点 (x,y) → (-x, y)。
+
+    旧实现把 OCS 坐标直接当世界坐标用 → 块内容整体镜像到 y 轴另一侧、块 bbox
+    被撑大。现场（11~12号楼平面图.dwg 识 17 实际 13）：平面图装配块
+    Ax-11.12-M03 真实尺寸 36800×38118（比例 1.036，本该被条件C 的 √2 下限
+    1.3435 拒掉），块内 14 个镜像子块（A-Fixt/I-Furn 层的洁具、家具）被搬到
+    x 负侧后 bbox 撑成 62167×38118（比例 1.631）→ 正好跨过 √2 下限被收下。
+
+    只对 extrusion=(0,0,-1) 这种纯镜像给零开销快路径；更一般的倾斜 extrusion
+    走 ezdxf 的 ocs().to_wcs()。开关 FRAME_PARSER_NO_INSERT_OCS=1 整体回退。
+    """
+    if os.environ.get('FRAME_PARSER_NO_INSERT_OCS') == '1':
+        return False
+    try:
+        ext = ent.dxf.extrusion
+    except Exception:
+        return False
+    if abs(ext[0]) < 1e-9 and abs(ext[1]) < 1e-9 and ext[2] < 0:
+        return True
+    return False
+
 def normalized_ratio(width, height):
     if width <= 0 or height <= 0:
         return float('inf')
@@ -2268,8 +2300,14 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                             _nr = _math.radians(_nrot)   # DXF rotation 单位是度，cos/sin 需弧度
                             _ncr = _math.cos(_nr); _nsr = _math.sin(_nr)
                             _nc = [(_p[0]*_ncr - _p[1]*_nsr, _p[0]*_nsr + _p[1]*_ncr) for _p in _nc]
+                        # R122：镜像插入（extrusion=(0,0,-1)）的 OCS→WCS 是
+                        #   (x,y)→(-x,y)，必须整体取反 x —— 否则块内容被搬到 y 轴
+                        #   另一侧，父块 bbox 被撑大（见 _insert_ocs_mirrored）。
+                        _nmir = _insert_ocs_mirrored(_ent)
                         for _p in _nc:
-                            _pts.append((_ipt[0] + _p[0], _ipt[1] + _p[1]))
+                            _wx = _ipt[0] + _p[0]
+                            _wy = _ipt[1] + _p[1]
+                            _pts.append((-_wx if _nmir else _wx, _wy))
             except Exception:
                 continue
             if _pts:
@@ -3264,12 +3302,15 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             return None
         _rad = _math.radians(_irot)
         _cr, _sr = _math.cos(_rad), _math.sin(_rad)
+        # R122：镜像插入的 OCS→（父块定义坐标系）是 (x,y)→(-x,y)。
+        _imir = _insert_ocs_mirrored(_ent)
         _pts = []
         for _px, _py in ((_sx1, _sy1), (_sx2, _sy1), (_sx2, _sy2), (_sx1, _sy2)):
             _qx = (_px - _sbx) * _isx
             _qy = (_py - _sby) * _isy
-            _pts.append((_qx * _cr - _qy * _sr + _ins.x,
-                         _qx * _sr + _qy * _cr + _ins.y))
+            _wx = _qx * _cr - _qy * _sr + _ins.x
+            _wy = _qx * _sr + _qy * _cr + _ins.y
+            _pts.append((-_wx if _imir else _wx, _wy))
         _xs = [p[0] for p in _pts]
         _ys = [p[1] for p in _pts]
         return (min(_xs), min(_ys), max(_xs), max(_ys))
@@ -3400,6 +3441,15 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         if _entity.dxftype() != 'INSERT':
             continue
         _insert_total += 1
+        # R122：本实例是否镜像插入 —— 局部点算完 rotate/scale 加插入点后，
+        #   还要过一道 OCS→WCS 的 x 取反（见 _insert_ocs_mirrored）。
+        _im122 = _insert_ocs_mirrored(_entity)
+
+        def _i2w(_px, _py, _ent=_entity, _mir=_im122):
+            """R122：INSERT 局部点 → 世界坐标的最后一跳（加插入点 + OCS 镜像）。"""
+            _tx = _px + _ent.dxf.insert.x
+            return (-_tx if _mir else _tx), _py + _ent.dxf.insert.y
+
         try:
             _bn = _entity.dxf.name
             _bb_def = _get_block_world_bbox(_bn)
@@ -3428,8 +3478,7 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                     _cb0, _sb0 = _math.cos(_rb0), _math.sin(_rb0)
                     _ibp = [(_p[0] * _cb0 - _p[1] * _sb0,
                              _p[0] * _sb0 + _p[1] * _cb0) for _p in _ibp]
-                _ibp = [(_p[0] + _entity.dxf.insert.x,
-                         _p[1] + _entity.dxf.insert.y) for _p in _ibp]
+                _ibp = [_i2w(_p[0], _p[1]) for _p in _ibp]
                 if _rot is not None:
                     _ibp = [_rot_pt(_p[0], _p[1]) for _p in _ibp]
                 _insbb = (min(p[0] for p in _ibp), min(p[1] for p in _ibp),
@@ -3469,8 +3518,7 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                         _qy = _q[1] * _entity.dxf.yscale
                         _qx, _qy = (_qx * _pcr - _qy * _psr,
                                     _qx * _psr + _qy * _pcr)
-                        _qx += _entity.dxf.insert.x
-                        _qy += _entity.dxf.insert.y
+                        _qx, _qy = _i2w(_qx, _qy)
                         if _rot is not None:
                             _qx, _qy = _rot_pt(_qx, _qy)
                         _wp.append((_qx, _qy))
@@ -3523,8 +3571,9 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 _cr = _math.cos(_rad); _sr = _math.sin(_rad)
                 _local_pts = [(p[0]*_cr - p[1]*_sr, p[0]*_sr + p[1]*_cr)
                               for p in _local_pts]
+            _wpts = [_i2w(p[0], p[1]) for p in _local_pts]
+            # R122：原始插入点仍供 inst_pos（位置启发走相对比较，口径与历史一致）
             _ip = (_entity.dxf.insert.x, _entity.dxf.insert.y)
-            _wpts = [(p[0] + _ip[0], p[1] + _ip[1]) for p in _local_pts]
             if _rot is not None:
                 # 全局旋转矫正：倾斜图纸的块框转正后尺寸/方向才真实
                 _wpts = [_rot_pt(p[0], p[1]) for p in _wpts]
@@ -3690,8 +3739,7 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                             _sr_r = _math.sin(_rad_r)
                             _qx, _qy = (_qx * _cr_r - _qy * _sr_r,
                                         _qx * _sr_r + _qy * _cr_r)
-                        _qx += _ip[0]
-                        _qy += _ip[1]
+                        _qx, _qy = _i2w(_qx, _qy)
                         if _rot is not None:
                             _qx, _qy = _rot_pt(_qx, _qy)
                         return (_qx, _qy)
@@ -3945,8 +3993,7 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                                 _sr_m = _math.sin(_rad_m)
                                 _qx, _qy = (_qx * _cr_m - _qy * _sr_m,
                                             _qx * _sr_m + _qy * _cr_m)
-                            _qx += _ip[0]
-                            _qy += _ip[1]
+                            _qx, _qy = _i2w(_qx, _qy)
                             if _rot is not None:
                                 _qx, _qy = _rot_pt(_qx, _qy)
                             _pw.append((_qx, _qy))
@@ -6375,19 +6422,41 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #   16820×32700）块定义内有闭合 LWPOLYLINE 外框 + 内框 → 放行。
             #   判据：块定义内存在闭合 LWPOLYLINE（is_polyline_closed），矩形度
             #   不苛求（表格块根本没有闭合线，区分度已足够）。
+            # R122：递归嵌套子块。页框常做成"页框块 + 装配块"两级 —— 装配块顶层
+            #   只有 INSERT，页框实实在在在子块里。现场（1#,8#住宅0721出图_t5）：
+            #   ewtewtwey 顶层 5 INSERT + 8 ACAD_PROXY_ENTITY、一条 LWPOLYLINE 都
+            #   没有，52550×29700 外框 + 50800×28700 内框在子块 wetwtwytwt（正是
+            #   R62b 注释点名的那一行）。只看顶层 → 判「无闭合矩形边框」→ 条件I
+            #   拒救块内 3 张真表格页（fc 23→20）。这是 R116 记录过的同一个现象
+            #   （父块 bbox 一变干净，R27 从"拒绝"翻"接受"，R40 救援不再触发，
+            #   块内页框就只剩条件I 这一条通道），只是这次触发点是 OCS 镜像修正
+            #   让装配块 bbox 回到真实尺寸 52550×29700。
+            #   开关 FRAME_PARSER_NO_NESTED_CLOSED_FRAME=1 退回只扫顶层。
             _blk_closed_cache = {}
 
-            def _block_has_closed_frame(_bn):
-                if _bn not in _blk_closed_cache:
+            def _block_has_closed_frame(_bn, _visited=None):
+                if _bn in _blk_closed_cache:
+                    return _blk_closed_cache[_bn]
+                if _visited is None:
+                    _visited = set()
+                if _bn in _visited:
+                    return False
+                _visited.add(_bn)
+                _has = False
+                try:
+                    for _e in (doc.blocks.get(_bn) or ()):
+                        if _e.dxftype() == 'LWPOLYLINE' and is_polyline_closed(_e):
+                            _has = True
+                            break
+                        if (_e.dxftype() == 'INSERT'
+                                and os.environ.get(
+                                    'FRAME_PARSER_NO_NESTED_CLOSED_FRAME') != '1'
+                                and _block_has_closed_frame(_e.dxf.name, _visited)):
+                            _has = True
+                            break
+                except Exception:
                     _has = False
-                    try:
-                        for _e in (doc.blocks.get(_bn) or ()):
-                            if _e.dxftype() == 'LWPOLYLINE' and is_polyline_closed(_e):
-                                _has = True
-                                break
-                    except Exception:
-                        _has = False
-                    _blk_closed_cache[_bn] = _has
+                _blk_closed_cache[_bn] = _has
                 return _blk_closed_cache[_bn]
 
             for _c in all_candidates:
@@ -8866,6 +8935,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 extra = f" | 块名: {c.get('block_name', '?')} | 图层: {c.get('insert_layer', '?')}"
             log_debug(f"  {i}. {c['type']} | 布局: {c['layout']} | 尺寸: {c['width']:.2f} x {c['height']:.2f} | "
                       f"归一化长宽比: {c['ratio']:.4f} | 面积占比: {c['area_ratio']:.2%} | "
+                      f"via={c.get('_via', '?')} | "
                       f"bbox=({bx1:.0f},{by1:.0f},{bx2:.0f},{by2:.0f}){extra}")
         safe_log("============================")
 

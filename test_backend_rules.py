@@ -6198,4 +6198,166 @@ else:
     print('SKIP  R121 正向守卫用例（未找到 AC-P02、E01、D03-B.dwg）')
 
 
+# ========== R122：INSERT 的 OCS 镜像（extrusion=(0,0,-1)）==========
+# 现场（11~12号楼平面图.dwg 识 17 实际 13）：多出的 4 个 62167×38118 是平面图
+#   内容装配块 Ax-11.12-M03。它真实尺寸 36800×38118（比例 1.036，本该被条件C 的
+#   √2 下限 1.3435 拒掉），却因块内 14 个 extrusion=(0,0,-1) 的镜像子块被搬到
+#   x 轴负侧、bbox 撑成 62167×38118（比例 1.631）而跨过门槛被收下。
+#   根因：DXF 里 INSERT 的插入点在 OCS 中，extrusion=(0,0,-1) 时 OCS→WCS 是
+#   (x,y)→(-x,y)（arbitrary axis：Ax=(-1,0,0)、Ay=(0,1,0)），旧实现直接当 WCS 用。
+# 说明：本轮**没有**做「镜像块 vs 非镜像块」的合成对照——试过多种构造都被
+#   R40 块内图框救援/条件I 的通道短路（装配块 bbox 根本进不了输出），合成用例
+#   会变成"绿得没有意义"。改为直接锁判据本身（纯函数）+ 真实图端到端。
+import app as _app122
+
+
+class _R122FakeEnt:
+    """只为喂 _insert_ocs_mirrored：只需 .dxf.extrusion"""
+
+    def __init__(self, extrusion):
+        class _Dxf:
+            pass
+        _self_dxf = _Dxf()
+        if extrusion is not None:
+            _self_dxf.extrusion = extrusion
+        self.dxf = _self_dxf
+
+
+def _r122_mirrored(extrusion, env=None):
+    _env = env or {}
+    _saved = {_k: os.environ.get(_k) for _k in _env}
+    for _k, _v in _env.items():
+        os.environ[_k] = _v
+    try:
+        return _app122._insert_ocs_mirrored(_R122FakeEnt(extrusion))
+    finally:
+        for _k, _v in _saved.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+
+
+check('R122 单元: extrusion=(0,0,-1) 判为镜像插入 → 需 x 取反',
+      lambda: _r122_mirrored((0.0, 0.0, -1.0)),
+      lambda got: got is True)
+
+check('R122 单元: extrusion=(0,0,1) 标准方向 → 不取反',
+      lambda: _r122_mirrored((0.0, 0.0, 1.0)),
+      lambda got: got is False)
+
+check('R122 单元: 无 extrusion 属性 → 保守不取反',
+      lambda: _r122_mirrored(None),
+      lambda got: got is False)
+
+check('R122 单元回退: 开关 FRAME_PARSER_NO_INSERT_OCS=1 → 一律不取反',
+      lambda: _r122_mirrored((0.0, 0.0, -1.0),
+                             {'FRAME_PARSER_NO_INSERT_OCS': '1'}),
+      lambda got: got is False)
+
+# 倾斜 extrusion（既非标准也非纯镜像）不在快路径覆盖范围，按旧行为不取反
+check('R122 单元: extrusion=(0.3,0.4,0.866) 倾斜 → 快路径不处理，不取反',
+      lambda: _r122_mirrored((0.3, 0.4, 0.866)),
+      lambda got: got is False)
+
+
+def _r122_census(r):
+    _g = {}
+    for _c in r['candidates']:
+        _k = (round(_c['width']), round(_c['height']))
+        _g[_k] = _g.get(_k, 0) + 1
+    return _g
+
+
+# ---- 真实图端到端（目标图 13 框；关开关复现 17 框）----
+_R122_TARGET = next((p for p in [
+    r'E:\建筑项目图纸 - 非标\资阳恒大城\恒大项目二期施工图（16-21#）'
+    r'\恒大项目二期施工图（11-21#）\4电\11#12#\11~12号楼平面图.dwg',
+] if os.path.exists(p)), None)
+
+if _R122_TARGET:
+    with open(_R122_TARGET, 'rb') as _f:
+        _r122_tgt_bin = _f.read()
+    _r122_tgt_name = os.path.basename(_R122_TARGET)
+
+    def _r122_tgt_run(env=None):
+        _env = env or {}
+        _saved = {_k: os.environ.get(_k) for _k in _env}
+        for _k, _v in _env.items():
+            os.environ[_k] = _v
+        try:
+            return get_bounding_box_from_bytes(
+                _r122_tgt_bin, _r122_tgt_name, 'polyline', 'mm', 'smart')
+        finally:
+            for _k, _v in _saved.items():
+                if _v is None:
+                    os.environ.pop(_k, None)
+                else:
+                    os.environ[_k] = _v
+
+    _r122_tgt_full = _r122_tgt_run()
+    _r122_tgt_off = _r122_tgt_run({'FRAME_PARSER_NO_INSERT_OCS': '1'})
+
+    check('R122真实图: 11~12号楼平面图 → 13 框（1×A1 + 12×A2）',
+          lambda: _r122_census(_r122_tgt_full),
+          lambda got: got == {(84100, 59400): 1, (59450, 42050): 12})
+
+    check('R122真实图回退: 关掉 OCS 镜像 → 复现原 bug 17 框（多 4 个 62167×38118）',
+          lambda: _r122_census(_r122_tgt_off),
+          lambda got: got == {(84100, 59400): 1, (59450, 42050): 12,
+                              (62167, 38118): 4})
+else:
+    print('SKIP  R122 真实图用例（未找到 11~12号楼平面图.dwg）')
+
+
+# ---- 正向守卫：1#,8#住宅0721出图_t5.dwg 的 5 张 52550×29700 表格页必须保住 ----
+# 这张图是本轮改动的"压力测试"：装配块 ewtewtwey（顶层 5 INSERT + 8 代理实体、
+#   一条 LWPOLYLINE 都没有，页框 52550×29700 外框 + 50800×28700 内框在子块
+#   wetwtwytwt 里）有 3 个实例。OCS 镜像修正让它的 bbox 回到真实尺寸后被 R27
+#   接受，块内页框就只剩条件I 一条通道 —— 而条件I 的 R62b 护栏只扫块定义顶层，
+#   判「无闭合矩形边框」拒救，fc 23→20。这正是 R116 记录过的同一个现象
+#   （父块 bbox 一变干净，R40 救援不再触发）。修法：护栏递归子块。
+#   四态实测：全开 23 / 只关 OCS 23 / 只关递归边框 20 / 两开关全关 23。
+_R122_SIDE = next((p for p in [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\1#,8#住宅0721出图_t5.dwg',
+] if os.path.exists(p)), None)
+
+if _R122_SIDE:
+    with open(_R122_SIDE, 'rb') as _f:
+        _r122_side_bin = _f.read()
+
+    def _r122_side_run(env=None):
+        _env = env or {}
+        _saved = {_k: os.environ.get(_k) for _k in _env}
+        for _k, _v in _env.items():
+            os.environ[_k] = _v
+        try:
+            return get_bounding_box_from_bytes(
+                _r122_side_bin, '1#,8#住宅0721出图_t5.dwg',
+                'polyline', 'mm', 'smart')
+        finally:
+            for _k, _v in _saved.items():
+                if _v is None:
+                    os.environ.pop(_k, None)
+                else:
+                    os.environ[_k] = _v
+
+    _r122_side_full = _r122_side_run()
+    _r122_side_nonest = _r122_side_run({'FRAME_PARSER_NO_NESTED_CLOSED_FRAME': '1'})
+
+    check('R122真实图守卫: 1#,8#住宅0721出图_t5 → 仍 23 框（5 张 52550×29700 表格页未丢）',
+          lambda: _r122_side_full['frame_count'],
+          lambda got: got == 23)
+
+    check('R122真实图守卫: 该图 52550×29700 恰好 5 张（3 张来自条件I 递归救回）',
+          lambda: _r122_census(_r122_side_full).get((52550, 29700)),
+          lambda got: got == 5)
+
+    check('R122真实图守卫回退: 关掉「嵌套子块闭合边框」递归 → 掉到 20（暴露与 OCS 修正的耦合）',
+          lambda: _r122_side_nonest['frame_count'],
+          lambda got: got == 20)
+else:
+    print('SKIP  R122 真实图守卫用例（未找到 1#,8#住宅0721出图_t5.dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
