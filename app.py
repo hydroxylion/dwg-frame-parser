@@ -1258,6 +1258,39 @@ def is_paper_short_side(short):
     return False
 
 
+# R117：候选尺寸是否落在「A 系纸幅体系」里 —— 即它**可以**是一张标准页或加长页。
+#   与 is_paper_short_side 的区别：那个只问短边像不像纸（21000×14850 这种标题栏
+#   内框也会 True），这里要求**整张纸成立**：短边是纸幅体系，且长边 ≥ 该幅面的
+#   标准长边（短边 × √2），再长则视为加长页（上限 4 倍短边，超过就不是图幅而是条带）。
+#
+#   背景（Px-13-ALL.dwg 识 11 实际 12）：R77c「比例空窗 1.822~2.058 无真页形态」
+#   的前提是错的 —— 那三簇比例（√2 / 1.769 / 2.122）只覆盖**标准页与按 1/4、1/2
+#   短边加长**的页。本图第 12 张是 A0 加长到长边 1635（块名 `A0_1635L_50`，
+#   1635×50 = 81750），比例 1635/841 = 1.9441，正落在"空窗"里，被 R77c 剔掉，
+#   又被孤证复核剔一次（全图无同尺寸副本、无 ±1% 同比例兄弟）。
+#   加长量是设计者自定的，比例可以取任意值 —— 空窗判据对加长图幅不成立。
+#   能挡住内容轮廓的是**短边**：基坑轮廓 117348×228659、TK 基础 116423×225000、
+#   113796×225772 的短边都不在纸幅体系里（False），本图 81750×42050 的 42050 =
+#   841×50 在体系里（True）。
+PAPER_SHEET_MIN_ELONG = 1.386   # √2 × 0.98：至少是一张标准页（不是窄条）
+PAPER_SHEET_MAX_ELONG = 4.0     # 再长就不是图幅而是条带/范围线
+
+
+def is_paper_sheet_size(width, height):
+    """R117：宽高是否构成一张「A 系纸幅页」（标准页或加长页）。"""
+    try:
+        _w, _h = float(width), float(height)
+    except Exception:
+        return False
+    if _w <= 0 or _h <= 0:
+        return False
+    _short, _long = (_w, _h) if _w <= _h else (_h, _w)
+    if not is_paper_short_side(_short):
+        return False
+    _r = _long / _short
+    return PAPER_SHEET_MIN_ELONG <= _r <= PAPER_SHEET_MAX_ELONG
+
+
 # R115：判据④（巨型页面外包络踢出 rel 分母）认定「内页」的**绝对**尺寸下限。
 #   建筑图纸页在 1:100 级比例下短边不会小于 15000mm（A4@1:100 = 21000，
 #   加长/缩印下限约 15000）；与 R95 判据③ 的「短边 ≥ 15000」同一口径。
@@ -6267,9 +6300,20 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     #   判据：块参照数 ≥100 且 ≥ 横竖线总数 ×0.5 → 判为图元内容
                     #   而非表格页。真表格页（图纸目录/材料表/设计说明）是纯
                     #   线稿+文字，块参照远少于表格线。
+                    # R117：计数口径必须与线数一致。R62 形态B 把**块定义内部**
+                    #   的表格线加进了 _nh/_nv（_table_lines_in_block_def），但
+                    #   块数只数顶层 INSERT 且把「块参照插入」候选整类排除
+                    #   （原条件 `_c['type'] in EXPLICIT_TYPES`）——块数口径比
+                    #   线数口径窄了一整层，护栏在块参照候选上等于失效。
+                    #   现场（Px-13-ALL.dwg，13 层平面图块 Ax-13-P01）：候选
+                    #   81136×76615，顶层 bbox 内 35 横 + 57 竖线全部来自**邻居**
+                    #   （这个 bbox 里恰好套着 5 张 A0 页），块定义里另有 26 个
+                    #   嵌套 INSERT + 100 个 ACAD_PROXY_ENTITY + 10 ARC——是一张
+                    #   平面图内容块，却被当成"表格页"救回，随后按 bbox 包含把
+                    #   真正压在它里面的 1 张 59450×42050 页剔掉（12→11）。
                     _nb_i = 0
                     _obj_i = _lay_objs.get(_c['layout'])
-                    if _obj_i is not None and _c['type'] in EXPLICIT_TYPES:
+                    if _obj_i is not None:
                         _bx1, _by1, _bx2, _by2 = _c['bbox']
                         for _e_i in _obj_i:
                             if _e_i.dxftype() != 'INSERT':
@@ -6280,6 +6324,16 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                 continue
                             if (_bx1 <= _ip_i.x <= _bx2 and _by1 <= _ip_i.y <= _by2):
                                 _nb_i += 1
+                    # 块参照候选：块内嵌套 INSERT 一并计数（与线数同口径）
+                    if _c['type'] == '块参照插入' and _c.get('block_name'):
+                        _blk_i = doc.blocks.get(_c['block_name'])
+                        if _blk_i is not None:
+                            try:
+                                for _e_i2 in _blk_i:
+                                    if _e_i2.dxftype() == 'INSERT':
+                                        _nb_i += 1
+                            except Exception:
+                                pass
                     if _nb_i >= 100 and _nb_i >= (_nh + _nv) * 0.5:
                         safe_log(f"   [条件I·跳过] {_c['type']} {_c['width']:.0f}×{_c['height']:.0f}："
                                  f"框内块参照 {_nb_i} 个 / 表格线 {_nh + _nv} 条"
@@ -6593,6 +6647,18 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     _cl = _c.get('insert_layer', '').upper()
                     if 'TTLB' in _cl or 'TITLE' in _cl:
                         continue
+                    # R117 纸幅体系豁免：宽高构成一张 A 系页（标准页或**加长页**）
+                    #   → 不做空窗剔除。
+                    #   为什么必须加：空窗"1.822~2.058 无真页形态"只对标准页与
+                    #   按 1/4、1/2 短边加长的页成立；加长量是设计者自定的，
+                    #   比例可任意取值。Px-13-ALL.dwg 第 12 张是 A0 加长到长边
+                    #   1635（块 A0_1635L_50，1635×50 = 81750×42050），比例
+                    #   1.9441 正落空窗 → 被剔。判据落在**短边**上（42050 =
+                    #   841×50）：g013 的 117348/116423/113796 短边全不在纸幅
+                    #   体系里，照旧被剔。
+                    if os.environ.get('FRAME_PARSER_NO_PAPER_SHEET') != '1':
+                        if is_paper_sheet_size(_c['width'], _c['height']):
+                            continue
                     # 斜放框豁免：tilted 候选的 ratio 是旋转校正后口径，与 bbox
                     #   口径不同源（拼接图 245250×126150 斜放页校正 r1.406 被
                     #   bbox 口径的空窗判定误剔）——不做空窗剔除。
@@ -6611,7 +6677,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                              not in _tilted_sizes}
                 if _c77_drop:
                     _c77_desc = ', '.join(
-                        f"{c['width']:.0f}x{c['height']:.0f}(r{_c['ratio']:.3f})"
+                        f"{c['width']:.0f}x{c['height']:.0f}(r{c['ratio']:.3f})"
                         for c in frame_like if id(c) in _c77_drop)
                     frame_like = [c for c in frame_like
                                   if id(c) not in _c77_drop]
@@ -6690,6 +6756,19 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                         #    R45/R109 早已把「外框+内缩内框」定为
                                         #    真图框判据，此处只是把它从候选间下沉到
                                         #    块定义内部。
+            'paper_sheet':        1.0,  # ⑩ 图幅模板块等比例实例（R117）：候选尺寸 = 某个
+                                        #    **图幅命名块**（块名含 A0~A9）定义尺寸的等比例
+                                        #    缩放（两轴同一 k，0.05 ≤ k ≤ 1）。
+                                        #    Px-13-ALL.dwg 第 12 张是 A0 加长到长边 1635：
+                                        #    块 A0_1635L_50 定义 163500×84100，以 scale 0.5
+                                        #    插入 → 81750×42050（1635×50）。
+                                        #    这张页全图尺寸唯一（①无）、比例 1.9441 无 ±1%
+                                        #    兄弟（②无）、图签条纹在本图整批检不出（③无，11 张
+                                        #    真页同样 None）→ score=0 被剔。
+                                        #    与「短边是纸幅」的区别：那个任何 42000 宽的构件
+                                        #    都拿得到分（1051×594、59450×42000 这类合成用例
+                                        #    会误过）；这里要求它**恰好是某张图纸模板的
+                                        #    等比例实例**——内容块不会去套图幅模板的尺寸。
         }
         # ⑨ 内框尺寸占外框的下限（与 R109 的 OWN_BORDER_RATIO 同源；上限 99.5%）
         _SOLO_DOUBLE_LINE_RATIO = 0.85
@@ -6697,6 +6776,44 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         # （其 a6 前是字母数字无词边界）；(?![0-9]) 防 A31005 类图纸编号误伤。
         _SHEET_SIZE_NAME_RE = re.compile(r'(?<![a-z0-9])a[0-9](?![0-9])')
         _SOLO_DEBUG = os.environ.get('FRAME_PARSER_SOLO_DEBUG') == '1'
+
+        # R117 ⑩ 图幅模板块尺寸表：块名含 A0~A9 图幅代号，取其块内最大闭合矩形
+        #   作定义尺寸（如 A0_1635L_50 定义 163500×84100、A1_841L 定义 84100×59400）。
+        #   候选与任一条成「两轴同一 k 的等比缩放」即视为该模板的实例。
+        _sheet_tpl_sizes = []
+        if os.environ.get('FRAME_PARSER_NO_PAPER_SHEET') != '1':
+            for _blk10 in doc.blocks:
+                try:
+                    _bn10 = _blk10.name or ''
+                except Exception:
+                    continue
+                if not _SHEET_SIZE_NAME_RE.search(_bn10.lower()):
+                    continue
+                try:
+                    _r10 = block_rect_list(_blk10, doc)
+                except Exception:
+                    _r10 = []
+                if not _r10:
+                    continue
+                _b10 = max(_r10, key=lambda r: (r[2] - r[0]) * (r[3] - r[1]))
+                _w10, _h10 = _b10[2] - _b10[0], _b10[3] - _b10[1]
+                if _w10 > 0 and _h10 > 0:
+                    _sheet_tpl_sizes.append((_w10, _h10, _bn10))
+
+        def _sheet_template_scale(_w, _h):
+            """R117 ⑩：候选宽高是否为某图幅模板块的等比例实例 → 返回 (k, 块名) 或 None。"""
+            for _tw, _th, _bn in _sheet_tpl_sizes:
+                for _a, _b in ((_w, _h), (_h, _w)):
+                    _kx, _ky = _a / _tw, _b / _th
+                    if _kx <= 0 or _ky <= 0:
+                        continue
+                    _km = max(_kx, _ky)
+                    if abs(_kx - _ky) > 0.01 * _km:
+                        continue          # 两轴不是同一比例 → 不是等比实例
+                    if not (0.05 <= _kx <= 1.0):
+                        continue          # 只认缩小或 1:1（放大 1391 倍的底图块不算）
+                    return _kx, _bn
+            return None
 
         def _solo_evidence_score(_c):
             """孤证候选的证据评分：返回 (score, hits)，hits 为命中证据明细。"""
@@ -6829,6 +6946,11 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                          f"（{_rw9:.1%}×{_rh9:.1%} 于 "
                                          f"{_ow9:.0f}x{_oh9:.0f}）")
                             break
+            # ⑩ R117：图幅模板块等比例实例（见 _SOLO_WEIGHTS['paper_sheet'] 注释）
+            _s10 = _sheet_template_scale(_c['width'], _c['height'])
+            if _s10 is not None:
+                _score += _SOLO_WEIGHTS['paper_sheet']
+                _hits.append(f"⑩图幅模板块 {_s10[1]}×{_s10[0]:.4g}")
             return _score, _hits
 
         if _SOLO_RECHECK_ENABLED and frame_like:

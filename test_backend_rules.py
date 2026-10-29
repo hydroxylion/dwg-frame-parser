@@ -5507,4 +5507,150 @@ else:
     print('SKIP  R116 真实图用例（未找到 16(AC-T01-A).dwg）')
 
 
+# ======================================================================
+# 用例 169~174：R117 Px-13-ALL.dwg 识 11 实际 12
+# ======================================================================
+# 需求：用户实测 12 个图框 —— 81750×42050 ×1 + 84100×59400 ×2 +
+#   59450×42050 ×5 + 59400×42000 ×1 + 42050×29700 ×3。程序只出 11 个。
+# 现场：三个独立缺陷叠在一起，净差恰好 -1（少 2 个真页、多 1 个假页）：
+#   ① R77c「比例空窗 1.822~2.058 无真页形态」剔掉 81750×42050。这张是
+#      **A0 加长到长边 1635** 的页（块 A0_1635L_50 定义 163500×84100，
+#      scale 0.5 → 81750×42050），比例 1635/841 = 1.9441 正落空窗。空窗
+#      前提只覆盖标准页与按 1/4、1/2 短边加长的页 —— 加长量是设计者自定的，
+#      比例可任意取值，所以空窗判据对加长图幅不成立。
+#   ② 孤证复核把同一张页再剔一次：全图尺寸唯一（①无）、比例 1.9441 无 ±1%
+#      兄弟（②无）、图签条纹本图整批检不出（③无，11 张真页同样 None）。
+#   ③ 条件I 把 13 层平面图内容块 Ax-13-P01（候选 81136×76615）当"表格页"
+#      救回，随后按 bbox 包含把**压在它里面**的第 5 张 59450×42050 剔掉。
+#      它被判表格页的 35 横 / 57 竖线全部来自邻居（这个 bbox 里套着 5 张 A0
+#      页），块定义本身是 26 嵌套块 + 100 代理实体 + 10 ARC 的平面图。
+#      根因：R98「块多线少」护栏把「块参照插入」候选整类排除，而 R62 形态B
+#      早已把块定义的表格线算进了线数 —— 线数含块内、块数不含块内，口径不一致。
+def _r117_extended_sheet():
+    """合成复现：A0 标准页 ×2 + A0 加长页 ×1（长边 1635，比例 1.944 落空窗）。
+
+    标准页 59450×42050（A0@1:50）成组互证；加长页 81750×42050 全图唯一。
+    图幅模板块按真实图口径定义 163500×84100（A0_1635L_50 的块定义就是 ×100
+    的纸面尺寸，实例以 scale 0.5 插入）。
+    """
+    d = make_doc()
+    _tb = d.blocks.new('A0_1635L_TEST')
+    add_closed_rect(_tb, 0, 0, 163500, 84100)
+    msp = d.modelspace()
+    add_closed_rect(msp, 0, 0, 59450, 42050)             # A0 标准页 1
+    add_closed_rect(msp, 0, 60000, 59450, 42050)         # A0 标准页 2
+    add_closed_rect(msp, 100000, 0, 81750, 42050)        # A0 加长页（1635L）
+    return to_bytes(d)
+
+
+_r117_data = _r117_extended_sheet()
+
+
+def _r117_sizes(r):
+    return sorted({(round(c['width']), round(c['height'])) for c in r['candidates']})
+
+
+# ---- 用例 169：加长页不被 R77c 空窗剔、孤证也不剔 ----
+check('R117-A: A0 加长页 81750x42050（长边 1635，比例 1.944）与 2 张标准页一起全部认出',
+      lambda: parse(_r117_data),
+      lambda r: (r['frame_count'] == 3
+                 and (81750, 42050) in _r117_sizes(r)
+                 and (59450, 42050) in _r117_sizes(r)))
+
+
+# ---- 用例 170：开关回退 → R77c 把加长页剔掉（复现原 bug） ----
+def _r117_no_paper_sheet():
+    _saved = os.environ.get('FRAME_PARSER_NO_PAPER_SHEET')
+    os.environ['FRAME_PARSER_NO_PAPER_SHEET'] = '1'
+    try:
+        return parse(_r117_data)
+    finally:
+        if _saved is None:
+            os.environ.pop('FRAME_PARSER_NO_PAPER_SHEET', None)
+        else:
+            os.environ['FRAME_PARSER_NO_PAPER_SHEET'] = _saved
+
+
+check('R117-B: 开关回退——R77c 空窗把 A0 加长页当内容轮廓剔掉（fc 3→2，复现原 bug）',
+      _r117_no_paper_sheet,
+      lambda r: (r['frame_count'] == 2
+                 and (81750, 42050) not in _r117_sizes(r)))
+
+
+# ---- 用例 171：R77c 正向守卫——内容轮廓照旧被剔 ----
+# 基坑轮廓 117348×228659（ratio 1.949）短边 117348 不在纸幅体系里 → 仍按内容轮廓剔。
+def _r117_content_outline():
+    d = make_doc()
+    msp = d.modelspace()
+    add_closed_rect(msp, 0, 0, 59400, 42050)             # 真页（√2 标准页）
+    add_closed_rect(msp, 0, 0, 117348, 228659)           # 基坑轮廓（ratio 1.949）
+    return to_bytes(d)
+
+
+check('R117-D: 纸幅体系豁免只放行真页——基坑轮廓 117348x228659 照旧按内容轮廓剔',
+      lambda: parse(_r117_content_outline()),
+      lambda r: (r['frame_count'] == 1
+                 and (117348, 228659) not in _r117_sizes(r)))
+
+
+# ---- 用例 172~174：R117 真实图端到端 + 开关 A/B ----
+# 合成用例无法隔离 ⑩（孤证复核只复检 area_ratio <5% 的候选）与条件I 的
+# 「块多线少」护栏（合成块的候选直接过特征，走不到救援分支），故这两条判据
+# 由真实图端到端兜住：⑩ 若失效 → 81750×42050 少 1；护栏若失效 → 81136×76615
+# 把第 5 张 59450×42050 吃掉 → 该尺寸只剩 4 份、总数 11。
+_R117_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\Px-13-ALL.dwg',
+]
+_R117_TARGET = next((p for p in _R117_CANDIDATES if os.path.exists(p)), None)
+if _R117_TARGET:
+    _r117_want = {(81750, 42050): 1, (84100, 59400): 2, (59450, 42050): 5,
+                  (59400, 42000): 1, (42050, 29700): 3}
+
+    def _r117_census(res):
+        _g = {}
+        for _c in res['candidates']:
+            _k = (round(_c['width']), round(_c['height']))
+            _g[_k] = _g.get(_k, 0) + 1
+        return _g
+
+    with open(_R117_TARGET, 'rb') as _f:
+        _r117_bin = _f.read()
+
+    _r117_res = None
+    try:
+        _r117_res = get_bounding_box_from_bytes(
+            _r117_bin, 'Px-13-ALL.dwg', 'polyline', 'mm', 'smart')
+    except Exception as _e:
+        print('  R117 端到端解析异常:', str(_e)[:120])
+
+    if _r117_res is not None:
+        check('R117真实图: Px-13-ALL 识12框，五种尺寸份数与用户实测逐一吻合',
+              lambda: (_r117_res['frame_count'], _r117_census(_r117_res)),
+              lambda t: t[0] == 12 and t[1] == _r117_want)
+
+        # 开关回退：关掉「纸幅体系」两项豁免 → R77c 与孤证复核双重剔掉 A0 加长页
+        def _r117_real_off():
+            _saved = os.environ.get('FRAME_PARSER_NO_PAPER_SHEET')
+            os.environ['FRAME_PARSER_NO_PAPER_SHEET'] = '1'
+            try:
+                return get_bounding_box_from_bytes(
+                    _r117_bin, 'Px-13-ALL.dwg', 'polyline', 'mm', 'smart')
+            finally:
+                if _saved is None:
+                    os.environ.pop('FRAME_PARSER_NO_PAPER_SHEET', None)
+                else:
+                    os.environ['FRAME_PARSER_NO_PAPER_SHEET'] = _saved
+
+        try:
+            _r117_off = _r117_real_off()
+            check('R117真实图回退: 关掉纸幅体系豁免 → 81750x42050 被剔，只剩 11 框（复现原 bug）',
+                  lambda: (_r117_off['frame_count'], _r117_census(_r117_off)),
+                  lambda t: t[0] == 11 and (81750, 42050) not in t[1]
+                  and t[1].get((59450, 42050)) == 5)
+        except Exception as _e:
+            print('  R117 回退对照异常:', str(_e)[:120])
+else:
+    print('SKIP  R117 真实图用例（未找到 Px-13-ALL.dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
