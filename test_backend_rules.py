@@ -5754,8 +5754,14 @@ if _R118_TARGET:
               lambda t: t[0] == 12 and t[1] == _r118_want)
 
         # 回退①：关掉 R95 判据⑤ → 轴网子块被提升成 4 张假页（fc 12→16）
+        # 注意：R121 的「参照压图剔除」也兜得住这 4 张（该装配块是绑定参照，
+        #   28561×20053 的子块页被提升成 from_xref 且压在自有页上）—— 实测只关
+        #   矩形证据仍是 12，必须把 R121 两条也关掉才能看见 R95 判据⑤ 的作用。
+        #   A/B 用例要隔离被测规则，否则"回退后本该复现"的现象会被新网兜住。
         try:
-            _r118_b = _r118_run({'FRAME_PARSER_NO_PAGE_RECT_EVID': '1'})
+            _r118_b = _r118_run({'FRAME_PARSER_NO_PAGE_RECT_EVID': '1',
+                                 'FRAME_PARSER_NO_XREF_OWN_OVERLAP': '1',
+                                 'FRAME_PARSER_NO_ADJ_PLOT_LAYER': '1'})
             check('R118真实图回退①: 关 R95 矩形证据 → 轴网子块被当页框，4 张 28561x20053 假页（fc 16）',
                   lambda: (_r118_b['frame_count'], _r118_census(_r118_b)),
                   lambda t: t[0] == 16 and t[1].get((28561, 20053)) == 4)
@@ -6002,6 +6008,194 @@ check('R120-J 真实基线：改名残留条目仍在（(1) 与不带 (1) 并存
 check('R120-K 真实基线：条目数不少于目录图纸数（覆盖未缩小）',
       lambda: len(json.load(open(_r120_bl_path, encoding='utf-8'))),
       lambda got: got >= 109)
+
+
+# ========== R121：R63 出图层豁免 + 单实例外部参照块「压图底图」 ==========
+# 现场（PC-P01~P04,T01,M01-A.dwg 识 8 实际 6）两个独立缺陷：
+#   ① R63「相邻同尺寸共边单元格剔除」把 2 张真 A2 页框（42050×29700 上下共边）
+#      判成户型表分格整组剔掉 —— 判据③ 的实质是"该层是图框专用层"，而本图这 6 张
+#      页框全在同一个命名图层 piliangdaying 上、且该层多幅面混排（4×A1 + 2×A2）。
+#   ② 外部参照块 `AC-（P06-P09）-A·DWG 加餐梯`（整张幼儿园图纸绑定当底图）只有
+#      1 个实例 → R114 的"反复叠放"判据不成立 → R40 救援提升的 4 份照旧入选。
+#      判据落在**几何叠放**：参照页框与本图自有页框互相压住（重叠 ≥50%）即"底图"。
+def _rect(layout, x, y, w, h, layer='0'):
+    layout.add_lwpolyline([(x, y), (x + w, y), (x + w, y + h), (x, y + h)],
+                          close=True, dxfattribs={'layer': layer})
+
+
+def _r121_bytes(doc):
+    _buf = io.StringIO(); doc.write(_buf); return _buf.getvalue().encode('utf-8')
+
+
+def _r121_parse(data, env=None):
+    _env = env or {}
+    _saved = {_k: os.environ.get(_k) for _k in _env}
+    for _k, _v in _env.items():
+        os.environ[_k] = _v
+    try:
+        return get_bounding_box_from_bytes(data, 't.dxf', 'polyline', 'mm', 'smart')
+    finally:
+        for _k, _v in _saved.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+
+
+def _r121_census(r):
+    _g = {}
+    for _c in r['candidates']:
+        _k = (round(_c['width']), round(_c['height']))
+        _g[_k] = _g.get(_k, 0) + 1
+    return _g
+
+
+# ---- 合成 A：同一命名图层上 4×A1 + 2×A2 上下共边（出图层 → A2 对被豁免） ----
+_d121a = ezdxf.new('R2010', setup=False)
+_d121a.layers.new('PLOT')
+_m121a = _d121a.modelspace()
+for _i in range(4):
+    _rect(_m121a, 0, _i * 59400, 84100, 59400, layer='PLOT')
+for _i in range(2):
+    _rect(_m121a, 120000, _i * 29700, 42050, 29700, layer='PLOT')
+_b121a = _r121_bytes(_d121a)
+
+check('R121-A 合成：出图层（多幅面混排）上的 2×A2 共边对不被当表格分格',
+      lambda: _r121_census(_r121_parse(_b121a)),
+      lambda got: got == {(84100, 59400): 4, (42050, 29700): 2})
+
+check('R121-B 合成回退：关掉出图层豁免 → 2×A2 共边对被 R63 剔掉',
+      lambda: _r121_census(_r121_parse(
+          _b121a, {'FRAME_PARSER_NO_ADJ_PLOT_LAYER': '1'})),
+      lambda got: got == {(84100, 59400): 4})
+
+# ---- 合成 B：单实例外部参照块（块内嵌套 4 个 A1 子块实例）----
+# 判据是**几何叠放**，不是尺寸：下面两张图除参照块插入点外完全相同，参照页尺寸
+#   也与本图自有页相同（84100×59400）。只有"压在本图页上"的那张要剔。
+#   踩坑记录：直接用「块内一段 84100×59400 的闭合多段线」当参照页**走不进**
+#   R95/R40 的提升通道（候选 from_xref 恒为 0，判据永不触发）；必须做成
+#   「纸面单位子块（841×594）+ scale 100 的嵌套实例」才会被提升并打上参照标记。
+def _r121_xref_doc(ins):
+    _d = ezdxf.new('R2010', setup=False)
+    _d.layers.new('PLOT')
+    _sub = _d.blocks.new('A1FRAME')
+    _rect(_sub, 0, 0, 841, 594)
+    _rect(_sub, 1, 1, 839, 592)
+    _xr = _d.blocks.new('XREF_SET')
+    for _i in range(4):
+        _xr.add_blockref('A1FRAME', (0, _i * 59400),
+                         dxfattribs={'xscale': 100, 'yscale': 100})
+    _xr.block.dxf.xref_path = r'C:\some\other.dwg'
+    _m = _d.modelspace()
+    for _i in range(4):
+        _rect(_m, 0, _i * 59400, 84100, 59400, layer='PLOT')
+    _m.add_blockref('XREF_SET', ins)
+    return _r121_bytes(_d)
+
+
+_b121c = _r121_xref_doc((20000, 10000))     # 参照页压住自有 A1#0（重叠 63%）
+_b121e = _r121_xref_doc((200000, 0))        # 同一张图，参照块摆开、不压
+
+check('R121-C 合成：单实例参照块的页框压在本图自有页上 → 整组不作本图图框',
+      lambda: _r121_census(_r121_parse(_b121c)),
+      lambda got: got == {(84100, 59400): 4})
+
+check('R121-D 合成回退：关掉参照压图剔除 → 参照的 4 张 A1 又冒出来',
+      lambda: _r121_census(_r121_parse(
+          _b121c, {'FRAME_PARSER_NO_XREF_OWN_OVERLAP': '1'})),
+      lambda got: got == {(84100, 59400): 8})
+
+check('R121-E 合成正向：同一构造只把参照块摆开（不压图）→ 参照的 4 页照旧保留',
+      lambda: _r121_census(_r121_parse(_b121e)),
+      lambda got: got == {(84100, 59400): 8})
+
+# ---- 真实图端到端 + 双开关回退 ----
+_R121_TARGET = next((p for p in [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\PC-P01~P04,T01,M01-A.dwg',
+] if os.path.exists(p)), None)
+if _R121_TARGET:
+    with open(_R121_TARGET, 'rb') as _f:
+        _r121_bin = _f.read()
+
+    def _r121_run(**env):
+        _saved = {_k: os.environ.get(_k) for _k in env}
+        for _k, _v in env.items():
+            os.environ[_k] = _v
+        try:
+            return get_bounding_box_from_bytes(
+                _r121_bin, 'PC-P01~P04,T01,M01-A.dwg', 'polyline', 'mm', 'smart')
+        finally:
+            for _k, _v in _saved.items():
+                if _v is None:
+                    os.environ.pop(_k, None)
+                else:
+                    os.environ[_k] = _v
+
+    _r121_ok = None
+    try:
+        _r121_ok = _r121_run()
+    except Exception as _e:
+        print('  R121 端到端解析异常:', str(_e)[:120])
+
+    if _r121_ok is not None:
+        check('R121真实图: PC-P01~P04,T01,M01-A → 6 框（4×A1 + 2×A2）',
+              lambda: _r121_census(_r121_ok),
+              lambda got: got == {(84100, 59400): 4, (42050, 29700): 2})
+
+        check('R121真实图回退: 两条开关都关 → 复现原 bug 8 框（4 自有 A1 + 4 参照 A1）',
+              lambda: _r121_run(**{'FRAME_PARSER_NO_XREF_OWN_OVERLAP': '1',
+                                   'FRAME_PARSER_NO_ADJ_PLOT_LAYER': '1'})['frame_count'],
+              lambda got: got == 8)
+
+        # 逐条开关的四态（现场实测，作为回归对照留档）：
+        #   全开 6 / 只关参照压图 9 / 只关出图层 4 / 双关 8
+        check('R121真实图: 只关参照压图 → 9（参照 4 页回来，其中 1 页占住 1 张 A2）',
+              lambda: _r121_census(_r121_run(
+                  **{'FRAME_PARSER_NO_XREF_OWN_OVERLAP': '1'})),
+              lambda got: got == {(84100, 59400): 8, (42050, 29700): 1})
+
+        check('R121真实图: 只关出图层 → 4（2 张 A2 被 R63 当表格分格剔掉）',
+              lambda: _r121_run(**{'FRAME_PARSER_NO_ADJ_PLOT_LAYER': '1'})['frame_count'],
+              lambda got: got == 4)
+    else:
+        print('SKIP  R121 真实图用例（解析失败）')
+else:
+    print('SKIP  R121 真实图用例（未找到 PC-P01~P04,T01,M01-A.dwg）')
+
+# ---- 正向守卫：合法的单实例参照（贡献本图没有的幅面）必须保留 ----
+# R114 注释点名的族群：AC-P02、E01、D03-B.dwg 的参照块 `Ax-S-E01` 单实例、from_xref，
+#   但贡献 105100×59400 / 52550×29700 这两个本图没有的幅面 → 基线 fc=3 必须不变。
+_R121_GUARD = next((p for p in [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\AC-P02、E01、D03-B.dwg',
+] if os.path.exists(p)), None)
+if _R121_GUARD:
+    with open(_R121_GUARD, 'rb') as _f:
+        _r121g_bin = _f.read()
+
+    def _r121g_run(env=None):
+        _env = env or {}
+        _saved = {_k: os.environ.get(_k) for _k in _env}
+        for _k, _v in _env.items():
+            os.environ[_k] = _v
+        try:
+            return get_bounding_box_from_bytes(
+                _r121g_bin, 'AC-P02、E01、D03-B.dwg', 'polyline', 'mm', 'smart')
+        finally:
+            for _k, _v in _saved.items():
+                if _v is None:
+                    os.environ.pop(_k, None)
+                else:
+                    os.environ[_k] = _v
+
+    check('R121真实图守卫: AC-P02、E01、D03-B 参照贡献缺幅面 → 保留 3 框',
+          lambda: _r121g_run()['frame_count'],
+          lambda got: got == 3)
+
+    check('R121真实图守卫回退: 关掉参照压图剔除 → 仍然 3 框（合法参照不受影响）',
+          lambda: _r121g_run({'FRAME_PARSER_NO_XREF_OWN_OVERLAP': '1'})['frame_count'],
+          lambda got: got == 3)
+else:
+    print('SKIP  R121 正向守卫用例（未找到 AC-P02、E01、D03-B.dwg）')
 
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

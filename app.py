@@ -1188,6 +1188,14 @@ FRAME_RATIO_MAX = 5.5
 #   就是把整张参照图当底图一层层压上去（10(AC-M01-A).dwg 实测 73%~90%）。
 XREF_OVERLAY_RATIO = 0.5
 
+# R121：外部参照块「压图底图」判据 —— 参照页框与本图**自有页框**的重叠比例门槛
+#   （重叠面积 / 两者面积较小者）。
+#   R114 的 XREF_OVERLAY_RATIO 比的是参照实例**之间**是否反复叠放，单实例参照
+#   漏网；本常量比的是参照页框与本图自有页是否互相压住。现场
+#   PC-P01~P04,T01,M01-A.dwg 的参照页 (199529,101198)-(283629,160598) 压在本图自带
+#   A2 (218892,94197)-(260942,123897) 上，x 向全含、y 向含 76% → 面积比 76%。
+XREF_OWN_OVERLAP_RATIO = 0.5
+
 # R116：块 bbox 去「离群散件」的门槛。
 #   块定义里常挂着一个远距离垃圾实例（拖进来的墙线/详图碎片），把 bbox 撑到量级
 #   失真：16(AC-T01-A).dwg 的 A1 图框块 84100x59400，因块内挂了一个 Wall 层嵌套
@@ -7811,6 +7819,83 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 if _mx >= XREF_OVERLAY_RATIO:
                     for _c, _pb in _lst:
                         _rd.add(id(_c))
+
+            # R121：单实例参照块的「压图底图」——上一条判据看的是参照实例**之间**
+            #   是否反复叠放；这里看参照页框与本图**自有页框**是否互相压在一起。
+            #   现场（PC-P01~P04,T01,M01-A.dwg 识 8 实际 6）：块
+            #   `AC-（P06-P09）-A·DWG 加餐梯`（组码 1 = F:\Kindergarden\….dwg，
+            #   整张幼儿园图纸被绑定当底图，块内 12 份 84100×59400）只有 **1 个**
+            #   实例（@135904,123727、scale 1）→ 参照实例之间不叠放 → 判据一不成立
+            #   → R40 救援提升的 4 份 84100×59400 照旧入选 → fc 8，实际 6。
+            #   这 4 份里第 4 张（199529,101198)-(283629,160598) 与本图自有 A2
+            #   (218892,94197)-(260942,123897) 重叠：x 向全含（42050/42050）、
+            #   y 向含 22699/29700 → 面积重叠比 76%（对较小者），远超 50% 门槛
+            #   ——参照图被直接压在本图的图页上，这就是"底图"的物理特征。
+            #
+            #   为什么不用「尺寸与本图自有页重复」：实测被 3 张图否掉
+            #   （P_10#给排水平面图 14→11、water-2014 14→6、邮电学院-平面图 26→10）
+            #   —— 那 3 张里参照贡献的页框**本来就是本图要出的页**，只是尺寸与自有
+            #   页相同（同一套模板印的），尺寸重复完全不能说明"不是本图的页"。
+            #   而"压在本图页上"是几何事实，与尺寸无关。
+            #   对照组（参照页框与本图自有页互不重叠，必须保留）：
+            #     P_10#     参照 x1494613..1746913 / 自有 x1227568..1485840
+            #     water-2014 参照 x1014536..1212898 / 自有 x879055..963155
+            #     邮电学院   参照 x-6853378..-6555978 / 自有 x-7279791..-7131191
+            #     AC-P02   参照 (-11661,-109241)-(140438,10690) / 自有 (-11591,-43223)-(72509,16177)
+            #               —— 两个参照页都恰好落在自有页的上方/右方，无交集。
+            #   开关 FRAME_PARSER_NO_XREF_OWN_OVERLAP=1 回退。
+            _rd_ov = set()
+            if os.environ.get('FRAME_PARSER_NO_XREF_OWN_OVERLAP') != '1':
+                _own_boxes = [(c['layout'], c['bbox']) for c in frame_like
+                              if not c.get('from_xref')
+                              and is_paper_sheet_size(c['width'], c['height'])]
+                for _c in frame_like:
+                    if id(_c) in _rd or not _c.get('from_xref'):
+                        continue
+                    _cb = _c['bbox']
+                    _ca = max(1.0, (_cb[2] - _cb[0]) * (_cb[3] - _cb[1]))
+                    for _lo, _ob in _own_boxes:
+                        if _lo != _c['layout']:
+                            continue
+                        _ix = min(_cb[2], _ob[2]) - max(_cb[0], _ob[0])
+                        _iy = min(_cb[3], _ob[3]) - max(_cb[1], _ob[1])
+                        if _ix <= 0 or _iy <= 0:
+                            continue
+                        _oa = max(1.0, (_ob[2] - _ob[0]) * (_ob[3] - _ob[1]))
+                        if _ix * _iy / min(_ca, _oa) >= XREF_OWN_OVERLAP_RATIO:
+                            _rd_ov.add(id(_c))
+                            break
+                if _rd_ov:
+                    # 提到**整组**：同一张参照图不会只有一页压在图上，其余页同属该
+                    #   参照文件的图框，一并撤。分组键与 R114 判据一同口径。
+                    _ov_keys = set()
+                    for _c in frame_like:
+                        if id(_c) in _rd_ov:
+                            _pb = _c.get('parent_bbox')
+                            if _pb is not None:
+                                _ov_keys.add((_c['layout'], _c.get('src_block'), _pb))
+                    if _ov_keys:
+                        for _c in frame_like:
+                            if id(_c) in _rd or not _c.get('from_xref'):
+                                continue
+                            _pb = _c.get('parent_bbox')
+                            if _pb is None:
+                                continue
+                            if (_c['layout'], _c.get('src_block'), _pb) in _ov_keys:
+                                _rd_ov.add(id(_c))
+                    _ov_cnt = {}
+                    for _c in frame_like:
+                        if id(_c) in _rd_ov:
+                            _k = (round(_c['width']), round(_c['height']))
+                            _ov_cnt[_k] = _ov_cnt.get(_k, 0) + 1
+                    safe_log(
+                        "  [R121·参照压图剔除] 外部参照块的页框与本图自有页框重叠"
+                        f"≥{XREF_OWN_OVERLAP_RATIO:.0%}（参照图被当底图压在本图页上）"
+                        "→ 该参照实例整组不作本图图框: "
+                        + ', '.join('%dx%d×%d' % (k[0], k[1], n)
+                                    for k, n in sorted(_ov_cnt.items())))
+                    _rd |= _rd_ov
+
             _xr_like = [c for c in frame_like if id(c) in _rd]
             # 护栏：本图**完全**没有自有页框时保留（d008.dwg 整张出图页就在
             #   绑定参照块里，这时参照页就是本图页）。
@@ -7824,7 +7909,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                      for k, n in sorted(_xr_cnt.items()))
                 frame_like = _own_like
                 pass_feature_count = len(frame_like)
-                safe_log(f"  [R114·参照页框剔除] 外部参照块被反复叠放，其提升的 "
+                safe_log(f"  [R114·参照页框剔除] 外部参照块提升的 "
                          f"{len(_xr_like)} 个页框（{_xr_desc}）不作本图图框"
                          f"——残留 {len(_own_like)} 个本图自有候选")
 
@@ -8098,6 +8183,30 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 _lu = (_c.get('insert_layer') or '').upper()
                 return any(_k in _lu for _k in _TITLE_LAYER_KEYS)
 
+            # R121：判据③ 的第二种识别方式 —— 该层同时承载本图**其它幅面**的页框。
+            #   判据③ 的实质是"这一层是图框专用层"，而层名带 TTLB 只是它的一种表现。
+            #   出图层会把整册图纸的多种幅面排在一起（本图 piliangdaying 层：
+            #   4×84100×59400 + 2×42050×29700），表格分格所在层则只有表格本身
+            #   （0722 那两个 23938×34315 在 '0' 层，该层再无别的尺寸）。
+            #   现场（PC-P01~P04,T01,M01-A.dwg）：2 张真 A2 页框 42050×29700
+            #   上下共边拼版（y=94197 / 123897，共用边一条线），同尺寸组恰 2 份、
+            #   非图签层、无内框 → 被判据⑤+③+④ 判成户型表分格整组剔掉，
+            #   fc 少了这 2 页。与 0722 的表格分格在**图层语义**上完全不同。
+            #   开关 FRAME_PARSER_NO_ADJ_PLOT_LAYER=1 回退。
+            _multi_size_layers = set()
+            if os.environ.get('FRAME_PARSER_NO_ADJ_PLOT_LAYER') != '1':
+                _lay_sizes = {}
+                for _c in frame_like:
+                    if _c['type'] not in EXPLICIT_TYPES:
+                        continue
+                    _lu = (_c.get('insert_layer') or '').upper()
+                    _lay_sizes.setdefault(_lu, set()).add(
+                        (round(_c['width'] / 100), round(_c['height'] / 100)))
+                _multi_size_layers = {_l for _l, _s in _lay_sizes.items() if len(_s) >= 2}
+
+            def _on_plot_layer(_c):
+                return ((_c.get('insert_layer') or '').upper() in _multi_size_layers)
+
             _adj_ids = set()
             _adj_size_cnt = {}
             for _c in frame_like:
@@ -8122,7 +8231,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 _a = frame_like[_ia]
                 if id(_a) in _adj_ids or _a['type'] != '闭合多段线':
                     continue
-                if _on_title_layer(_a):
+                if _on_title_layer(_a) or _on_plot_layer(_a):
                     continue
                 if _has_inner_border(_a):
                     continue
@@ -8132,7 +8241,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                             or _b['layout'] != _a['layout']
                             or _b['type'] != '闭合多段线'):
                         continue
-                    if _on_title_layer(_b):
+                    if _on_title_layer(_b) or _on_plot_layer(_b):
                         continue
                     if _has_inner_border(_b):
                         continue
