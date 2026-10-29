@@ -5930,4 +5930,78 @@ else:
     print('SKIP  R119 真实图用例（未找到 P-B1-P03~04-A.dwg）')
 
 
+# ========== R120：regress_check.py --update 的基线保护（未命中不回删 / 报错不覆盖） ==========
+# 背景：--update 全量模式原本把基线整表重建，目录里已不存在的历史条目被静默删除
+#   （AC-P02、E01、D03-B (1).dwg 连续 7 轮被删、每轮手工补回）。这里直接测
+#   merge_baseline 这个纯函数，不依赖 ODA / DWG。
+import json
+import regress_check as _rc
+
+_R120_BASE = {
+    'a.dwg': {'fc': 3, 'best': '84100x59400', 'sizes': ['84100x59400x3']},
+    'b.dwg': {'fc': 5, 'best': '42050x29700', 'sizes': ['42050x29700x5']},
+    'rename-old (1).dwg': {'fc': 2, 'best': '105100x59400', 'sizes': ['105100x59400x2']},
+}
+_R120_RES = [
+    ('a.dwg', {'fc': 4, 'best': '84100x59400', 'sizes': ['84100x59400x4']}),   # 正常变化
+    ('c.dwg', {'fc': 1, 'best': '2378x1682', 'sizes': ['2378x1682x1']}),       # 新增
+]
+
+
+def _r120_merge(**kw):
+    return _rc.merge_baseline(_R120_BASE, _R120_RES, **kw)
+
+
+check('R120-A 未命中条目默认保留（不回删）',
+      lambda: (lambda t: (sorted(t[0]), t[1]))(_r120_merge()),
+      lambda got: got[0] == ['a.dwg', 'b.dwg', 'c.dwg', 'rename-old (1).dwg']
+      and got[1] == ['b.dwg', 'rename-old (1).dwg'])
+
+check('R120-B 未命中条目内容原样（b 未被改写、残留条目仍在）',
+      lambda: (lambda t: (t[0]['b.dwg'], t[0]['rename-old (1).dwg']))(_r120_merge()),
+      lambda got: got[0] == _R120_BASE['b.dwg'] and got[1] == _R120_BASE['rename-old (1).dwg'])
+
+check('R120-C 命中的条目被新结果覆盖',
+      lambda: _r120_merge()[0]['a.dwg']['fc'],
+      lambda got: got == 4)
+
+check('R120-D 新增条目入库',
+      lambda: _r120_merge()[0]['c.dwg']['fc'],
+      lambda got: got == 1)
+
+check('R120-E --prune 才删除未命中条目',
+      lambda: (lambda t: (sorted(t[0]), t[1]))(_r120_merge(prune=True)),
+      lambda got: got[0] == ['a.dwg', 'c.dwg'] and got[1] == ['b.dwg', 'rename-old (1).dwg'])
+
+check('R120-F 解析报错不覆盖原本正常的条目',
+      lambda: (lambda t: (t[0]['a.dwg']['fc'], t[2]))(
+          _rc.merge_baseline(_R120_BASE,
+                             [('a.dwg', {'error': 'RuntimeError: 解析失败'})])),
+      lambda got: got[0] == 3 and got[1] == ['a.dwg'])
+
+check('R120-G 报错但基线无此条目 → 照常记录（不吞掉新图的报错）',
+      lambda: _rc.merge_baseline({}, [('new.dwg', {'error': 'X: y'})])[0],
+      lambda got: 'error' in got.get('new.dwg', {}) and len(got) == 1)
+
+check('R120-H 报错已有 error 的条目 → 允许用新 error 刷新',
+      lambda: _rc.merge_baseline({'e.dwg': {'error': 'old'}},
+                                 [('e.dwg', {'error': 'new'})])[0]['e.dwg']['error'],
+      lambda got: got == 'new')
+
+# 真实基线文件体检：条目有序 + 那两条改名残留必须都在（防再次被静默删除）
+_r120_bl_path = Path(__file__).with_name('regression_baseline.json')
+check('R120-I 真实基线：键有序',
+      lambda: (lambda d: list(d) == sorted(d))(json.load(open(_r120_bl_path, encoding='utf-8'))),
+      lambda got: got is True)
+
+check('R120-J 真实基线：改名残留条目仍在（(1) 与不带 (1) 并存）',
+      lambda: (lambda d: sorted(k for k in d if 'AC-P02' in k))(
+          json.load(open(_r120_bl_path, encoding='utf-8'))),
+      lambda got: got == ['AC-P02、E01、D03-B (1).dwg', 'AC-P02、E01、D03-B.dwg'])
+
+check('R120-K 真实基线：条目数不少于目录图纸数（覆盖未缩小）',
+      lambda: len(json.load(open(_r120_bl_path, encoding='utf-8'))),
+      lambda got: got >= 109)
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

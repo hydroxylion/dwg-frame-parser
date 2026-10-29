@@ -3,7 +3,8 @@
 
 用法（在项目根目录）：
   .venv/Scripts/python.exe regress_check.py                # 对比模式：单跑当前版本，diff 基线
-  .venv/Scripts/python.exe regress_check.py --update       # 重新生成基线（确认变化符合预期后）
+  .venv/Scripts/python.exe regress_check.py --update       # 补录基线（确认变化符合预期后）
+  .venv/Scripts/python.exe regress_check.py --update --prune   # 补录并删除「本次没跑到」的旧条目
   .venv/Scripts/python.exe regress_check.py --files a.dwg,b.dwg   # 冒烟：只跑指定图纸
   .venv/Scripts/python.exe regress_check.py --folder X     # 指定图纸目录
   .venv/Scripts/python.exe regress_check.py --serial      # 强制串行（调试用）
@@ -22,6 +23,13 @@ regress_dxf_cache/（可随时整个删除），后续回归直接喂 DXF（与�
 audit），单张再省 ~20%（ODA 转换的 25s 级开销）。转换失败自动回退 DWG
 原路径，不影响正确性。
 基线更新原则：跑 --update 前必须人工确认每处 DIFF 都是本轮改动的预期效果。
+R120 基线保护：
+  ① 默认**保留**「本次没跑到」的既有条目（只列出来提醒），删除必须显式 `--prune`。
+     旧逻辑在全量 --update 时把 baseline 清成 {} 整表重建，目录里已不存在的历史
+     条目被静默删除（实测 R113~R119 连续 7 轮删掉同一条、每轮手工补回）。
+  ② 解析报错**不覆盖**原本正常的条目（否则基线记下 error，之后永远 SAME，
+     这张图的回归覆盖就静默消失了）。
+  ③ 输出按文件名排序 + indent=2 定稿，避免并行完成序 / 缩进差异制造无意义 diff。
 """
 import argparse
 import collections
@@ -211,9 +219,43 @@ def collect_files(folder, only=None):
     return [os.path.join(folder, f) for f in files]
 
 
+def merge_baseline(baseline, results, prune=False):
+    """把本次解析结果并入既有基线（R120）。抽成纯函数以便单测。
+
+    results: [(文件名, 摘要), ...]（`_run_parse` 的返回）
+    返回 (new_baseline, stale, err_kept)：
+      stale    —— 基线里有、但本次没跑到的条目（文件名升序）。
+                  prune=False 时**原样保留**在 new_baseline 里，只有 prune=True 才删。
+      err_kept —— 本次解析报错、因而**没有覆盖**原正常条目的文件名（升序）。
+
+    两条保护都是为了让「回归覆盖」不会静默缩小：
+      ① 不删未命中条目（旧逻辑全量 --update 时整表重建，目录里已不存在的历史条目
+         就这么没了，报告只打"共 N 张"看不出来）；
+      ② 报错不覆盖正常条目（否则基线把 error 记成"预期结果"，之后永远 SAME）。
+    """
+    out = dict(baseline)
+    parsed = set()
+    err_kept = []
+    for fn, cur in results:
+        parsed.add(fn)
+        if 'error' in cur:
+            prev = out.get(fn)
+            if prev is not None and 'error' not in prev:
+                err_kept.append(fn)   # 保留原条目，不写入本次错误摘要
+                continue
+        out[fn] = cur
+    stale = sorted(k for k in out if k not in parsed)
+    if prune:
+        for k in stale:
+            del out[k]
+    return out, stale, sorted(err_kept)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--update', action='store_true', help='重新生成基线（先人工确认 DIFF 符合预期）')
+    ap.add_argument('--update', action='store_true', help='补录基线（先人工确认 DIFF 符合预期）')
+    ap.add_argument('--prune', action='store_true',
+                    help='配合 --update：删除「本次没跑到」的既有基线条目（默认保留并列出）')
     ap.add_argument('--folder', default=DEFAULT_FOLDER, help='图纸目录')
     ap.add_argument('--files', default='', help='逗号分隔的文件名（冒烟模式）')
     ap.add_argument('--serial', action='store_true', help='强制串行（调试用，默认并行）')
@@ -244,22 +286,62 @@ def main():
     cache_pre = _cached_n() if _DXF_CACHE else 0
 
     if args.update:
-        # 增量补录语义：--update --files 指定图时保留其余基线条目（目录新增图纸
-        # 补录基线不必全量重跑）；全量 --update（不带 --files）重建基线
-        if only and os.path.exists(BASELINE_PATH):
+        # 补录语义（R120 改）：**一律**以现有基线为底，把本次跑到的图覆盖进去。
+        #
+        # 为什么不再"全量重建"：旧逻辑在不带 --files 时把 baseline 清成 {}，于是
+        #   「目录里已不存在的历史条目」被静默删掉。AC-P02、E01、D03-B (1).dwg 是
+        #   文件改名后的历史残留（现已重命名为不带 " (1)" 的名字），R113~R119 连续
+        #   7 轮的 --update 每次都删掉它、每轮都要从备份手工补回。
+        #   关键是**删除不可见**：报告只打"共 N 张"，少一条看不出来；代价是一张
+        #   图纸彻底退出回归覆盖。所以默认保留 + 逐条列出，删除必须显式 --prune。
+        baseline = {}
+        if os.path.exists(BASELINE_PATH):
             with open(BASELINE_PATH, encoding='utf-8') as f:
                 baseline = json.load(f)
-        else:
-            baseline = {}
+        n_before = len(baseline)
+
         results = _run_parse(files, n_workers)
+        merged, stale, err_kept = merge_baseline(baseline, results, prune=args.prune)
+
         for fn, cur in results:
-            baseline[fn] = cur
-            tag = cur.get('fc', cur.get('error', '?'))
-            print(f'  [基线] {fn}: fc={tag}')
-        with open(BASELINE_PATH, 'w', encoding='utf-8') as f:
-            json.dump(baseline, f, ensure_ascii=False, indent=1)
-        print(f'\n✅ 基线已写入 {BASELINE_PATH}（共 {len(baseline)} 张，'
-              f'耗时 {(time.time() - t_start) / 60:.1f} 分钟）')
+            if fn in err_kept:
+                print(f'  [基线·跳过] {fn}: 解析报错，保留原条目 fc='
+                      f'{baseline[fn].get("fc")}（本次错误: {cur["error"]}）')
+            elif 'error' in cur:
+                print(f'  [基线] {fn}: ⚠️ 解析报错 {cur["error"]}')
+            else:
+                print(f'  [基线] {fn}: fc={cur.get("fc")}')
+
+        if args.prune:
+            if stale:
+                print(f'\n🗑  --prune：已删除 {len(stale)} 条本次未跑到的基线条目:')
+                for k in stale:
+                    print(f'      - {k}')
+            else:
+                print('\n--prune：没有本次未跑到的条目，无需删除')
+        elif stale:
+            if only:
+                # 局部补录（--files）时其余条目本就应该保留，不刷屏
+                print(f'\nℹ️  保留 {len(stale)} 条未参与本次补录的既有条目（--files 局部模式）')
+            else:
+                print(f'\n⚠️  保留 {len(stale)} 条本次未跑到的既有基线条目（**未删除**）:')
+                for k in stale:
+                    print(f'      · {k}  fc={baseline[k].get("fc", "?")}')
+                print('     这些图纸已不在校验目录里（多为改名残留）。确认彻底不需要回归'
+                      '覆盖时，加 --prune 重跑即可删除。')
+
+        # 排序 + indent=2 定稿：--update 的写入顺序受并行完成序影响，不排序会让
+        #   每次补录产生大片"看起来变了其实没变"的 diff。
+        out = {k: merged[k] for k in sorted(merged)}
+        with open(BASELINE_PATH, 'w', encoding='utf-8', newline='\n') as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+            f.write('\n')
+        delta = len(out) - n_before
+        delta_txt = f'{delta:+d}' if delta else '±0'
+        print(f'\n✅ 基线已写入 {BASELINE_PATH}（{n_before} → {len(out)} 张，'
+              f'{delta_txt}；耗时 {(time.time() - t_start) / 60:.1f} 分钟）')
+        if err_kept:
+            print(f'   ⚠️ 其中 {len(err_kept)} 张本次解析报错，已保留原基线条目未覆盖')
         return
 
     if not os.path.exists(BASELINE_PATH):
