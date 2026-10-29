@@ -5774,4 +5774,160 @@ else:
     print('SKIP  R118 真实图用例（未找到 PC-M01~M12-A.dwg）')
 
 
+# ======================================================================
+# 用例 179~183：R119 P-B1-P03~04-A.dwg 模型空间多认 1 个（应无图框）
+# ======================================================================
+# 需求：程序识 3 个 —— 布局 "M03、M04" 2 个（1635×841 A0 加长 + 1189×841 A1 加长，
+#   这两个是对的），模型空间 1 个；用户口径：**模型空间应无图框**。
+# 现场：模型空间那个候选是闭合多段线 346200×246300，画在 **Defpoints** 图层上
+#   （该层显式组码 290=0，即"不打印"；全图此层只有 2 个实体：1 个 INSERT +
+#   这条 4 顶点矩形）。它是出图范围辅助框 —— 打印不出来，不可能承载交付图框。
+# 为什么能进候选池：R104 早就立了「不打印层不出图框」的判据，但四处引用
+#   （块内矩形证据 ×2、_scan_block_max_page_rects、R40 救援递归）**全在块内扫描**，
+#   顶层 `visible_entities` 收集路径一处都没有；而 `invisible_layers` 只收
+#   「关闭 / 冻结」—— 不打印层的实体在屏幕上照常显示、只是打不出来，
+#   于是照旧进了候选。再看它过特征的路：rel_area_ratio = 12.12% ≥ 10%
+#   （R79「实物尺度详图空间」口径，分母取 msp_total）→ 条件C 收下；比例 1.4056
+#   天然满足 ≥√2×0.95，无需任何巧合。
+# 修法：不打印层的**直接几何实体**（LWPOLYLINE / POLYLINE / LINE …）不参与
+#   图框收集。三条边界：
+#   ① INSERT 不过滤 —— 块参照能否打印由**块内图元各自图层**决定（块内 '0' 层
+#      图元随插入层，具体图层图元按自己图层），按插入层一刀切会误伤真图框块；
+#   ② '0' 层同 ① 原理不纳入（与 R104 对 '0' 的豁免一致）；
+#   ③ 护栏同 R106：只有**本 layout 里确实存在可打印的直接几何**时才启用过滤 ——
+#      CAXA / 电子图板导出的机械图（非圆减速器装配.dwg）整张图都落在
+#      EbLayer1..7 这类 plot=0 层上、图框也在其中，那里"不打印"是全图属性，
+#      一刀切会把唯一的真图框删掉（fc 1 → 0，直接报"未检测到图框"）。
+#   开关 FRAME_PARSER_NO_NOPLOT_TOP=1 回退。
+# 已知遗留（本轮不修，记录在案）：不打印层的几何仍计入 calculate_layout_total_bbox
+#   → msp_total，会稀释同 layout 内真图框的 rel。本图模型空间无真图框，故不发作；
+#   若某图"模型空间同时有 Defpoints 辅助大框 + 真图框"，真图框仍可能被稀释漏检
+#   （R117/R118 的一轮一因纪律：分母口径影响 105 张全量，须单独一轮评估）。
+
+
+# ---- R119 辅助：造一个「显式 plot=0」的图层 ----
+# 注意 Defpoints 在 ezdxf 默认文档里已存在，不能 layers.new 重名。
+def _r119_noplot_layer(doc, name='Defpoints'):
+    _lay = doc.layers.get(name) if name in doc.layers else doc.layers.new(name)
+    _lay.dxf.plot = 0
+    return _lay
+
+
+def _r119_env_parse(data, env):
+    _saved = {_k: os.environ.get(_k) for _k in env}
+    for _k, _v in env.items():
+        os.environ[_k] = _v
+    try:
+        return parse(data)
+    finally:
+        for _k, _v in _saved.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+
+
+def _r119_sheet_and_noplot_box():
+    """复刻真实图结构：真图框在布局（纸面 mm），模型空间只有 Defpoints 出图范围辅助框。
+
+    346200×246300 照抄真实值（ratio 1.4056，天然满足条件C 的 ≥√2×0.95）。
+    """
+    d = make_doc()
+    _r119_noplot_layer(d, 'Defpoints')
+    msp = d.modelspace()
+    add_closed_rect(msp, 0, 0, 346200, 246300, layer='Defpoints')
+    msp.add_line((1000, 1000), (2000, 1000))     # 可打印几何 → 护栏成立，过滤生效
+    _sheet = d.layouts.new('SHEET')
+    add_closed_rect(_sheet, 0, 0, 841, 594, layer='P-TITLE')
+    return to_bytes(d)
+
+
+def _r119_all_noplot():
+    """整张图都在 plot=0 层上（CAXA / 电子图板导出机械图的典型形态）。
+
+    护栏必须放行这张唯一的真图框，否则 fc 1 → 0。
+    """
+    d = make_doc()
+    _r119_noplot_layer(d, 'EbLayer1')
+    msp = d.modelspace()
+    add_closed_rect(msp, 0, 0, 42050, 29700, layer='EbLayer1')
+    msp.add_line((1000, 1000), (2000, 1000), dxfattribs={'layer': 'EbLayer1'})
+    return to_bytes(d)
+
+
+_R119_SHEET_BIN = _r119_sheet_and_noplot_box()
+
+check('R119-A: 不打印层(plot=0)的 346200x246300 辅助框不入候选，只剩布局真图框 841x594',
+      lambda: parse(_R119_SHEET_BIN),
+      lambda r: (r['frame_count'] == 1
+                 and (r['candidates'][0]['width'],
+                      r['candidates'][0]['height']) == (841, 594)))
+
+check('R119-B: 回退(NO_NOPLOT_TOP=1) → 不打印层辅助框重新冒充图框（fc 2）',
+      lambda: _r119_env_parse(_R119_SHEET_BIN, {'FRAME_PARSER_NO_NOPLOT_TOP': '1'}),
+      lambda r: (r['frame_count'] == 2
+                 and any((round(c['width']), round(c['height'])) == (346200, 246300)
+                         for c in r['candidates'])))
+
+check('R119-C: 护栏——整图都在 plot=0 层（CAXA 机械图）时照旧识别 42050x29700 真图框',
+      lambda: parse(_r119_all_noplot()),
+      lambda r: (r['frame_count'] == 1
+                 and (r['candidates'][0]['width'],
+                      r['candidates'][0]['height']) == (42050, 29700)))
+
+
+# ---- 用例 182~183：R119 真实图端到端 + 开关回退 ----
+_R119_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\P-B1-P03~04-A.dwg',
+]
+_R119_TARGET = next((p for p in _R119_CANDIDATES if os.path.exists(p)), None)
+if _R119_TARGET:
+    with open(_R119_TARGET, 'rb') as _f:
+        _r119_bin = _f.read()
+
+    def _r119_real_run(env=None):
+        _env = env or {}
+        _saved = {_k: os.environ.get(_k) for _k in _env}
+        for _k, _v in _env.items():
+            os.environ[_k] = _v
+        try:
+            return get_bounding_box_from_bytes(
+                _r119_bin, 'P-B1-P03~04-A.dwg', 'polyline', 'mm', 'smart')
+        finally:
+            for _k, _v in _saved.items():
+                if _v is None:
+                    os.environ.pop(_k, None)
+                else:
+                    os.environ[_k] = _v
+
+    _r119_res = None
+    try:
+        _r119_res = _r119_real_run()
+    except Exception as _e:
+        print('  R119 端到端解析异常:', str(_e)[:120])
+
+    if _r119_res is not None:
+        check('R119真实图: P-B1-P03~04-A 识2框且均在布局（1635x841 + 1189x841），模型空间无框',
+              lambda: [(c['layout'], round(c['width']), round(c['height']))
+                       for c in _r119_res['candidates']],
+              lambda got: (_r119_res['frame_count'] == 2
+                           and len(got) == 2
+                           and all('布局' in g[0] for g in got)
+                           and sorted((g[1], g[2]) for g in got) == [(1189, 841), (1635, 841)]))
+
+        try:
+            _r119_back = _r119_real_run({'FRAME_PARSER_NO_NOPLOT_TOP': '1'})
+            check('R119真实图回退: 关不打印层过滤 → Defpoints 辅助框冒充图框（fc 3）',
+                  lambda: [(c['layout'], round(c['width']), round(c['height']))
+                           for c in _r119_back['candidates']],
+                  lambda got: (_r119_back['frame_count'] == 3
+                               and any(g[0] == '模型空间'
+                                       and (g[1], g[2]) == (346200, 246300)
+                                       for g in got)))
+        except Exception as _e:
+            print('  R119 回退对照异常:', str(_e)[:120])
+else:
+    print('SKIP  R119 真实图用例（未找到 P-B1-P03~04-A.dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

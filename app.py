@@ -333,6 +333,37 @@ def xref_block_names(doc):
     return _names
 
 
+def noplot_layer_names(doc):
+    """当前文档里「显式声明不打印」(DXF 组码 290=0) 的图层名集合（R119）。
+
+    口径与 collect_candidates_from_layout 内 R104 的 _noplot_layers 一致：
+      * 只认**显式**写了 290=0 的层 —— ezdxf 对缺失的 290 会补成 0（写 DXF 时
+        plot=1 的层因等于默认值被省略 290，读回 hasattr('plot')=True 且值为 0），
+        按 getattr 默认值判会把所有普通层当成不可打印，图框全灭；
+      * '0' 层不纳入 —— 其实际打印属性由插入层决定（块内 '0' 层图元随插入层），
+        按 '0' 层自身 flag 判会误伤。
+
+    is_frame_like 在 get_bounding_box_from_bytes 作用域里，取不到 collect 闭包内的
+    _noplot_layers，故单独提供模块级实现（同 block_rect_list 的处理）。
+    """
+    _names = set()
+    if doc is None:
+        return _names
+    try:
+        for _L in doc.layers:
+            try:
+                _n = _L.dxf.name
+                if _n == '0':
+                    continue
+                if _L.dxf.hasattr('plot') and not int(_L.dxf.get('plot', 1)):
+                    _names.add(_n)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return _names
+
+
 def block_rect_list(block, doc=None):
     """块定义内的「图框级矩形」清单（块定义坐标），R113。
 
@@ -2057,6 +2088,21 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     visible_entities = [e for e in layer_filtered if getattr(e.dxf, 'invisible', 0) != 1]
     skipped_layer = len(all_entities) - len(layer_filtered)
     skipped_invisible = len(layer_filtered) - len(visible_entities)
+
+    # R119：不打印图层（DXF 组码 290=0，典型 Defpoints）上的**直接几何候选**不作数。
+    #   问题图（P-B1-P03~04-A.dwg）：模型空间唯一的巨型闭合矩形 346200×246300 画在
+    #   Defpoints（该层显式 290=0，全图此层仅 2 个实体：1 个 INSERT + 这条 4 顶点矩形），
+    #   它是出图范围辅助框 —— 打印不出来，不可能承载交付图框。却以
+    #   rel_area_ratio=12.12% ≥ REL_AREA_THRESHOLD(10%) 过了条件C（R79 实物尺度详图
+    #   空间口径，分母取 msp_total），比例 1.4056 又天然满足 ≥√2×0.95 → fc=3（实际 2）。
+    #   R104 早就立了这条判据，但四处引用（块内矩形证据 ×2 / _scan_block_max_page_rects
+    #   / R40 救援递归）**全在块内扫描**，顶层收集路径一处都没有；而 `invisible_layers`
+    #   只收「关闭 / 冻结」—— 不打印层的实体在屏幕上照常显示、只是打不出来。
+    #
+    #   **否决点不在本函数里做**：候选池会被下游一串结构判定复用（对齐排列剔除 /
+    #   包裹框剔除 / rel 分母 layout_max_area），在这里删候选会让它们集体改判。
+    #   统一否决点见 get_bounding_box_from_bytes 内「R119·不打印层」。
+    #   此处仅保持原有口径不变。
     if skipped_layer or skipped_invisible:
         parts = []
         if skipped_layer:
@@ -4576,6 +4622,37 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             if _n_x != len(_xref_cands):
                 safe_log(f"  [XREF 加载] 与主文件候选坐标重合，去重 {len(_xref_cands) - _n_x} 个")
 
+        # ---------- R119：不打印图层(plot=0) —— 否决所需的图层集合与 layout 护栏 ----------
+        # 这里只**准备数据**，真正的剔除动作在 frame_like 构造之前（见「统一剔除点」），
+        # 因为同一份 _noplot_all / _noplot_guard 要跨两个位置使用。
+        _NOPLOT_CAND_ENABLED = os.environ.get('FRAME_PARSER_NO_NOPLOT_TOP') != '1'
+        _noplot_all = noplot_layer_names(doc) if _NOPLOT_CAND_ENABLED else set()
+        _noplot_guard = {}       # layout -> 该 layout 是否有可打印的直接几何
+        if _noplot_all:
+            _pl_lays = [('模型空间', msp)]
+            for _L19 in doc.layouts:
+                if _L19.name == 'Model':
+                    continue
+                _pl_lays.append((f'布局 "{_L19.name}"', _L19))
+            for _ln19, _lo19 in _pl_lays:
+                _ok19 = False
+                try:
+                    for _e19 in _lo19:
+                        if _e19.dxftype() in ('INSERT', 'VIEWPORT'):
+                            continue
+                        if (_e19.dxf.layer != '0'
+                                and _e19.dxf.layer in _noplot_all):
+                            continue
+                        _ok19 = True
+                        break
+                except Exception:
+                    _ok19 = True
+                _noplot_guard[_ln19] = _ok19
+            if any(_noplot_guard.values()):
+                safe_log(f"  [R119·不打印层] {sorted(_noplot_all)} 上的图框候选不作数"
+                         f"（layout 有可打印几何: "
+                         f"{sorted(k for k, v in _noplot_guard.items() if v)}）")
+
         if not all_candidates:
             raise ValueError("未找到任何有效边界")
 
@@ -5738,6 +5815,34 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                             c['_via'] = 'E'
                             return True
             return False
+
+        # R119：不打印图层(plot=0)上的直接几何候选 —— 统一剔除点。
+        #   位置很讲究，必须在**下面三件事都算完之后**、又在 frame_like 构造与
+        #   所有救援通道（条件I / R62 互证 / R40 / 条件H …）**之前**：
+        #   ① rel 分母（layout_max_area、R27 计回）；
+        #   ② collect 内部的对齐排列剔除；
+        #   ③ collect 内部的包裹框剔除。
+        #   实测三种放法的后果：
+        #     · 放在候选收集里（剔实体/剔候选）→ ①②③ 集体改判：美立方
+        #       19→24（5 个轴网块涌入）、20130729地下室 19→25（3 个 8ZW 涌入）。
+        #     · 放在 is_frame_like 入口 → 拦不住不经特征判据的救援通道，
+        #       地下室柱平面布置0816 的两个「修改」层框 return False 后仍被救回，
+        #       fc 还是 10。
+        #     · 放在这里 → 分母与结构判定保持原状，救援通道也够不着，零连锁。
+        #   块参照插入不剔除（块能否打印由块内图元各自图层决定）。
+        if _noplot_all:
+            _n_before19 = len(all_candidates)
+            all_candidates[:] = [
+                _c19 for _c19 in all_candidates
+                if not (_c19['type'] != '块参照插入'
+                        and (_c19.get('insert_layer') or '') not in ('', '0')
+                        and _c19.get('insert_layer') in _noplot_all
+                        and _noplot_guard.get(_c19['layout'], False))
+            ]
+            if len(all_candidates) != _n_before19:
+                safe_log(f"  [R119·不打印层] 剔除 {_n_before19 - len(all_candidates)} 个"
+                         f"画在不打印图层上的直接几何候选（plot=0，打印不出来，"
+                         f"不可能是交付图框）")
 
         frame_like = [c for c in all_candidates if is_frame_like(c)]
 
