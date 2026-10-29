@@ -5653,4 +5653,125 @@ else:
     print('SKIP  R117 真实图用例（未找到 Px-13-ALL.dwg）')
 
 
+# ======================================================================
+# 用例 175~178：R118 PC-M01~M12-A.dwg 识 16 实际 12
+# ======================================================================
+# 需求：用户实测 12 个图框 —— 59450×42050 ×6 + 42050×29700 ×6。程序出 16 个。
+# 现场：多出的 4 个假页有**两套来源**，而且互相串联交替（同一时刻只有一种占位）：
+#   ① R95「块内子块实例页框」把平面图装配块 Ax-02.03.04-M03（36800×28700，
+#      内含轴网/墙体/标注，4 个实例）里的**轴网子块** Ax-02.03.04-comp-grid
+#      提升成页框：其 bbox 28561×20053 让 R95 四条**尺寸**判据全部命中 ——
+#      短边 20053 ≥ 15000、ratio 1.4243（偏离 √2 仅 0.7%）、短边恰是
+#      105×191 + 2mm（白名单里的 105 = A4 短边的一半，等于把短边容差
+#      放大一倍）。可这个块里**一个闭合矩形都没有**：33 条 LINE 轴线 +
+#      1 个轴号圈 + 10 个嵌套 INSERT + 13 个 ACAD_PROXY_ENTITY ——
+#      它的"页框"只是轴线端点的外接矩形。
+#      对比真页框块 A1_841L_50：只有 2 条 LWPOLYLINE（外框 84100×59400 +
+#      内框）和 1 个 TEXT，块内最大闭合矩形**就是页框本身**（比值 1.00）。
+#      修法：R95 增加判据⑤「子块自身必须是矩形框」（PAGE_RECT_EVID_RATIO）。
+#   ② 条件I 把同一批 36800×28700 实例当"表格页"救回。4 个实例实测
+#      (nh=30,nv=22,nb=89)、(52,30,172)、(59,34,140)：后两个的块/线比值
+#      2.1 / 1.5 被 R98「块多线少」正常跳过，头一个 nb=89 只因差 11 个没过
+#      **硬编码的 100** 门槛 —— 而它的比值 89/52 = 1.71 倍早已远超 0.5。
+#      救回 1 个后，R62 形态B「同尺寸表格页互证」把同块另外 3 个一并放行。
+#      修法：绝对下限 100 → COND_I_MIN_BLOCKS = 30（判别力在比值上）。
+#   串联关系（这轮最关键的认识）：轴网假页存在时，36800 会被 R98「与已入选
+#   图框高度重叠（范围线/包络线形态）」挡住；轴网一被剔，36800 立刻补位成
+#   新的 4 个假页。所以**两条必须同时修** —— 单独修任一条，fc 仍是 16
+#   （见用例 177 与 178 的两条回退对照，各自只剩一种假页）。
+#   为什么没有合成用例：把轴网子块的构造搬进合成图后，即使关掉判据⑤，
+#   提升出来的 28561×20053 也过不了特征判据（合成图 rel 分母不够），
+#   测不出差异 —— 与 R117 同样的情况，硬凑的合成用例只会变成假阳性保护。
+#   故 ① 的负向由真实图回退（用例 177）兜住，只保留 ② 的正向守卫（175）。
+
+
+# ---- 用例 175：正向守卫——子页框块内确有闭合矩形时，R95 照旧提升 ----
+# 父块 SHEET_ASSY 用两条外伸线把 bbox 撑到 60000×59400（自身不再是合格图框），
+# 子块 REAL_PAGE 内是 84100×59400 的闭合矩形（=块 bbox），父实例 scale 0.5
+# → 世界 42050×29700。判据⑤ 只该挡"没画框的块"，不能误伤真页框块。
+def _r118_real_page_subblock():
+    d = make_doc()
+    _page = d.blocks.new('REAL_PAGE')
+    add_closed_rect(_page, 0, 0, 84100, 59400)
+    _assy = d.blocks.new('SHEET_ASSY')
+    _assy.add_blockref('REAL_PAGE', (0, 0))
+    _assy.add_line((0, 0), (60000, 0))
+    _assy.add_line((60000, 0), (60000, 59400))
+    msp = d.modelspace()
+    msp.add_blockref('SHEET_ASSY', (0, 0),
+                     dxfattribs={'xscale': 0.5, 'yscale': 0.5})
+    return to_bytes(d)
+
+
+check('R118-C: 判据⑤ 正向守卫——子块内闭合矩形=页框本身时，R95 照旧提升 42050x29700',
+      lambda: parse(_r118_real_page_subblock()),
+      lambda r: (r['frame_count'] == 1
+                 and (r['candidates'][0]['width'],
+                      r['candidates'][0]['height']) == (42050, 29700)))
+
+
+# ---- 用例 176~178：R118 真实图端到端 + 两条判据各自回退 ----
+_R118_CANDIDATES = [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\PC-M01~M12-A.dwg',
+]
+_R118_TARGET = next((p for p in _R118_CANDIDATES if os.path.exists(p)), None)
+if _R118_TARGET:
+    _r118_want = {(59450, 42050): 6, (42050, 29700): 6}
+
+    def _r118_census(res):
+        _g = {}
+        for _c in res['candidates']:
+            _k = (round(_c['width']), round(_c['height']))
+            _g[_k] = _g.get(_k, 0) + 1
+        return _g
+
+    with open(_R118_TARGET, 'rb') as _f:
+        _r118_bin = _f.read()
+
+    def _r118_run(env):
+        _saved = {_k: os.environ.get(_k) for _k in env}
+        for _k, _v in env.items():
+            os.environ[_k] = _v
+        try:
+            return get_bounding_box_from_bytes(
+                _r118_bin, 'PC-M01~M12-A.dwg', 'polyline', 'mm', 'smart')
+        finally:
+            for _k, _v in _saved.items():
+                if _v is None:
+                    os.environ.pop(_k, None)
+                else:
+                    os.environ[_k] = _v
+
+    _r118_res = None
+    try:
+        _r118_res = _r118_run({})
+    except Exception as _e:
+        print('  R118 端到端解析异常:', str(_e)[:120])
+
+    if _r118_res is not None:
+        check('R118真实图: PC-M01~M12-A 识12框，6×59450x42050 + 6×42050x29700 与清单吻合',
+              lambda: (_r118_res['frame_count'], _r118_census(_r118_res)),
+              lambda t: t[0] == 12 and t[1] == _r118_want)
+
+        # 回退①：关掉 R95 判据⑤ → 轴网子块被提升成 4 张假页（fc 12→16）
+        try:
+            _r118_b = _r118_run({'FRAME_PARSER_NO_PAGE_RECT_EVID': '1'})
+            check('R118真实图回退①: 关 R95 矩形证据 → 轴网子块被当页框，4 张 28561x20053 假页（fc 16）',
+                  lambda: (_r118_b['frame_count'], _r118_census(_r118_b)),
+                  lambda t: t[0] == 16 and t[1].get((28561, 20053)) == 4)
+        except Exception as _e:
+            print('  R118 回退①对照异常:', str(_e)[:120])
+
+        # 回退②：条件I 绝对下限回到 100 → 平面图装配块被当表格页，4 张假页
+        try:
+            _r118_c = _r118_run({'FRAME_PARSER_COND_I_MIN_BLOCKS': '100'})
+            check('R118真实图回退②: 条件I 下限回 100 → 平面图块被当表格页，4 张 36800x28700 假页（fc 16）',
+                  lambda: (_r118_c['frame_count'], _r118_census(_r118_c)),
+                  lambda t: t[0] == 16 and t[1].get((36800, 28700)) == 4)
+        except Exception as _e:
+            print('  R118 回退②对照异常:', str(_e)[:120])
+else:
+    print('SKIP  R118 真实图用例（未找到 PC-M01~M12-A.dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

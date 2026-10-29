@@ -1355,6 +1355,40 @@ def is_a_series_page_size(w, h, tol_short=3.0, tol_ratio=0.01):
     return False, ''
 
 
+# R118：R95「子块实例页框」的**矩形证据**下限 —— 子块自身 bbox 长边与块内最大
+#   闭合矩形的长度比。
+#   背景（PC-M01~M12-A.dwg 识 16 实际 12）：4 个平面图装配块 Ax-02.03.04-M03
+#   （36800×28700，内含轴网/墙体/标注）各嵌 1 个轴网子块
+#   Ax-02.03.04-comp-grid，其 bbox 28561×20053 **四条判据全中**：
+#   短边 20053 ≥ 15000、ratio 1.4243（偏离 √2 仅 0.7%）、短边恰是
+#   105×191 + 2mm（白名单里的 105 是 A4 短边的一半，容差被放大一倍）——
+#   于是 4 个轴网范围被提升成 4 张假页（16 = 12 真 + 4 假）。
+#   真页框块不这样：A1_841L_50 只有 2 条 LWPOLYLINE（外框 84100×59400 + 内框）
+#   和 1 个 TEXT，块内最大闭合矩形**就是页框本身**（比值 1.00）；
+#   而 comp-grid 是 33 条 LINE 轴线 + 1 个轴号圈 + 10 个嵌套 INSERT +
+#   13 个 ACAD_PROXY_ENTITY，块内**一个闭合矩形都没有** —— 它的"页框"
+#   只是轴线端点的外接矩形。
+#   为什么用 0.85 而不是 1.0：真页框块常带少量外伸的图签条/标注文字，
+#   矩形会略小于块 bbox；轴网/内容块则差一个量级（本图 0.00）。
+PAGE_RECT_EVID_RATIO = 0.85
+
+
+# R118：条件I「表格页」救援的**块数下限**（原为硬编码 100）。
+#   判据本意（R98）是「表格是线画出来的，框内不该堆着上百个块参照」——
+#   判别力全在 `块数 ≥ 横竖线总数 × 0.5` 这条比值上，100 这个绝对值只是
+#   防止「线数很少时比值轻易满足」（线数已要求 ≥30 横 + ≥6 竖，比值门槛
+#   折合 ≥18 块）。
+#   失效现场（PC-M01~M12-A.dwg 4 个 36800×28700 假页）：
+#     平面图装配块 Ax-02.03.04-M03 的 4 个实例，条件I 实测
+#       (nh=30,nv=22,nb=89) (52,30,172) (59,34,140) (…)，
+#     后两个比值达 2.1 / 1.5 倍被正常跳过，头一个 nb=89 只差 11 个没过
+#     100 的绝对门槛 —— 而它的比值 89/52 = 1.71 倍早已远超 0.5。
+#     被判「表格页」救回后，R62 形态B「同尺寸表格页互证」又把同块另外
+#     3 个实例一并放行 → 4 张假页（16 = 12 真 + 4 假）。
+#   为何是 30：真表格页（图纸目录/材料表/设计说明）是纯线稿 + 文字，
+#     块参照只有标题/图签那几类，实测个位数到十几个；内容块普遍几十上百。
+COND_I_MIN_BLOCKS = 30
+
 
 # ---------- 第23轮：图签附栏外扩合并（105100口径，2026-09-17） ----------
 # 场景（地下室电力t3.dwg）：84100×59400 主图框 + 左侧 21000 图签附栏应按 105100×59400
@@ -3112,6 +3146,8 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     # ---------- R95：块内「子块实例页框」提升 ----------
     # 见模块级 is_a_series_page_size 上方的完整说明。这里只做实现。
     _block_inst_page_cache = {}
+    # R118：子块「矩形证据」缓存（子块名 → bool），与父块实例无关
+    _page_rect_evid_cache = {}
     _pin_defbb_cache = {}     # 块名 → 定义 bbox（性能关键，见 _inst_world_rect）
 
     def _inst_world_rect(_ent, _parent_sx, _parent_sy):
@@ -3227,6 +3263,33 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 _ok, _why = is_a_series_page_size(_w, _h)
                 if not _ok:
                     continue
+                # 判据⑤（R118）：子块自身必须是「一个矩形框」，不是轴网/内容。
+                #   前面四条判据全是**尺寸**判据 —— 而尺寸可以巧合命中：轴网
+                #   comp-grid 的 bbox 28561×20053 ratio 1.4243（偏离 √2 仅 0.7%）、
+                #   短边 20053 = 105×191+2，四条全过。要挡住它必须问几何形态：
+                #   块里到底画没画那个矩形？真页框块画了（矩形=页框本身），
+                #   轴网没画（只有轴线端点外接矩形）。判据见 PAGE_RECT_EVID_RATIO
+                #   注释。开关 FRAME_PARSER_NO_PAGE_RECT_EVID=1 回退。
+                if os.environ.get('FRAME_PARSER_NO_PAGE_RECT_EVID') != '1':
+                    _sub5 = _e2.dxf.name
+                    if _sub5 not in _page_rect_evid_cache:
+                        _evid5 = False
+                        _sub_bb5 = _get_block_world_bbox(_sub5)
+                        _sub_blk5 = doc.blocks.get(_sub5)
+                        if _sub_bb5 is not None and _sub_blk5 is not None:
+                            try:
+                                _r5 = block_rect_list(_sub_blk5, doc)
+                            except Exception:
+                                _r5 = []
+                            _bb_len5 = max(_sub_bb5[2] - _sub_bb5[0],
+                                           _sub_bb5[3] - _sub_bb5[1])
+                            if _r5 and _bb_len5 > 0:
+                                _mx5 = max(max(r[2] - r[0], r[3] - r[1])
+                                           for r in _r5)
+                                _evid5 = _mx5 >= _bb_len5 * PAGE_RECT_EVID_RATIO
+                        _page_rect_evid_cache[_sub5] = _evid5
+                    if not _page_rect_evid_cache[_sub5]:
+                        continue
                 _out.append((_r[0], _r[1], _r[2], _r[3],
                              _e2.dxf.name, _w, _h, _why))
             except Exception:
@@ -6334,7 +6397,16 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                         _nb_i += 1
                             except Exception:
                                 pass
-                    if _nb_i >= 100 and _nb_i >= (_nh + _nv) * 0.5:
+                    # R118：绝对下限 100 → COND_I_MIN_BLOCKS（见该常量注释）。
+                    #   环境变量 FRAME_PARSER_COND_I_MIN_BLOCKS 可直接覆盖阈值
+                    #   （填 100 即回到 R118 之前的行为，供现场取舍）。
+                    _nb_floor = COND_I_MIN_BLOCKS
+                    try:
+                        _nb_floor = int(os.environ.get(
+                            'FRAME_PARSER_COND_I_MIN_BLOCKS', COND_I_MIN_BLOCKS))
+                    except Exception:
+                        _nb_floor = COND_I_MIN_BLOCKS
+                    if _nb_i >= _nb_floor and _nb_i >= (_nh + _nv) * 0.5:
                         safe_log(f"   [条件I·跳过] {_c['type']} {_c['width']:.0f}×{_c['height']:.0f}："
                                  f"框内块参照 {_nb_i} 个 / 表格线 {_nh + _nv} 条"
                                  f"（块多线少，判为图元内容而非表格页）")
