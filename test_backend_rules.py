@@ -6360,4 +6360,242 @@ else:
     print('SKIP  R122 真实图守卫用例（未找到 1#,8#住宅0721出图_t5.dwg）')
 
 
+# ========== R123：OCS 镜像的「其余全部」世界坐标变换点（一次补齐 6 处） ==========
+# R122 只修了主链路 5 个变换点，另有 6 处仍把 OCS 当世界坐标用：
+#   ① _load_xref_candidates    参照实例 → 参照页世界位置（旧行 2025）
+#   ② R75 布局网格救援          实例世界 bbox（旧行 2737）
+#   ③ R86 标题栏层页框递归      子块页框 → 父块坐标系（旧行 3169）
+#   ④ R58 块内闭合线救援        子块级变换 _resc_tf（旧行 3782）
+#   ⑤ 条件I 块定义表格线计数    子块实例 → 块定义坐标（旧行 6352）
+#   ⑥ 条件I「块数」统计         插入点是否落在候选 bbox 内（旧行 6567）
+# 断言口径：镜像实例（extrusion=(0,0,-1)，插入点取反射值）经 OCS→WCS 后，
+#   输出 bbox 必须与「非镜像的等价摆放」一致；关 FRAME_PARSER_NO_INSERT_OCS=1
+#   则回到旧值——差异确实只来自这处修正，不是别的判据凑巧凑出来的。
+# 踩坑记录：①必须让主图里那个块带 xref 标志（block.dxf.flags = 4，is_xref 读的
+#   是它，不是 xref_path），否则 _is_unresolved_xref 判否，整条参照通道不跑；
+#   参照文件要真的落到 FRAME_PARSER_XREF_DIRS 指的目录里。
+import tempfile
+
+_R123_MIR = {'extrusion': (0, 0, -1)}
+_r123_tmp = tempfile.mkdtemp(prefix='r123xref_')
+_r123_saved_xdir = os.environ.get('FRAME_PARSER_XREF_DIRS')
+
+
+def _r123_rect(lay, x, y, w, h, layer='0'):
+    lay.add_lwpolyline([(x, y), (x + w, y), (x + w, y + h), (x, y + h)],
+                       close=True, dxfattribs={'layer': layer})
+
+
+def _r123_bytes(doc):
+    _buf = io.StringIO()
+    doc.write(_buf)
+    return _buf.getvalue().encode('utf-8')
+
+
+def _r123_sig(r):
+    return sorted((round(c['width']), round(c['height']),
+                   round(c['bbox'][0]), round(c['bbox'][1]))
+                  for c in r['candidates'])
+
+
+# ---- ① 外部参照实例镜像（2025）----
+# 参照 A1REF.dxf 内是「纸面单位子块 + scale 100」的 A1 页（R121 记过：直接放
+#   84100×59400 的闭合多段线走不进提升通道）。主图镜像实例 ins=(-84100,0)，
+#   取反后世界位置与普通实例 ins=(0,0) 完全重合 → 两者输出必须一致。
+_r123_xs = ezdxf.new('R2010', setup=False)
+_r123_xsub = _r123_xs.blocks.new('A1FRAME')
+_r123_rect(_r123_xsub, 0, 0, 841, 594)
+_r123_rect(_r123_xsub, 1, 1, 839, 592)
+_r123_xs.modelspace().add_blockref('A1FRAME', (0, 0),
+                                   dxfattribs={'xscale': 100, 'yscale': 100})
+with open(os.path.join(_r123_tmp, 'A1REF.dxf'), 'w', encoding='utf-8') as _f:
+    _f.write(_r123_bytes(_r123_xs).decode('utf-8'))
+os.environ['FRAME_PARSER_XREF_DIRS'] = _r123_tmp
+
+
+def _r123_xref_doc(ins, extrusion=None):
+    _d = ezdxf.new('R2010', setup=False)
+    _xr = _d.blocks.new('A1REF')
+    _xr.block.dxf.xref_path = os.path.join(_r123_tmp, 'A1REF.dxf')
+    _xr.block.dxf.flags = 4          # XREF 标志位；is_xref 读的是这个
+    _at = {} if extrusion is None else {'extrusion': extrusion}
+    _d.modelspace().add_blockref('A1REF', ins, dxfattribs=_at)
+    return _r123_bytes(_d)
+
+
+_r123_xref_ok = _r123_xref_doc((0, 0))
+_r123_xref_mir = _r123_xref_doc((-84100, 0), (0, 0, -1))
+
+check('R123-① 合成: 参照实例镜像 → 参照页落到取反后的世界位置（x=0）',
+      lambda: _r123_sig(_r121_parse(_r123_xref_mir)),
+      lambda got: got == [(84100, 59400, 0, 0)])
+
+check('R123-① 合成回退: 关 OCS 镜像 → 参照页留在 y 轴负侧（x=-84100）',
+      lambda: _r123_sig(_r121_parse(_r123_xref_mir,
+                                    {'FRAME_PARSER_NO_INSERT_OCS': '1'})),
+      lambda got: got == [(84100, 59400, -84100, 0)])
+
+check('R123-① 合成正向: 同一参照的普通实例 ON/OFF 都落在 (0,0)（未误伤）',
+      lambda: (_r123_sig(_r121_parse(_r123_xref_ok)),
+               _r123_sig(_r121_parse(_r123_xref_ok,
+                                     {'FRAME_PARSER_NO_INSERT_OCS': '1'}))),
+      lambda got: got == ([(84100, 59400, 0, 0)], [(84100, 59400, 0, 0)]))
+
+
+# ---- ② R75 布局网格救援（2737）----
+# 布局空间 2×2 网格，其中 2 个实例是镜像（插入点取反射值）。修好后 4 个实例
+#   仍落在 (0|13500, 0|10425) 的真网格上；不修则两个镜像实例跑到 x=-24000 /
+#   -10500 —— 网格被打散，聚类/覆盖率判据跟着崩。
+def _r123_grid_doc():
+    _d = ezdxf.new('R2010', setup=False)
+    _blk = _d.blocks.new('FR')
+    _r123_rect(_blk, 0, 0, 10500, 7425)     # 短边 7425 < 15000，靠网格救援入库
+    _lay = _d.layouts.new('P1')
+    _W, _H, _G = 10500, 7425, 3000
+    for _i in range(2):
+        for _j in range(2):
+            _x, _y = _i * (_W + _G), _j * (_H + _G)
+            if (_i + _j) % 2 == 0:
+                _lay.add_blockref('FR', (_x, _y))
+            else:
+                _lay.add_blockref('FR', (-(_x + _W), _y), dxfattribs=dict(_R123_MIR))
+    return _r123_bytes(_d)
+
+
+_r123_grid = _r123_grid_doc()
+
+check('R123-② 合成: 网格救援中 2 个镜像实例 → 4 框仍落在真网格 (0|13500, 0|10425)',
+      lambda: sorted((round(c['bbox'][0]), round(c['bbox'][1]))
+                     for c in _r121_parse(_r123_grid)['candidates']),
+      lambda got: got == [(0, 0), (0, 10425), (13500, 0), (13500, 10425)])
+
+check('R123-② 合成回退: 关 OCS 镜像 → 2 个镜像实例跑到 x=-24000/-10500，网格被打散',
+      lambda: sorted((round(c['bbox'][0]), round(c['bbox'][1]))
+                     for c in _r121_parse(
+                         _r123_grid, {'FRAME_PARSER_NO_INSERT_OCS': '1'})['candidates']),
+      lambda got: got == [(-24000, 0), (-10500, 10425), (0, 0), (13500, 10425)])
+
+
+# ---- ③ R86 标题栏层页框递归（3169）----
+# 块 OUTER → 子块 INNER（TEL_TITLE 层画 84100×59400 页框），OUTER 实例镜像。
+#   外层另有一条 1e6 长的溢出线，逼 R82b 用标题层页框替换被污染的块 bbox。
+def _r123_title_doc():
+    _d = ezdxf.new('R2010', setup=False)
+    _d.layers.new('TEL_TITLE')
+    _inner = _d.blocks.new('INNER')
+    _r123_rect(_inner, 0, 0, 84100, 59400, layer='TEL_TITLE')
+    _outer = _d.blocks.new('OUTER')
+    _outer.add_blockref('INNER', (0, 0))
+    _outer.add_line((0, -500000), (0, 500000))
+    _d.modelspace().add_blockref('OUTER', (-84100, 0), dxfattribs=dict(_R123_MIR))
+    return _r123_bytes(_d)
+
+
+_r123_title = _r123_title_doc()
+
+check('R123-③ 合成: R86 子块页框经镜像实例递归上来 → 页框在 (0,0)',
+      lambda: _r123_sig(_r121_parse(_r123_title)),
+      lambda got: got == [(84100, 59400, 0, 0)])
+
+check('R123-③ 合成回退: 关 OCS 镜像 → 递归页框留在 y 轴负侧（x=-84100）',
+      lambda: _r123_sig(_r121_parse(_r123_title,
+                                    {'FRAME_PARSER_NO_INSERT_OCS': '1'})),
+      lambda got: got == [(84100, 59400, -84100, 0)])
+
+
+# ---- ④ 块内镜像子块（3782 R58 子块级变换 / 6352 块定义表格线计数）----
+# 页框块 PAGE 内嵌 4 个镜像子块 TBL（表格线）。取反正确时子块内容仍落在
+#   页框范围内 → 块 bbox 保持 84100×59400；不取反则子块被搬到 x 负侧，
+#   块 bbox 被撑宽 3000。这条锁的是"块内子块实例坐标一致"，是 ④ 与 ⑤
+#   共同依赖的同一处子块级变换。
+def _r123_innersub_doc():
+    _d = ezdxf.new('R2010', setup=False)
+    _grid = _d.blocks.new('TBL')
+    for _k in range(40):
+        _grid.add_line((0, _k * 100), (84100, _k * 100))
+    for _k in range(8):
+        _grid.add_line((_k * 10000, 0), (_k * 10000, 4000))
+    _page = _d.blocks.new('PAGE')
+    _r123_rect(_page, 0, 0, 84100, 59400)
+    for _k in range(4):
+        _page.add_blockref('TBL', (-(_k * 1000 + 84100), 0), dxfattribs=dict(_R123_MIR))
+    _d.modelspace().add_blockref('PAGE', (-84100, 0), dxfattribs=dict(_R123_MIR))
+    return _r123_bytes(_d)
+
+
+_r123_innersub = _r123_innersub_doc()
+
+check('R123-④ 合成: 块内 4 个镜像子块取反正确 → 页框仍 84100×59400',
+      lambda: [(round(c['width']), round(c['height']))
+               for c in _r121_parse(_r123_innersub)['candidates']],
+      lambda got: got == [(84100, 59400)])
+
+check('R123-④ 合成回退: 关 OCS 镜像 → 子块被搬到 x 负侧、页框被撑宽到 87100',
+      lambda: [(round(c['width']), round(c['height']))
+               for c in _r121_parse(_r123_innersub,
+                                    {'FRAME_PARSER_NO_INSERT_OCS': '1'})['candidates']],
+      lambda got: got == [(87100, 59400)])
+
+
+# ---- ⑤ 条件I「块数」统计的插入点（6567，纯函数级）----
+# 该处只拿一个点去和世界 bbox 比大小，没有点集变换可依托 —— 单独抽成
+#   _insert_point_wcs() 才能锁住。端到端触发条件I 需要候选在特征判定里落选，
+#   构造代价远超收益，故按 R122 的先例题只做纯函数 + 真实图回归兜底。
+import app as _app123
+
+
+def _r123_ipw(ins, extrusion, env=None):
+    _d = ezdxf.new('R2010', setup=False)
+    _d.blocks.new('X')
+    _at = {'insert': ins}
+    if extrusion is not None:
+        _at['extrusion'] = extrusion
+    _e = _d.modelspace().add_blockref('X', ins, dxfattribs=_at)
+    _saved = {_k: os.environ.get(_k) for _k in (env or {})}
+    for _k, _v in (env or {}).items():
+        os.environ[_k] = _v
+    try:
+        return _app123._insert_point_wcs(_e)
+    finally:
+        for _k, _v in _saved.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+
+
+check('R123-⑤ 单元: 普通插入 → 插入点原样返回',
+      lambda: _r123_ipw((100, 200), None),
+      lambda got: got == (100.0, 200.0))
+
+check('R123-⑤ 单元: 镜像插入 → x 取反、y 不变',
+      lambda: _r123_ipw((-100, 200), (0, 0, -1)),
+      lambda got: got == (100.0, 200.0))
+
+check('R123-⑤ 单元回退: 关 OCS 镜像 → 插入点原样返回（旧行为）',
+      lambda: _r123_ipw((-100, 200), (0, 0, -1),
+                        {'FRAME_PARSER_NO_INSERT_OCS': '1'}),
+      lambda got: got == (-100.0, 200.0))
+
+check('R123-⑤ 单元: 倾斜 extrusion 不走快路径 → 原样返回',
+      lambda: _r123_ipw((100, 200), (0.3, 0.4, 0.866)),
+      lambda got: got == (100.0, 200.0))
+
+if _r123_saved_xdir is None:
+    os.environ.pop('FRAME_PARSER_XREF_DIRS', None)
+else:
+    os.environ['FRAME_PARSER_XREF_DIRS'] = _r123_saved_xdir
+import shutil as _r123_shutil
+_r123_shutil.rmtree(_r123_tmp, ignore_errors=True)   # 参照文件用完即删
+
+
+# ---- 真实图不变式：R122 已修 + R123 补齐后，两张现场图结果不得再动 ----
+if _R122_TARGET:
+    check('R123真实图守卫: 11~12号楼平面图 仍 13 框（补齐 6 处未引入新判据）',
+          lambda: _r122_census(_r122_tgt_full),
+          lambda got: got == {(84100, 59400): 1, (59450, 42050): 12})
+else:
+    print('SKIP  R123 真实图守卫用例（未找到 11~12号楼平面图.dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

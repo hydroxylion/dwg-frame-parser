@@ -1241,6 +1241,21 @@ def _insert_ocs_mirrored(ent):
         return True
     return False
 
+
+def _insert_point_wcs(ent):
+    """R123：INSERT 插入点的**世界坐标**（含 OCS 镜像取反）。
+
+    只取平面 (x, y)：DXF 里插入点在 OCS 中表达，extrusion=(0,0,-1) 时
+    OCS→WCS 为 (x,y)→(-x,y)（见 _insert_ocs_mirrored）。
+    用于"拿插入点去和世界 bbox 比位置"这类判断——那些地方没有完整的
+    点集变换，只有一个点，最容易漏掉取反。
+    """
+    _ip = ent.dxf.insert
+    _x, _y = _ip.x, _ip.y
+    if _insert_ocs_mirrored(ent):
+        _x = -_x
+    return _x, _y
+
 def normalized_ratio(width, height):
     if width <= 0 or height <= 0:
         return float('inf')
@@ -2030,14 +2045,21 @@ def _load_xref_candidates(doc, log=None):
             _m = __import__('math')
             rad = _m.radians(rot)
             cr, sr = _m.cos(rad), _m.sin(rad)
+            # R123：参照块实例若是镜像插入（extrusion=(0,0,-1)），其插入点与块内
+            #   矩形都在 OCS 中，OCS→世界 为 (x,y)→(-x,y)。旧实现把这个点直接当
+            #   世界坐标用 → 参照页被搬到主图 y 轴另一侧（见 _insert_ocs_mirrored）。
+            _xmir = _insert_ocs_mirrored(e)
             for c in picked:
                 try:
                     bx1, by1, bx2, by2 = c['bbox']
                     pts = []
                     for px, py in ((bx1, by1), (bx2, by1), (bx2, by2), (bx1, by2)):
                         qx, qy = px * sx, py * sy
-                        pts.append((qx * cr - qy * sr + ins[0],
-                                    qx * sr + qy * cr + ins[1]))
+                        _ox = qx * cr - qy * sr + ins[0]
+                        _oy = qx * sr + qy * cr + ins[1]
+                        if _xmir:
+                            _ox = -_ox
+                        pts.append((_ox, _oy))
                     xs = [p[0] for p in pts]
                     ys = [p[1] for p in pts]
                     nbb = (min(xs), min(ys), max(xs), max(ys))
@@ -2736,6 +2758,10 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                     _lp = [(p[0]*_cr2 - p[1]*_sr2, p[0]*_sr2 + p[1]*_cr2) for p in _lp]
                 _ip2 = (_e.dxf.insert.x, _e.dxf.insert.y)
                 _wp = [(p[0] + _ip2[0], p[1] + _ip2[1]) for p in _lp]
+                # R123：镜像插入（extrusion=(0,0,-1)）的 OCS→布局 是 (x,y)→(-x,y)，
+                #   必须在布局坐标里取反（早于全局旋转矫正 _rot_pt）。
+                if _insert_ocs_mirrored(_e):
+                    _wp = [(-p[0], p[1]) for p in _wp]
                 if _rot is not None:
                     _wp = [_rot_pt(p[0], p[1]) for p in _wp]
                 _x0 = min(p[0] for p in _wp); _y0 = min(p[1] for p in _wp)
@@ -3176,6 +3202,8 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                             except Exception:
                                 _nbx = _nby = 0.0
                             _nrot2 = getattr(_e2.dxf, 'rotation', 0)
+                            # R123：镜像子块实例的 OCS→父块定义 是 (x,y)→(-x,y)。
+                            _tmir2 = _insert_ocs_mirrored(_e2)
                             for _sr in _sub:
                                 _nc2 = [(_sr[0] - _nbx, _sr[1] - _nby),
                                         (_sr[2] - _nbx, _sr[1] - _nby),
@@ -3189,6 +3217,8 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                                              _p[0] * _nsr2 + _p[1] * _ncr2)
                                             for _p in _nc2]
                                 _nc2 = [(_p[0] + _ipt[0], _p[1] + _ipt[1]) for _p in _nc2]
+                                if _tmir2:
+                                    _nc2 = [(-_p[0], _p[1]) for _p in _nc2]
                                 _raw.append((min(_p[0] for _p in _nc2),
                                              min(_p[1] for _p in _nc2),
                                              max(_p[0] for _p in _nc2),
@@ -3715,8 +3745,13 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                     _tol_p_res = max(1.0, _bb_len * 0.002)
                     _resc_scanned = set()   # R58：已扫描块名+实例指纹（防重复/爆炸）
 
-                    def _resc_tf(_s_ip, _s_xs, _s_ys, _s_rot, _s_bpx, _s_bpy, _outer_tf):
-                        """R58 子块级变换工厂：p_sub → _outer_tf(insert + R·S·(p − base))"""
+                    def _resc_tf(_s_ip, _s_xs, _s_ys, _s_rot, _s_bpx, _s_bpy, _outer_tf,
+                                 _s_mir=False):
+                        """R58 子块级变换工厂：p_sub → _outer_tf(insert + R·S·(p − base))
+
+                        R123：_s_mir=True 时在 + insert 之后、交外层之前补一道
+                        (x,y)→(-x,y)（子块实例是镜像插入，见 _insert_ocs_mirrored）。
+                        """
                         def _f(_p):
                             _qx = (_p[0] - _s_bpx) * _s_xs
                             _qy = (_p[1] - _s_bpy) * _s_ys
@@ -3726,7 +3761,10 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                                 _sr_r = _math.sin(_rad_r)
                                 _qx, _qy = (_qx * _cr_r - _qy * _sr_r,
                                             _qx * _sr_r + _qy * _cr_r)
-                            return _outer_tf((_qx + _s_ip[0], _qy + _s_ip[1]))
+                            _qx, _qy = _qx + _s_ip[0], _qy + _s_ip[1]
+                            if _s_mir:
+                                _qx = -_qx
+                            return _outer_tf((_qx, _qy))
                         return _f
 
                     def _resc_tf_top(_p):
@@ -3783,7 +3821,8 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                                                  getattr(_ent_in.dxf, 'xscale', 1) or 1,
                                                  getattr(_ent_in.dxf, 'yscale', 1) or 1,
                                                  getattr(_ent_in.dxf, 'rotation', 0),
-                                                 _nbx, _nby, _tf),
+                                                 _nbx, _nby, _tf,
+                                                 _insert_ocs_mirrored(_ent_in)),
                                         (_ent_in.dxf.name, round(_ent_in.dxf.insert.x, 3),
                                          round(_ent_in.dxf.insert.y, 3),
                                          round(getattr(_ent_in.dxf, 'xscale', 1) or 1, 6),
@@ -6357,6 +6396,8 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                     _rad_s = _math.radians(_srot)
                                     _cr_s = _math.cos(_rad_s)
                                     _sr_s = _math.sin(_rad_s)
+                                    # R123：镜像子块实例 → 块定义坐标 (x,y)→(-x,y)。
+                                    _smir = _insert_ocs_mirrored(_e)
                                     for _se in _sblk:
                                         if _se.dxftype() != 'LINE':
                                             continue
@@ -6371,6 +6412,9 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                             _wya = _qxa * _sr_s + _qya * _cr_s + _sy0
                                             _wxb = _qxb * _cr_s - _qyb * _sr_s + _sx0
                                             _wyb = _qxb * _sr_s + _qyb * _cr_s + _sy0
+                                            if _smir:
+                                                _wxa = -_wxa
+                                                _wxb = -_wxb
                                             _acc(_wxa, _wya, _wxb, _wyb)
                                         except Exception:
                                             continue
@@ -6564,10 +6608,11 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                             if _e_i.dxftype() != 'INSERT':
                                 continue
                             try:
-                                _ip_i = _e_i.dxf.insert
+                                # R123：插入点须先转世界（镜像插入 x 取反）再比 bbox
+                                _ip_ix, _ip_iy = _insert_point_wcs(_e_i)
                             except Exception:
                                 continue
-                            if (_bx1 <= _ip_i.x <= _bx2 and _by1 <= _ip_i.y <= _by2):
+                            if (_bx1 <= _ip_ix <= _bx2 and _by1 <= _ip_iy <= _by2):
                                 _nb_i += 1
                     # 块参照候选：块内嵌套 INSERT 一并计数（与线数同口径）
                     if _c['type'] == '块参照插入' and _c.get('block_name'):
