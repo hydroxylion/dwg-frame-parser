@@ -1429,6 +1429,33 @@ def is_paper_sheet_size(width, height):
 GIANT_PAGE_MEMBER_MIN_SHORT = 15000
 
 
+# ---------- R125：「构件/符号量级」的框不是图框 ----------
+#   现场（负二层动力干线.dwg 识 6 实际 2）：模型空间 4 个 866.7×1266.7 的集水坑
+#   符号块 A$C26192383（图层 `积水坑`：外框 1300×1900 + 内框 1200×1800 四周等距
+#   50 + 3 条水位线 + 对角折线；实例 scale 0.6667、rot 180°）被当成 4 张图框页。
+#   它一路过关的原因不是"某个判据写错"，而是**每一条判据都恰好被喂饱**：
+#     · 预筛：短边 867 ≥ INSERT_MIN_SHORT_SIDE(500)、ratio 1.4615 ∈ [1.05, 5.5]；
+#     · R27 边框证据：块内最大闭合矩形 1800 ÷ 块长边 1900 = 94.7% ≥ 50%
+#       （双线画法 = 图框的标准签名，可集水坑的双线池壁长得一模一样）；
+#     · 条件C：rel 35.1% ≥ 10%，ratio 1.4615 也跨过 √2×0.95 = 1.3435 下限；
+#     · 孤证复核 ① 同尺寸副本：自己就是 4 份 → "图框族证据"成立。
+#   R90 的「房间量级否决」（短边 <10000mm = 真实房间/构件）本可以兜住，但它被关
+#   在「布局空间优先」的 `_paper_frame_n >= 4` 闸门里，本图布局只有 2 页 → 空转。
+#   本常量的口径比 R90 更窄、更硬：**短边不足 1 米**。依据：
+#     · A 系最小图幅 A4 短边 210mm —— 但纸幅尺寸本身已被 `is_paper_sheet_size`
+#       豁免（机械/装订图把 297×210、841×594 这类 1:1 纸面图框直接画在模型空间）；
+#     · 非纸幅尺寸的模型空间图框必然按出图比例放大，本项目实测最小者是 R109 的
+#       31525×14850（短边 14850）与大样图的 16820×11890；
+#     · 基线 112 条里落在 (867, 1262) 之间的模型候选只有 `地下室柱平面布置0816`
+#       的 1783×1262 一个，1m 门槛与它留 1.26× 余量。
+#   故「短边 <1000mm 且不是纸幅体系」= 真实构件/符号，不作图框。
+#   只在**布局空间已有出图页**（frame_like 里存在非模型空间候选）时生效 ——
+#   整张图画在模型空间的机械/装配图（支座、齿轮箱、罗马都市…）没有这个前提，
+#   它们的 210×297 / 846×584 小图框不受影响。
+#   开关 FRAME_PARSER_NO_ROOM_SCALE_ANY=1 回退。
+TINY_COMPONENT_MAX_SIDE = 1000.0
+
+
 # ---------- R95：块内「子块实例页框」识别 ----------
 # 动机（02食堂sw-2014.9.3.dwg 识 5 实际 10）：
 #   漏掉的 5 张不是直接画的矩形，而是块 A$C7129040E 内 5 个
@@ -8877,6 +8904,12 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #   物理依据：图纸坐标里 A1 是 84100×59400（短边 84m），真实房间是
             #   8m 级；短边 <10m 的"框"要么是房间，要么是构件，不会是整页纸。
             #   开关 FRAME_PARSER_NO_ROOM_SCALE=1 回退本收紧。
+            #   R125：本条判据的闸门**保持 4 页不变**。曾试过整体放宽到 1 页，
+            #   结果连「不是房间量级、但 ratio 与 rel 都不合格」的模型真框一起被
+            #   剔掉（d013 / d006,007 的 200700×126150 模型框：ratio 1.5909 出
+            #   √2±2%、rel 14.6% < 25% → `_model_keep` 不收），三条既有单测全红。
+            #   房间量级否决改由下方独立的 R125 段执行（那里只认「短边 <1m 且非
+            #   纸幅」这一种形态，不碰 ratio/rel 豁免链）。
             _ROOM_MAX_SIDE = 10000.0
             _room_scale_on = os.environ.get('FRAME_PARSER_NO_ROOM_SCALE') != '1'
 
@@ -8927,6 +8960,30 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         # len(all_candidates)，导致真·无图框图纸（如 一层.dwg，全是家具/构件小矩形）
         # 在 smart 模式报"未检测到图框"→ 前端自动 force_max 重试 → 页面显示
         # frame_count=401（其实是全量候选数），严重误导。无图框就如实报 0。
+        # ---------- R125：模型空间「构件量级」候选不是图框 ----------
+        # 判据与常量说明见模块级 TINY_COMPONENT_MAX_SIDE。这里只做一件事：布局空间
+        #   已经出了页（frame_like 里有非模型空间候选）时，模型空间里短边不足 1 米、
+        #   又不构成纸幅体系的候选（集水坑/设备/洁具符号）不算图框。
+        # 与 R90「布局空间优先」互不替代：那条要求布局 ≥4 页、且会把 ratio/rel
+        #   都不合格的模型真框一起剔（d013/d006,007 的 200700×126150），本条只认
+        #   「短边 <1m 且非纸幅」这一种形态，与 ratio/rel 豁免链完全不接触。
+        if ('FRAME_PARSER_NO_ROOM_SCALE_ANY' not in os.environ
+                and os.environ.get('FRAME_PARSER_NO_ROOM_SCALE') != '1'):
+            if any(c.get('layout') != '模型空间' for c in frame_like):
+                _tiny_drop = [c for c in frame_like
+                              if c.get('layout') == '模型空间'
+                              and min(c['width'], c['height']) < TINY_COMPONENT_MAX_SIDE
+                              and not is_paper_sheet_size(c['width'], c['height'])]
+                if _tiny_drop:
+                    _tiny_keys = {id(c) for c in _tiny_drop}
+                    frame_like = [c for c in frame_like if id(c) not in _tiny_keys]
+                    safe_log(f"  [R125·构件量级] 布局空间已出页，模型空间剔除 "
+                             f"{len(_tiny_drop)} 个短边 <{TINY_COMPONENT_MAX_SIDE:.0f}mm"
+                             f" 且非纸幅体系的候选（构件/符号，非图框）: "
+                             + ', '.join(f"{c['width']:.1f}x{c['height']:.1f}"
+                                         f"({c.get('block_name') or c['type']})"
+                                         for c in _tiny_drop))
+
         frame_count = len(frame_like)
 
         # ---------- 按布局分组图框数 ----------

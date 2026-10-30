@@ -1544,9 +1544,28 @@ def _run607_no_rescue():
 
 
 # ---- R40 开关守卫：NO_BLOCK_FRAME_RESCUE=1（回退：无救援、无分母补强）----
-# 设备块 rel 分母回到塌缩态（自身量级）→ 18 个全过条件C 复活 → fc=20 红形态。
-check('R40开关 NO_BLOCK_FRAME_RESCUE=1: 设备块复活, fc=20红形态',
+# 设备块 rel 分母回到塌缩态（自身量级）→ 18 个本应全过条件C 复活成 fc=20 红形态。
+# R125 起「构件量级」否决独立生效（布局空间已出页 + 模型空间短边 <1000mm + 非纸幅
+# 体系）→ 771×514 的设备块被这条挡住，只看 R40 开关已是 fc=2。守卫因此拆两段：
+#   ① 关 R40（R125 开）→ fc=2，18 个设备块不再复活（R125 独立兜住）；
+#   ② 同时关 R125 → 复现 R40 的 20 框红形态（证明 R40 开关语义本身没变）。
+check('R40开关 NO_BLOCK_FRAME_RESCUE=1: 设备块被 R125 构件量级否决挡住, fc=2',
       _run607_no_rescue,
+      lambda r: r.get('frame_count') == 2
+      and not any(c['width'] < 2000 and c['layout'] == '模型空间'
+                  for c in r['candidates']))
+
+
+def _run607_no_rescue_no_r125():
+    try:
+        return _parse_env(_data607, FRAME_PARSER_NO_BLOCK_FRAME_RESCUE='1',
+                          FRAME_PARSER_NO_ROOM_SCALE_ANY='1')
+    except RuntimeError as e:
+        return {'error': str(e)}
+
+
+check('R40开关回退: 同关 R125 → 复现 20 框红形态（R40 开关语义未变）',
+      _run607_no_rescue_no_r125,
       lambda r: r.get('frame_count') == 20
       and sum(1 for c in r['candidates']
               if abs(c['width'] - 771) < 5 and c['layout'] == '模型空间') >= 10)
@@ -6726,6 +6745,184 @@ if _R124_TARGET:
           lambda got: got == {(1189, 841): 2, (42604, 21895): 4})
 else:
     print('SKIP  R124 真实图用例（未找到 负一层动力干线.dwg）')
+
+
+# ========== R125：房间量级否决不再被「布局 ≥4 页」闸门挡住 ==========
+# 现场（负二层动力干线.dwg 识 6 实际 2）：模型空间 4 个 866.7×1266.7 的集水坑
+#   符号块 A$C26192383（图层 `积水坑`：外框 1300×1900 + 内框 1200×1800 等距 50
+#   + 3 条水位线 + 对角折线，scale 0.6667）短边 867 过预筛、块内矩形证据
+#   1800/1900=94.7% 过 R27、条件C rel 35.1% 且 ratio 1.4615 跨过 √2×0.95 下限
+#   → 4 个全部入选。布局"布局"只有 2 张 1189×841 页 → R90 的 `_paper_frame_n >= 4`
+#   闸门不成立 → `_is_room_scale`（短边 <10000mm = 房间/构件量级）整个空转。
+# 修法：闸门 4 → 1（布局有页框即生效）+ 纸幅体系豁免（`is_paper_sheet_size`）。
+import app as _app125
+
+
+def _r125_doc(n_pages=2, paper_model=False):
+    """模型空间 4 个「房间量级」块 + 布局 n_pages 张 1189×841 真页框。
+
+    paper_model=False：块定义 = 集水坑符号（1300×1900 外框 + 1200×1800 内框，
+        四周等距 50；scale 0.6667 插入 → 世界 866.7×1266.7，短边不在纸幅格架）。
+    paper_model=True：块定义 = 841×594（A1 纸幅，1:1 插入，短边 594 但在纸幅体系里）。
+    4 个实例按现场摆法：2 个 x 值 × 2 个 y 值、成对相距 10641。
+    """
+    _d = ezdxf.new('R2010', setup=False)
+    _pit = _d.blocks.new('PIT')
+    _pts = [(0, 0), (0, 10641), (44000, 0), (44000, 10641)]
+    if paper_model:
+        _r123_rect(_pit, 0, 0, 841, 594)
+        _r123_rect(_pit, 20, 20, 801, 554)
+        _s = 1.0
+        _pts = [(100000, 90000), (100000, 100641),
+                (144000, 90000), (144000, 100641)]
+    else:
+        _r123_rect(_pit, 0, 0, 1300, 1900)
+        _r123_rect(_pit, 50, 50, 1200, 1800)
+        _s = 0.6667
+    _m = _d.modelspace()
+    for _x, _y in _pts:
+        _m.add_blockref('PIT', (_x, _y),
+                        dxfattribs={'xscale': _s, 'yscale': _s, 'layer': '积水坑'})
+    _lay = _d.layouts.new('布局A')
+    for _k in range(n_pages):
+        _r123_rect(_lay, 0, -_k * 1200, 1189, 841, layer='X-Tlbk')
+    return _r123_bytes(_d)
+
+
+_R125_PIT2 = _r125_doc(2)                  # 现场原样：布局 2 页（旧闸门不触发）
+_R125_PIT4 = _r125_doc(4)                  # 旧闸门本来生效的场景（行为必须不变）
+_R125_PAPER2 = _r125_doc(2, paper_model=True)   # 纸幅体系小框（不许被误杀）
+_R125_OFF = {'FRAME_PARSER_NO_ROOM_SCALE_ANY': '1'}
+
+
+check('R125-① 合成: 布局 2 页 + 模型 4 个 866.7×1266.7 房间量级块 → 只认布局 2 框',
+      lambda: _r122_census(_r121_parse(_R125_PIT2)),
+      lambda got: got == {(1189, 841): 2})
+
+check('R125-① 合成回退: 关 ROOM_SCALE_ANY → 复现现场 6 框（模型多 4 个 867×1267）',
+      lambda: _r122_census(_r121_parse(_R125_PIT2, _R125_OFF)),
+      lambda got: got == {(1189, 841): 2, (867, 1267): 4})
+
+check('R125-① 合成: 回退态下模型空间确实多出 4 框（frame_counts_by_layout 对账）',
+      lambda: (_r121_parse(_R125_PIT2).get('frame_counts_by_layout'),
+               _r121_parse(_R125_PIT2, _R125_OFF).get('frame_counts_by_layout')),
+      lambda got: got == ({'布局 "布局A"': 2},
+                          {'模型空间': 4, '布局 "布局A"': 2}))
+
+check('R125-② 守卫: 布局 4 页场景新旧闸门结论一致（R90 既有行为零变化）',
+      lambda: (_r122_census(_r121_parse(_R125_PIT4)),
+               _r122_census(_r121_parse(_R125_PIT4, _R125_OFF))),
+      lambda got: got == ({(1189, 841): 4}, {(1189, 841): 4}))
+
+check('R125-③ 纸幅豁免: 841×594（A1 纸幅 1:1）模型块即便布局有页也保留 → 6 框',
+      lambda: _r122_census(_r121_parse(_R125_PAPER2)),
+      lambda got: got == {(1189, 841): 2, (841, 594): 4})
+
+check('R125-③ 单元: 纸幅体系判据把 866.7×1266.7 挡在外面、把 841×594 放进来',
+      lambda: [_app125.is_paper_sheet_size(_w, _h) for _w, _h in
+               ((866.7, 1266.7), (841, 594), (1189, 841), (420, 297))],
+      lambda got: got == [False, True, True, True])
+
+
+def _r125_big_model_doc():
+    """边界守卫：模型空间放一个**大尺寸非纸幅**真框 200700×126150（ratio 1.591，
+    既不在 √2±2% 也不在 √2×倍率；rel 100% 但它自己就是最大候选），布局 2 页。
+    短边 126150 ≥ 1000 → 不受 R125 影响，必须原样保留（R90 的 `<4 页` 闸门也不管它）。
+    """
+    _d = ezdxf.new('R2010', setup=False)
+    _bk = _d.blocks.new('BIGFRAME')
+    _r123_rect(_bk, 0, 0, 200700, 126150)
+    _r123_rect(_bk, 2000, 2000, 196700, 122150)
+    _d.modelspace().add_blockref('BIGFRAME', (300000, 300000))
+    _lay = _d.layouts.new('布局B')
+    for _k in range(2):
+        _r123_rect(_lay, 0, -_k * 1200, 1189, 841, layer='X-Tlbk')
+    return _r123_bytes(_d)
+
+
+_R125_BIG = _r125_big_model_doc()
+
+check('R125-④ 边界: 大尺寸非纸幅模型真框（200700×126150）不受影响 → 3 框',
+      lambda: _r122_census(_r121_parse(_R125_BIG)),
+      lambda got: got == {(1189, 841): 2, (200700, 126150): 1})
+
+check('R125-④ 边界: 关 R125 也是 3 框（这条本来就不该管它）',
+      lambda: _r122_census(_r121_parse(_R125_BIG, _R125_OFF)),
+      lambda got: got == {(1189, 841): 2, (200700, 126150): 1})
+
+
+# ---- 真实图端到端：负二层动力干线 6 → 2（布局 2 / 模型 0）----
+_R125_TARGET = next((p for p in [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\负二层动力干线.dwg',
+] if os.path.exists(p)), None)
+
+if _R125_TARGET:
+    with open(_R125_TARGET, 'rb') as _f:
+        _r125_tgt_bin = _f.read()
+    _r125_tgt_name = os.path.basename(_R125_TARGET)
+
+    def _r125_tgt_run(env=None):
+        _env = env or {}
+        _saved = {_k: os.environ.get(_k) for _k in _env}
+        for _k, _v in _env.items():
+            os.environ[_k] = _v
+        _old = sys.stdout
+        sys.stdout = open(os.devnull, 'w')
+        try:
+            return get_bounding_box_from_bytes(_r125_tgt_bin, _r125_tgt_name,
+                                               'polyline', 'mm', 'smart')
+        finally:
+            sys.stdout.close()
+            sys.stdout = _old
+            for _k, _v in _saved.items():
+                if _v is None:
+                    os.environ.pop(_k, None)
+                else:
+                    os.environ[_k] = _v
+
+    _r125_full = _r125_tgt_run()
+    _r125_off = _r125_tgt_run(_R125_OFF)
+
+    check('R125真实图: 负二层动力干线 → 2 框（1189×841 ×2，全在布局）',
+          lambda: _r122_census(_r125_full),
+          lambda got: got == {(1189, 841): 2})
+
+    check('R125真实图: 模型空间归零（frame_counts_by_layout 只剩布局）',
+          lambda: _r125_full.get('frame_counts_by_layout'),
+          lambda got: got == {'布局 "布局"': 2})
+
+    check('R125真实图回退: 关 ROOM_SCALE_ANY → 复现原 bug 6 框（模型空间 4 个 867×1267）',
+          lambda: _r122_census(_r125_off),
+          lambda got: got == {(1189, 841): 2, (867, 1267): 4})
+else:
+    print('SKIP  R125 真实图用例（未找到 负二层动力干线.dwg）')
+
+
+# ---- 守卫：R124 目标图（负一层动力干线）不受本轮改动影响 ----
+_R125_GUARD = next((p for p in [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\负一层动力干线.dwg',
+] if os.path.exists(p)), None)
+
+if _R125_GUARD:
+    with open(_R125_GUARD, 'rb') as _f:
+        _r125_grd_bin = _f.read()
+    _r125_grd_name = os.path.basename(_R125_GUARD)
+
+    def _r125_grd_run():
+        _old = sys.stdout
+        sys.stdout = open(os.devnull, 'w')
+        try:
+            return get_bounding_box_from_bytes(_r125_grd_bin, _r125_grd_name,
+                                               'polyline', 'mm', 'smart')
+        finally:
+            sys.stdout.close()
+            sys.stdout = _old
+
+    check('R125守卫: 负一层动力干线（R124 目标）仍 2 框，改动未回退 R124',
+          lambda: _r122_census(_r125_grd_run()),
+          lambda got: got == {(1189, 841): 2})
+else:
+    print('SKIP  R125 守卫用例（未找到 负一层动力干线.dwg）')
 
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
