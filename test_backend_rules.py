@@ -7122,4 +7122,203 @@ else:
     print('SKIP  R126 真实图用例（未找到 11 12#-bang.dwg）')
 
 
+
+# ========== R127：回归提速——负载分档并行 + 实时进度 + 慢图统计 ==========
+# 背景：R123~R126 四轮全量回归改用 --serial，113 张 ≈ 45min。实测确认**不是
+#   app.py 变慢**（同一张图、同一份缓存 DXF：R122 版 41.05s vs R126 版 41.79s，
+#   ±2% 噪声；6 张合计 -0.8%），慢的是并行度丢了——写死 8 worker × 单 worker
+#   峰值（实测 Get-Process 抓到 5088MB！）≈ 15GB，在只剩 6~11GB 空闲的机器上
+#   必 OOM；worker 被系统杀掉后 mp.Pool 不是返回 error 摘要而是静默挂住。
+#
+#   这里只测纯逻辑（决策 / 排序 / 分档 / 归一化 / 输出 / 比对），不起真实 pool、
+#   不跑真实图纸：并行路径的正确性靠一次真实全量回归验证。
+
+check('R127-A 档内并行度：内存充裕时开满上限 8 路',
+      lambda: _rc._plan_workers(peak_gb=0.6, avail_gb=100.0),
+      lambda got: got == 8)
+
+check('R127-B 档内并行度：中等档被内存卡住（峰值 5.5GB，预算 11.5×0.75 → 1 路）',
+      lambda: _rc._plan_workers(peak_gb=5.52, avail_gb=11.5),
+      lambda got: got == 1)
+
+check('R127-C 档内并行度：轻档按内存铺开（峰值 0.9GB → 9 路，被上限压到 8）',
+      lambda: _rc._plan_workers(peak_gb=0.9, avail_gb=11.5),
+      lambda got: got == 8)
+
+check('R127-D 档内并行度：峰值远大于可用内存也只退到 1 路，不返回 0 卡死调度',
+      lambda: [_rc._plan_workers(peak_gb=p, avail_gb=2.0) for p in (3.0, 50.0)],
+      lambda got: got == [1, 1])
+
+check('R127-E 档内并行度：探测不到内存时退回按上限',
+      lambda: _rc._plan_workers(peak_gb=9.0, avail_gb=None),
+      lambda got: got == 8)
+
+check('R127-F 档内并行度：--workers 给的上限是硬顶（不被内存反超）',
+      lambda: _rc._plan_workers(peak_gb=0.3, avail_gb=100.0, cap=3),
+      lambda got: got == 3)
+
+check('R127-G 峰值估算：负载再小也按 0.6GB 兜底；按负载×0.8 线性增长',
+      lambda: (_rc._peak_gb(0.2), round(_rc._peak_gb(10.0), 2)),
+      lambda got: got == (0.6, 8.0))
+
+
+def _r127_tmp_files(sizes):
+    """造一批临时文件（指定字节数），返回路径列表（按 sizes 顺序）。"""
+    import tempfile as _tf
+    d = _tf.mkdtemp(prefix='r127_')
+    out = []
+    for i, n in enumerate(sizes):
+        p = os.path.join(d, f'f{i}.dwg')
+        with open(p, 'wb') as f:
+            f.write(b'x' * n)
+        out.append(p)
+    return out
+
+
+check('R127-H 提交顺序：并行时按体积降序（大图先占 worker，压掉长尾）',
+      lambda: [os.path.basename(p) for p in
+               _rc._submit_order(_r127_tmp_files([10, 300, 50]), 4)],
+      lambda got: got == ['f1.dwg', 'f2.dwg', 'f0.dwg'])
+
+check('R127-I 提交顺序：串行时保持原顺序（便于逐条对读日志）',
+      lambda: [os.path.basename(p) for p in
+               _rc._submit_order(_r127_tmp_files([10, 300, 50]), 1)],
+      lambda got: got == ['f0.dwg', 'f1.dwg', 'f2.dwg'])
+
+check('R127-J 取不到体积的文件按 0 处理（不抛异常）',
+      lambda: _rc._file_size(os.path.join(os.sep, 'no', 'such', 'r127.dwg')),
+      lambda got: got == 0)
+
+check('R127-K 可用内存探测：返回 None 或正数（任何环境都不抛异常）',
+      lambda: _rc._avail_phys_gb(),
+      lambda got: got is None or (isinstance(got, float) and got > 0))
+
+check('R127-K2 负载折算：按 DWG 体积 × GZ_PER_DWG（不读缓存、不探版本，113 张 8ms）',
+      lambda: [round(_rc._load_mb(p), 3) for p in _r127_tmp_files([1024 * 1024])],
+      lambda got: got == [round(_rc.GZ_PER_DWG, 3)])
+
+
+def _r127_run_serial():
+    """串行跑 2 张假图（替换 _worker_parse，不碰真实图纸/ODA）。
+
+    返回 (结果列表, 耗时表快照, 回调次数, 结果元素长度集合)
+    """
+    cb = []
+    old_worker, old_app = _rc._worker_parse, _rc._WORKER_APP
+    _rc._WORKER_APP = object()      # 占位，跳过 load_app() 的真实 exec
+    _rc._worker_parse = lambda fp: (os.path.basename(fp), {'fc': 7}, 1.25)
+    try:
+        _rc._TIMINGS.clear()
+        res = _rc._run_parse(_r127_tmp_files([10, 20]), 1,
+                             on_result=lambda *a: cb.append(a))
+        return (res, dict(_rc._TIMINGS), len(cb), {len(r) for r in res})
+    finally:
+        _rc._worker_parse, _rc._WORKER_APP = old_worker, old_app
+
+
+_R127_RUN = _r127_run_serial()
+
+check('R127-L 串行结果仍是 (名, 摘要) 二元组——不影响 merge_baseline 签名',
+      lambda: _R127_RUN[3],
+      lambda got: got == {2})
+
+check('R127-M 耗时按文件名收进 _TIMINGS（供慢图统计）',
+      lambda: _R127_RUN[1],
+      lambda got: got == {'f0.dwg': 1.25, 'f1.dwg': 1.25})
+
+check('R127-N 每完成一张即回调一次（15 分钟跑批也有实时进度）',
+      lambda: _R127_RUN[2],
+      lambda got: got == 2)
+
+
+def _r127_slowest(timings, top_n=8):
+    """跑 _print_slowest 并抽出被列出的文件名顺序。"""
+    import contextlib
+    import io as _io
+    _rc._TIMINGS.clear()
+    _rc._TIMINGS.update(timings)
+    buf = _io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            _rc._print_slowest(top_n)
+    finally:
+        _rc._TIMINGS.clear()
+    return [ln.strip().split()[-1] for ln in buf.getvalue().splitlines()
+            if '.dwg' in ln]
+
+
+check('R127-O 慢图统计：全部 <1s 时不打印（小图批次不刷屏）',
+      lambda: _r127_slowest({'a.dwg': 0.3, 'b.dwg': 0.4}),
+      lambda got: got == [])
+
+check('R127-P 慢图统计：按耗时降序、只列 top3',
+      lambda: _r127_slowest({'a.dwg': 2.0, 'b.dwg': 30.0, 'c.dwg': 12.0, 'd.dwg': 1.5}, 3),
+      lambda got: got == ['b.dwg', 'c.dwg', 'a.dwg'])
+
+
+# ---- 负载分档：按"体积折算负载"分三档，每档按档内最重那张定并行度 ----
+def _r127_plan(items, avail_gb, cap=8):
+    """用假的负载值测分档（不依赖真实缓存文件）。items=[(文件名, 负载MB)]"""
+    loads = dict(items)
+    old = _rc._load_mb
+    _rc._load_mb = lambda fp: loads[os.path.basename(fp)]
+    try:
+        files = [os.path.join(os.sep, 'fake', n) for n, _ in items]
+        return [([os.path.basename(p) for p in b], w)
+                for b, w in _rc._plan_batches(files, avail_gb, cap)]
+    finally:
+        _rc._load_mb = old
+
+
+check('R127-Q 分档：≥8MB 进超重档、≥3MB 进中档、其余进轻量档（档序重→轻；'
+      '18.2→峰值 14.6GB 独占；5.0→4.0GB 给 2 路；1.0→0.8GB 开满 8 路）',
+      lambda: [w for _b, w in _r127_plan([('a.dwg', 18.2), ('b.dwg', 5.0), ('c.dwg', 1.0)], 11.5)],
+      lambda got: got == [1, 2, 8])
+
+check('R127-R 分档：档内文件归拢正确（18.2 独占；5.0 与 4.5 同档按最重的算 2 路）',
+      lambda: _r127_plan([('a.dwg', 18.2), ('b.dwg', 5.0), ('c.dwg', 4.5), ('d.dwg', 0.4)], 11.5),
+      lambda got: got == [(['a.dwg'], 1), (['b.dwg', 'c.dwg'], 2), (['d.dwg'], 8)])
+
+check('R127-S 分档：空档不产出批次（只有轻量图时不建重档 Pool）',
+      lambda: [b for b, _w in _r127_plan([('a.dwg', 0.5), ('b.dwg', 0.8)], 11.5)],
+      lambda got: got == [['a.dwg', 'b.dwg']])
+
+check('R127-T 分档：内存越紧每档路数越少（同一份图纸，可用 20GB vs 4GB）',
+      lambda: ([w for _b, w in _r127_plan([('a.dwg', 6.9), ('b.dwg', 1.0)], 20.0)],
+               [w for _b, w in _r127_plan([('a.dwg', 6.9), ('b.dwg', 1.0)], 4.0)]),
+      lambda got: got == ([2, 8], [1, 3]))
+
+check('R127-U 负载折算：真图按 DWG 体积×系数算（地下室电力 4.2MB → 2.7MB 负载，'
+      '落在轻量档，与它的真实缓存 2.9MB 同档）',
+      lambda: (round(_rc._load_mb(os.path.join(_rc.DEFAULT_FOLDER,
+                                               '地下室电力t3.dwg')), 1)
+               if os.path.exists(os.path.join(_rc.DEFAULT_FOLDER,
+                                              '地下室电力t3.dwg')) else 'SKIP'),
+      lambda got: got in ('SKIP', 2.7))
+
+
+# ---- classify_result：error 项也要跟基线比（R127 踩的坑）----
+_BASE_ERR = {'一层.dwg': {'error': 'RuntimeError: 解析失败: 未检测到图框'}}
+_CUR_ERR = {'error': 'RuntimeError: 解析失败: 未检测到图框'}
+
+check('R127-V 判定：基线里的预期失败被稳定复现 → SAME（不是 DIFF）',
+      lambda: _rc.classify_result('一层.dwg', _CUR_ERR, _BASE_ERR),
+      lambda got: got == 'same')
+
+check('R127-W 判定：预期失败但报错文案变了 → DIFF（不能当没事）',
+      lambda: _rc.classify_result('一层.dwg',
+                                  {'error': 'RuntimeError: 解析失败: 文件损坏'},
+                                  _BASE_ERR),
+      lambda got: got == 'diff')
+
+check('R127-X 判定：基线正常、本次报错 → DIFF（真退化）',
+      lambda: _rc.classify_result('a.dwg', _CUR_ERR,
+                                  {'a.dwg': {'fc': 3, 'best': '1x1', 'sizes': []}}),
+      lambda got: got == 'diff')
+
+check('R127-Y 判定：基线无此图 → NEW（与 baseline 内容无关）',
+      lambda: _rc.classify_result('zzz.dwg', _CUR_ERR, _BASE_ERR),
+      lambda got: got == 'new')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
