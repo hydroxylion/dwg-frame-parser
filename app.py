@@ -8619,6 +8619,43 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             _brl = c.get('block_rect_len') or 0
             if _brl > 0 and _brl < max(bdw, bdh) * 0.70:
                 return False
+            # ⑦ R126：外框自己就是「单页页框块」→ 块内候选是页面内容，不再保护。
+            #   现场（11 12#-bang.dwg 识 9 实际 7）：模型空间 A1 图框块（块定义
+            #   841×594 = A1 纸幅）里面放了 2 个 `N-说明框`（块定义 22000×55000，
+            #   22m×55m 的说明横线框：22×55 的矩形 + 50 条间距 1000 的横线，
+            #   块内零文字，说明文字另画在 `H-VT-文字` 层上）。这两个东西
+            #   ①~⑥ 全部满足：块定义比例 2.5 = 候选比例、rect_len 55000 = 块定义
+            #   长边 100%、与外框 A1（ratio 1.4158）差 76% > 10%、外框面积
+            #   4.13× 候选、块定义长边 55000 ≥ 84100×10% → 被判"单页图框块"
+            #   绕过嵌套去重，fc 7→9。
+            #   几何事实：**一张纸里不可能再套一张纸**。外层候选若自身就是
+            #   「块定义即纸幅」的单页页框块（`is_paper_sheet_size` 为真），
+            #   它内部的一切候选都只能是该页的内容（说明框/表格/轴网/详图框）。
+            #   与 R83 同一哲学（"outer 为块参照插入时不反转"：块参照是真图框，
+            #   其内部嵌套框照旧被收掉），本条把它补到 R62 保护通道上。
+            #   为什么只在「块定义是纸幅」时生效：R62 要救的场景（1#,8#住宅）
+            #   外框是顶层闭合多段线巨框、不是块；多页拼版容器的块定义是合并
+            #   外接框（比例非纸幅）；装配块的块定义比例也非纸幅 —— 都不受影响。
+            #   ⑦b 再收一层：**被包住的候选本身不是纸幅体系**才剔。真页套真页
+            #   （拼版容器块定义正好等于双页=加长纸幅、内部各是整页 INSERT）时
+            #   内层是合法页，照旧保护；被剔的只是"纸里画的不成纸幅的东西"
+            #   （说明框/表格/轴网/详图轮廓）。
+            #   开关 FRAME_PARSER_NO_PAGE_IN_PAGE=1 回退。
+            if os.environ.get('FRAME_PARSER_NO_PAGE_IN_PAGE') != '1':
+                _odw = outer.get('block_def_w') or 0
+                _odh = outer.get('block_def_h') or 0
+                if (outer.get('type') == '块参照插入'
+                        and _odw > 0 and _odh > 0
+                        and is_paper_sheet_size(_odw, _odh)
+                        and not is_paper_sheet_size(c['width'], c['height'])):
+                    _or_def = max(_odw, _odh) / max(min(_odw, _odh), 1e-9)
+                    _obrl = outer.get('block_rect_len') or 0
+                    if (abs(_or_def - _or) / _or <= 0.05
+                            and (_obrl <= 0 or _obrl >= max(_odw, _odh) * 0.70)):
+                        log_debug(f"    [R126·页内页] 外框 {outer.get('block_name')!r} "
+                                  f"块定义 {_odw:.0f}×{_odh:.0f} 即纸幅单页框 → "
+                                  f"内部 {c['width']:.0f}x{c['height']:.0f} 判为页面内容，照常嵌套剔除")
+                        return False
             return True
 
         def deduplicate_candidates(cands):

@@ -3596,7 +3596,7 @@ check('R95父scale对照: 同样结构按1:1插入(A594×150)应提升为页框 
 #   → 图框内的底图块被当独立页（fc 6 实际 3）。
 # R96 在 _single_page_block_protect 加 ⑥：块内最大闭合矩形须 ≥ 块定义
 #   长边 × 70%（真页框块的外框贴着块 bbox：BOUNDARY-A2-1 为 100%）。
-def _build_r96_base_block(base_rect_w, base_rect_h):
+def _build_r96_base_block(base_rect_w, base_rect_h, outer_w=500, outer_h=350):
     """构造「1 个真图框 + 框内 1 个建筑底图块」的图。
 
     base_rect_w/h：底图块内**主闭合矩形**尺寸。它决定 block_rect_len，
@@ -3604,11 +3604,16 @@ def _build_r96_base_block(base_rect_w, base_rect_h):
 
     只放 1 组：3 组同尺寸水平排列会被「对齐排列剔除装饰块」整组移除，
     那样测不到 R62 保护这条路（也掩盖了要验的东西）。
+
+    R126 起外层图框尺寸默认改为 **500×350（非纸幅）**：原用 A2 594×420，
+    但 R126 的⑦规定「外层是块定义即纸幅的单页页框块时，块内候选一律算页面
+    内容」，那会把本条要验的 ⑥ 行为掩盖掉。改非纸幅外层后，本用例继续只
+    检验 ⑥；纸幅外层的情形由 R126 用例单独覆盖。
     """
     d = make_doc()
-    # 真图框块：块定义就是一张 A2（594×420），闭合框贴着块 bbox → rect比 100%
+    # 真图框块：块定义就是一张页框（默认 500×350，非纸幅），闭合框贴 bbox → rect比 100%
     fb = d.blocks.new('BOUNDARY_A2')
-    add_closed_rect(fb, 0, 0, 594, 420)
+    add_closed_rect(fb, 0, 0, outer_w, outer_h)
     # 建筑底图块：定义 bbox 撑到 25400×15500，但块内主闭合矩形只有
     #   base_rect_w×base_rect_h（复刻房子平面轮廓：外框是墙线不是闭合框）
     pb = d.blocks.new('PLAN_BASE')
@@ -3616,7 +3621,7 @@ def _build_r96_base_block(base_rect_w, base_rect_h):
     # 散件把 bbox 撑到 25400×15500（墙角小构件，200×200 落在角上）
     add_closed_rect(pb, 25200, 15300, 200, 200)
     msp = d.modelspace()
-    # 真图框 ×100 → 59400×42000
+    # 真图框 ×100 → 50000×35000（默认）
     msp.add_blockref('BOUNDARY_A2', (0, 0),
                      dxfattribs={'xscale': 100, 'yscale': 100})
     # 底图块落在图框内部（完全被图框 bbox 包含）→ 触发嵌套去重
@@ -3629,7 +3634,7 @@ data = _build_r96_base_block(14300, 8800)
 check('R96底图块: 块内闭合框仅占块长边56%(建筑平面块)不被R62保护, fc=1 (smart)',
       lambda: parse(data),
       lambda r: r['frame_count'] == 1
-      and all(abs(c['width'] - 59400) < 100 for c in r['candidates']))
+      and all(abs(c['width'] - 50000) < 100 for c in r['candidates']))
 
 # 对照：主闭合矩形 25400 → rect比 100%（块定义本身即页框）→ 照旧受保护
 data = _build_r96_base_block(25400, 15500)
@@ -3637,6 +3642,15 @@ check('R96对照: 块内闭合框占满块长边(块定义本身即页框)仍受
       lambda: parse(data),
       lambda r: any(abs(c['width'] - 25400) < 50 and abs(c['height'] - 15500) < 50
                     for c in r['candidates']))
+
+# R126 对照：把外层换回**纸幅**（A2 594×420）—— ⑦生效，块内底图块 25400×15500
+#   被判"纸里的内容"剔掉，fc=1。这正是 R96 想达到的效果（底图块不该当页），
+#   当年靠 ⑥ 的矩形证据门槛间接判断，R126 直接用几何事实判定。
+data = _build_r96_base_block(25400, 15500, outer_w=594, outer_h=420)
+check('R126对照(R96构造): 外层 A2 纸幅页框 → 块内 25400×15500 底图块判为页面内容, fc=1',
+      lambda: parse(data),
+      lambda r: r['frame_count'] == 1
+      and all(abs(c['width'] - 59400) < 100 for c in r['candidates']))
 
 
 # ---- 用例 120：R97 块内 4 条 LINE 围成的页框须替换被溢出污染的块 bbox ----
@@ -6923,6 +6937,189 @@ if _R125_GUARD:
           lambda got: got == {(1189, 841): 2})
 else:
     print('SKIP  R125 守卫用例（未找到 负一层动力干线.dwg）')
+
+
+# ========== R126：页框里的东西不是页框（«页内页»） ==========
+# 现场（11 12#-bang.dwg 识 9 实际 7）：模型空间 A1 图框块（块定义 841×594 = A1
+#   纸幅）的图形区域内放了 2 个 `N-说明框`（块定义 22000×55000 = 22m×55m 的说明
+#   横线框：22×55 矩形 + 50 条间距 1000 的横线，块内零文字，说明正文另画在
+#   `H-VT-文字` 层上）。这两个东西把 R62「单页图框块免被巨型包裹框剔小」的
+#   六条判据全部满足：块定义比例 2.5 = 候选比例、rect_len 55000 = 块定义长边
+#   100%、与外框 A1（ratio 1.4158）差 76% > 10%、外框面积 4.13× 候选、块定义
+#   长边 55000 ≥ 84100×10% → 判「单页页框块」，绕过嵌套去重 → fc 7→9。
+# 修法：R62 保护补第⑦条 —— 外层候选自己就是「块定义即纸幅」的单页页框块时，
+#   内部候选只能是该页内容，不保护（一张纸里套不出第二张纸）。
+from app import is_paper_sheet_size as _r126_paper
+
+_R126_OFF = {'FRAME_PARSER_NO_PAGE_IN_PAGE': '1'}
+
+
+def _r126_rect(_lay, _x, _y, _w, _h, _layer='0'):
+    _lay.add_lwpolyline([(_x, _y), (_x + _w, _y), (_x + _w, _y + _h), (_x, _y + _h)],
+                        close=True, dxfattribs={'layer': _layer})
+
+
+def _r126_bytes(_doc):
+    _b = io.StringIO()
+    _doc.write(_b)
+    return _b.getvalue().encode('utf-8')
+
+
+def _r126_notes_block(_d, _name='NOTES'):
+    _b = _d.blocks.new(_name)
+    # 与真图同一形态：矩形 22000×55000 + 50 条间距 1000 的横线，图层 `H-VT-标注`
+    _b.add_lwpolyline([(0, 0), (22000, 0), (22000, -55000), (0, -55000)],
+                      close=True, dxfattribs={'layer': 'H-VT-标注'})
+    for _k in range(50):
+        _b.add_line((0, -1000 * (_k + 1)), (22000, -1000 * (_k + 1)),
+                    dxfattribs={'layer': 'H-VT-标注'})
+    return _b
+
+
+def _r126_doc(_page_w, _page_h):
+    """外层页块（块定义 _page_w×_page_h，实例 ×100）+ 页内放一个说明框。"""
+    _d = ezdxf.new('R2010', setup=False)
+    _pb = _d.blocks.new('PAGE')
+    _r126_rect(_pb, 0, 0, _page_w, _page_h)
+    _r126_rect(_pb, 10, 10, _page_w - 20, _page_h - 20)
+    _r126_notes_block(_d)
+    _m = _d.modelspace()
+    _m.add_blockref('PAGE', (0, 0), dxfattribs={'xscale': 100, 'yscale': 100})
+    # 说明框（块定义原点在左上角、向下延伸）摆进页框内部
+    _m.add_blockref('NOTES', (50000, _page_h * 100 - 2000))
+    return _r126_bytes(_d)
+
+
+_R126_PAPER = _r126_doc(841, 594)     # 外层块定义 = A1 纸幅 → ⑦ 生效
+_R126_NONPAPER = _r126_doc(1200, 700)  # 外层块定义非纸幅（1200×700 不在纸幅格架）→ ⑦ 不生效
+
+check('R126-① 单元: 说明框 22000×55000 不在纸幅体系、A1 841×594 在',
+      lambda: (_r126_paper(22000, 55000), _r126_paper(841, 594), _r126_paper(1200, 700)),
+      lambda got: got == (False, True, False))
+
+check('R126-② 合成: A1 页块内说明框 → 只认 1 张页（说明框被剔）',
+      lambda: _r122_census(_r121_parse(_R126_PAPER)),
+      lambda got: got == {(84100, 59400): 1})
+
+check('R126-② 合成回退: 关 PAGE_IN_PAGE → 复现现场形态 2 框（页 + 页内说明框）',
+      lambda: _r122_census(_r121_parse(_R126_PAPER, _R126_OFF)),
+      lambda got: got == {(84100, 59400): 1, (22000, 55000): 1})
+
+check('R126-③ 守卫: 外层块定义非纸幅（1200×700）时规则不生效 → 两态都 2 框',
+      lambda: (_r122_census(_r121_parse(_R126_NONPAPER)),
+               _r122_census(_r121_parse(_R126_NONPAPER, _R126_OFF))),
+      lambda got: got == ({(120000, 70000): 1, (22000, 55000): 1},
+                          {(120000, 70000): 1, (22000, 55000): 1}))
+
+# ---- 真实图端到端（目标图 7 框；关开关复现 9 框）----
+_R126_TARGET = next((p for p in [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\11 12#-bang.dwg',
+] if os.path.exists(p)), None)
+
+if _R126_TARGET:
+    with open(_R126_TARGET, 'rb') as _f:
+        _r126_tgt_bin = _f.read()
+    _r126_tgt_name = os.path.basename(_R126_TARGET)
+
+    def _r126_tgt_run(env=None):
+        _env = env or {}
+        _saved = {_k: os.environ.get(_k) for _k in _env}
+        for _k, _v in _env.items():
+            os.environ[_k] = _v
+        _old = sys.stdout
+        sys.stdout = open(os.devnull, 'w')
+        try:
+            return get_bounding_box_from_bytes(_r126_tgt_bin, _r126_tgt_name,
+                                               'polyline', 'mm', 'smart')
+        finally:
+            sys.stdout.close()
+            sys.stdout = _old
+            for _k, _v in _saved.items():
+                if _v is None:
+                    os.environ.pop(_k, None)
+                else:
+                    os.environ[_k] = _v
+
+    _r126_full = _r126_tgt_run()
+    _r126_off = _r126_tgt_run(_R126_OFF)
+
+    check('R126真实图: 11 12#-bang → 7 框（84100×59400 ×2 + 59400×42000 ×5）',
+          lambda: _r122_census(_r126_full),
+          lambda got: got == {(84100, 59400): 2, (59400, 42000): 5})
+
+    check('R126真实图: 无 22000×55000（N-说明框 归零）',
+          lambda: _r122_census(_r126_full).get((22000, 55000)),
+          lambda got: got is None)
+
+    check('R126真实图回退: 关 PAGE_IN_PAGE → 复现原 bug 9 框（多 2 个说明框）',
+          lambda: _r122_census(_r126_off),
+          lambda got: got == {(84100, 59400): 2, (59400, 42000): 5, (22000, 55000): 2})
+
+    # 正向守卫：1#,8#住宅0721出图_t5 是 R62「单页图框块保护」最主要的受益图
+    #   （装配块 qwetwetwtt 2 个实例被顶层巨框包住），⑦ 不得把它救的页剔掉。
+    _R126_GUARD = next((p for p in [
+        r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\1#,8#住宅0721出图_t5.dwg',
+    ] if os.path.exists(p)), None)
+    if _R126_GUARD:
+        with open(_R126_GUARD, 'rb') as _f:
+            _r126_grd_bin = _f.read()
+        _r126_grd_name = os.path.basename(_R126_GUARD)
+
+        def _r126_grd_run(env=None):
+            _env = env or {}
+            _saved = {_k: os.environ.get(_k) for _k in _env}
+            for _k, _v in _env.items():
+                os.environ[_k] = _v
+            _old = sys.stdout
+            sys.stdout = open(os.devnull, 'w')
+            try:
+                return get_bounding_box_from_bytes(_r126_grd_bin, _r126_grd_name,
+                                                   'polyline', 'mm', 'smart')
+            finally:
+                sys.stdout.close()
+                sys.stdout = _old
+                for _k, _v in _saved.items():
+                    if _v is None:
+                        os.environ.pop(_k, None)
+                    else:
+                        os.environ[_k] = _v
+
+        check('R126守卫: 1#,8#住宅0721出图_t5 仍 23 框（R62 保护未被⑦误伤）',
+              lambda: _r126_grd_run()['frame_count'],
+              lambda got: got == 23)
+
+        check('R126守卫: 该图开关 ON/OFF 结论一致（⑦ 不参与它的判定）',
+              lambda: _r126_grd_run(_R126_OFF)['frame_count'],
+              lambda got: got == 23)
+    else:
+        print('SKIP  R126 守卫用例（未找到 1#,8#住宅0721出图_t5.dwg）')
+
+    # 回归守卫：R125 的负二层动力干线（构件量级否决）不得被本轮改动影响
+    _R126_GUARD2 = next((p for p in [
+        r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\负二层动力干线.dwg',
+    ] if os.path.exists(p)), None)
+    if _R126_GUARD2:
+        with open(_R126_GUARD2, 'rb') as _f:
+            _r126_g2_bin = _f.read()
+        _r126_g2_name = os.path.basename(_R126_GUARD2)
+
+        def _r126_g2_run():
+            _old = sys.stdout
+            sys.stdout = open(os.devnull, 'w')
+            try:
+                return get_bounding_box_from_bytes(_r126_g2_bin, _r126_g2_name,
+                                                   'polyline', 'mm', 'smart')
+            finally:
+                sys.stdout.close()
+                sys.stdout = _old
+
+        check('R126守卫: 负二层动力干线（R125 目标）仍 2 框',
+              lambda: _r122_census(_r126_g2_run()),
+              lambda got: got == {(1189, 841): 2})
+    else:
+        print('SKIP  R126 守卫用例（未找到 负二层动力干线.dwg）')
+else:
+    print('SKIP  R126 真实图用例（未找到 11 12#-bang.dwg）')
 
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
