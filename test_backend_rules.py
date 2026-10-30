@@ -6598,4 +6598,134 @@ else:
     print('SKIP  R123 真实图守卫用例（未找到 11~12号楼平面图.dwg）')
 
 
+# ========== R124：轴网层的闭合矩形不是「图框族证据」 ==========
+# 现场（负一层动力干线.dwg 识 6 实际 2）：模型空间装配块 Ax-B2-P01 被 R27 拒后，
+#   R40 块内图框救援在 4 个 `$0$A-Grid` 粘贴碎片里各找到 1 个 42604×21895 闭合
+#   矩形 —— 4 份同尺寸凑齐「图框族证据」→ fc 2→6。那 4 个是地下车库柱网外包框
+#   （42.6m×21.9m），图层语义就该排除。
+# 断言口径：同一构造只换**矩形所在图层**（`$0$A-Grid` vs 图框层 `TK`），
+#   轴网层提升 0 份、图框层仍提升 4 份 —— 证明判据没有一刀切杀掉 R40 救援本身。
+import app as _app124
+
+
+def _r124_doc(rect_layer):
+    """容器块 OUTER（101645×71895，ratio≈√2）内 2×2 排列 4 个单矩形子块。
+
+    OUTER 的矩形证据（42604 < 101645 × 50%）不合格 → R27 拒 → 走 R40 救援；
+    短边 21895 ≥ 15000、ratio 1.946 ∈ [1.30, MAX] 全部合格，唯一变量就是图层。
+    """
+    _d = ezdxf.new('R2010', setup=False)
+    _sub = _d.blocks.new('GRIDSUB')
+    _r123_rect(_sub, 0, 0, 42604, 21895, layer=rect_layer)
+    _out = _d.blocks.new('OUTER')
+    for _i in range(2):
+        for _j in range(2):
+            _out.add_blockref('GRIDSUB', (_i * 59041, _j * 50000))
+    _d.modelspace().add_blockref('OUTER', (0, 0))
+    return _r123_bytes(_d)
+
+
+def _r124_sig(r):
+    return sorted((round(c['width']), round(c['height']))
+                  for c in r['candidates'])
+
+
+_r124_grid = _r124_doc('$0$A-Grid')     # 现场原样：粘贴产生的轴网绑定层
+_r124_plot = _r124_doc('TK')            # 对照：真图框层
+
+check('R124-① 合成: 4 个轴网层矩形 → 不作图框族证据，0 份提升',
+      lambda: _r124_sig(_r121_parse(_r124_grid)),
+      lambda got: (42604, 21895) not in got)
+
+check('R124-① 合成回退: 关轴网层否决 → 复现现场 4 个 42604×21895 假页',
+      lambda: _r124_sig(_r121_parse(_r124_grid,
+                                    {'FRAME_PARSER_NO_GRID_LAYER_VETO': '1'})),
+      lambda got: got == [(42604, 21895)] * 4)
+
+check('R124-② 合成正向: 同构造换到图框层 TK → R40 救援照旧提升 4 份（未误伤）',
+      lambda: (_r124_sig(_r121_parse(_r124_plot)),
+               _r124_sig(_r121_parse(_r124_plot,
+                                     {'FRAME_PARSER_NO_GRID_LAYER_VETO': '1'}))),
+      lambda got: got == ([(42604, 21895)] * 4, [(42604, 21895)] * 4))
+
+
+# ---- ③ is_grid_layer 纯函数：轴网层族覆盖面 + 不误伤普通层 ----
+def _r124_env(env, fn):
+    _saved = {_k: os.environ.get(_k) for _k in env}
+    for _k, _v in env.items():
+        os.environ[_k] = _v
+    try:
+        return fn()
+    finally:
+        for _k, _v in _saved.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+
+
+check('R124-③ 单元: A-Grid / $0$A-Grid / GRID-TEXT / S-AXIS / 轴网-1 / 轴线 → 判为轴网层',
+      lambda: [_app124.is_grid_layer(_n) for _n in
+               ('A-Grid', '$0$A-Grid', 'GRID-TEXT', 'S-AXIS', '轴网-1', '轴线')],
+      lambda got: got == [True] * 6)
+
+check('R124-③ 单元: 0 / Defpoints / TK / A-Wall / PUB_TITLE / 空 / None → 不判轴网层',
+      lambda: [_app124.is_grid_layer(_n) for _n in
+               ('0', 'Defpoints', 'TK', 'A-Wall', 'PUB_TITLE', '', None)],
+      lambda got: got == [False] * 7)
+
+check('R124-③ 单元回退: 关轴网层否决 → 轴网层也一律返回 False',
+      lambda: _r124_env({'FRAME_PARSER_NO_GRID_LAYER_VETO': '1'},
+                        lambda: [_app124.is_grid_layer(_n)
+                                 for _n in ('A-Grid', '$0$A-Grid', '轴网')]),
+      lambda got: got == [False] * 3)
+
+
+# ---- 真实图端到端：目标图 2 框（布局 2 / 模型 0）----
+_R124_TARGET = next((p for p in [
+    r'C:\Users\hui_ou\Desktop\建筑图纸（必须校验）\负一层动力干线.dwg',
+] if os.path.exists(p)), None)
+
+if _R124_TARGET:
+    with open(_R124_TARGET, 'rb') as _f:
+        _r124_tgt_bin = _f.read()
+    _r124_tgt_name = os.path.basename(_R124_TARGET)
+
+    def _r124_tgt_run(env=None):
+        _env = env or {}
+        _saved = {_k: os.environ.get(_k) for _k in _env}
+        for _k, _v in _env.items():
+            os.environ[_k] = _v
+        _old = sys.stdout
+        sys.stdout = open(os.devnull, 'w')
+        try:
+            return get_bounding_box_from_bytes(_r124_tgt_bin, _r124_tgt_name,
+                                               'polyline', 'mm', 'smart')
+        finally:
+            sys.stdout.close()
+            sys.stdout = _old
+            for _k, _v in _saved.items():
+                if _v is None:
+                    os.environ.pop(_k, None)
+                else:
+                    os.environ[_k] = _v
+
+    _r124_tgt_full = _r124_tgt_run()
+    _r124_tgt_off = _r124_tgt_run({'FRAME_PARSER_NO_GRID_LAYER_VETO': '1'})
+
+    check('R124真实图: 负一层动力干线 → 2 框，全部在布局1',
+          lambda: _r122_census(_r124_tgt_full),
+          lambda got: got == {(1189, 841): 2})
+
+    check('R124真实图: 模型空间不再有图框（frame_counts_by_layout 只剩布局1）',
+          lambda: _r124_tgt_full.get('frame_counts_by_layout'),
+          lambda got: got == {'布局 "布局1"': 2})
+
+    check('R124真实图回退: 关轴网层否决 → 复现原 bug 6 框（模型空间多 4 个 42604×21895）',
+          lambda: _r122_census(_r124_tgt_off),
+          lambda got: got == {(1189, 841): 2, (42604, 21895): 4})
+else:
+    print('SKIP  R124 真实图用例（未找到 负一层动力干线.dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

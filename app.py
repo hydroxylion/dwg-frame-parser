@@ -364,6 +364,49 @@ def noplot_layer_names(doc):
     return _names
 
 
+# R124：轴网层识别 —— 「轴网层上的闭合矩形是轴线范围框，不是图框族」
+#
+# 现场（负一层动力干线.dwg 识 6 实际 2；用户口径：布局里 2 个图框，模型空间应无
+#   图框）：模型空间装配块 Ax-B2-P01（1325866×717650，地下车库平面，含车位编号/
+#   A-Pkng-Bdry 停车位标记）被 R27 判内容块剔除后，R40 块内图框救援在它的 4 个
+#   子块里各找到 1 个 42604×21895 闭合矩形 —— 4 份同尺寸（短边 21895 ≥ 15000、
+#   ratio 1.946 ∈ [1.30, MAX]）刚好凑齐「图框族证据」，4 份全部提升为候选，
+#   fc 2 → 6。但那 4 个矩形是**轴网范围框**：
+#     · 4 个匿名块 A$C394724E9 / A$C01586B38 / A$C523C5838 / A$C3C8A0B36 都是
+#       `$0$A-Grid` 上的粘贴碎片（`$0$` 是 AutoCAD 粘贴改名的绑定层前缀）；
+#     · 块内构成完全一致：WIPEOUT ×1 + `$0$A-Grid` 轴线 LINE 3~5 条 +
+#       A-Anno-Note / A-Anno-Levl / A-Anno-Dims 代理实体 3~15 个 + 唯一那条
+#       闭合多段线（局部坐标 (-130685018, -64020477)，从别处粘来的大负坐标）；
+#     · 块实例插入层、块内矩形图层都是 `$0$A-Grid`。
+#   42604×21895 是地下车库柱网外包尺寸（42.6m×21.9m）。图层语义本就排除图框：
+#   轴网层是"被标注的对象"，图框画在标题栏层 / TK / Defpoints / 0 上。
+#
+# 与 R118（轴网子块 comp-grid 被 R95 当页框）同源但不同解法：R118 靠「块内一个
+#   闭合矩形都没有」（矩形证据比值 0.00）间接识别；本例子块里**确实**有一个闭合
+#   矩形（就是轴网外包框本身，比值 1.00），结构性判据全体失效，只能看图层。
+#
+# 只判**图层名**：不看块名（A$C* 匿名块无意义）、不看实体构成（WIPEOUT/代理实体
+#   的组合因图纸和图源而异）、不看尺寸（42604×21895 的 ratio 1.946 与 R117 记过
+#   的合法 A0 加长页 1635×841（ratio 1.944）几乎重合，尺寸判据在这里没有区分度）。
+# 开关 FRAME_PARSER_NO_GRID_LAYER_VETO=1 回退。
+def is_grid_layer(layer_name):
+    """图层名是否属轴网 / 轴线层族（R124）。
+
+    匹配 `GRID` / `AXIS` 子串（覆盖 `A-Grid`、`$0$A-Grid`、`A_GRID`、`GRID-TEXT`、
+    `S-AXIS` 等写法）与中文 `轴网` / `轴线`。`$0$` 前缀无需特判 —— 原名里的
+    `A-Grid` 仍在字符串中。
+    """
+    if os.environ.get('FRAME_PARSER_NO_GRID_LAYER_VETO') == '1':
+        return False
+    if not layer_name:
+        return False
+    _s = str(layer_name)
+    _u = _s.upper()
+    if 'GRID' in _u or 'AXIS' in _u:
+        return True
+    return ('轴网' in _s) or ('轴线' in _s)
+
+
 def block_rect_list(block, doc=None):
     """块定义内的「图框级矩形」清单（块定义坐标），R113。
 
@@ -3832,6 +3875,11 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                                 if _ent_in.dxftype() != 'LWPOLYLINE':
                                     continue
                                 if _ent_in.dxf.layer in _noplot_layers:   # R104
+                                    continue
+                                # R124：轴网层的闭合矩形是轴线范围框，不作图框族证据
+                                #   （负一层动力干线：4 个 $0$A-Grid 粘贴碎片的
+                                #   42604×21895 轴网外包框凑成"同尺寸 4 份"被提升）
+                                if is_grid_layer(_ent_in.dxf.layer):
                                     continue
                                 if not is_polyline_closed(_ent_in):
                                     continue
