@@ -1,6 +1,13 @@
 import os
 import re
 import sys
+# R132：模块级 `_math` 别名。原先只有 collect_candidates_from_layout 内部
+#   `import math as _math`（局部名），另一个 `import math as _m` 在 _estimate_global_rotation
+#   里。块 bbox 相关计算（block_world_bbox / _table_lines_in_block_def）大量用
+#   `_math.radians/cos/sin/hypot` —— 前者已提升为模块级函数、后者本就在另一个
+#   函数里，二者对 `_math` 都是 global 查找，模块级不定义就会 NameError（且都被
+#   `except Exception` 吞掉，表现为「计算结果莫名偏小/恒为 0」）。这里补齐。
+import math as _math
 import contextlib
 import socket
 import tempfile
@@ -1810,6 +1817,178 @@ def _collect_title_strips(doc):
     return _filter_title_strips(_cluster_title_boxes(boxes))
 
 
+# ---------- R132：块定义 bbox（模块级，供多处共用） ----------
+# 原先是 collect_candidates_from_layout 的闭包函数 _get_block_world_bbox，只在
+# 该函数内可用。但 get_bounding_box_from_bytes 里有两处也要它：
+#   · 条件D 的块内候选分支（R58）—— 原本直接调 `_get_block_world_bbox(...)`，
+#     那是 **global 查找**（该名字不是本函数的自由变量），模块级又没定义 →
+#     必然 NameError，被 `except Exception: continue` 吞掉，于是块定义里的
+#     INSERT 子块实例从来没被计入条件D 的实体数；
+#   · 条件I 的 _table_lines_in_block_def（R62 形态B）—— 同样调它，同样
+#     NameError，被 `except Exception: _res = (0, 0)` 吞掉，导致该函数**恒返回
+#     (0,0)**，块定义的表格线从不贡献，条件I 的「块内表格线增量证据」等于没实现。
+# 提升为模块级后两处都可用，且只有一份实现（不再有第二份近似版）。
+# 语义与提升前逐字一致：R116 去离群散件、嵌套 INSERT 的 base_point/rotation/
+# scale/镜像组合、_visited 防环，全部保留。
+
+
+def block_world_bbox(doc, _name, _visited=None, _cache=None):
+    """递归求块的 bbox（块定义内坐标，未应用 INSERT xscale/yscale）。
+
+    R116：bbox 去「离群散件」。块定义里常挂着一个远距离垃圾实例，把 bbox 撑到
+      量级失真，而块的真实内容只占其中很小一块。现场（16(AC-T01-A).dwg 识 0
+      实际 1，841x594 = A1）：
+        q234325435 是 A1 图框装配块（X-Tlbk 层 84100x59400 外框 + 80700x57500
+        内框 + 图签子块 + 属性，78 个贡献点位的实体），但块内还挂了一个 Wall 层
+        嵌套 INSERT（展开后跨 4952977x8972222，离图框 500 万单位），bbox 被撑成
+        5032724x8978306。后果两条：
+          ① R27 边框证据分母虚高：块内 84100 的图框矩形只占「块长边」0.94%
+             < 50% → 整块被判「非图框内容块」剔除，入库 0 个 → fc=0；
+          ② 世界尺寸虚高：实例 scale 0.01，真框世界尺寸 841x594（A1 纸面 mm），
+             却被算成 50327x89783。
+      判据用**实体分布**，不是几何极值：以实体中心的中位数为中心，取各实体中心
+        偏移距离的中位数 md，半径 R = 20xmd 之外的实体视为散件。中位数对个别
+        极端值免疫——78 个实体里 1 个在 500 万之外，动不了 md（实测 md≈1.5e4，
+        R≈3e5，散件 5.1e6 被剔，77 个真内容全在 4e4 内不受影响）。
+      护栏（保守，只缩不放）：
+        ① 实体数 >= 4 才判断（太少时中位数本身不可靠）；
+        ② 剔除数 <= max(1, n/10) —— 超过 10% 不是「个别散件」而是块真这么分布
+           （多页拼版块每页都有成百实体，不会被误削）；
+        ③ 剩余实体 >= 3；
+        ④ 只可能缩小 bbox，永不放大。
+      开关 FRAME_PARSER_NO_BLOCK_BBOX_TRIM=1 回退到纯几何极值。
+    """
+    if _cache is None:
+        _cache = {}
+    if _name in _cache:
+        return _cache[_name]
+    if _visited is None:
+        _visited = set()
+    if _name in _visited:
+        return None
+    if _name not in doc.blocks:
+        return None
+    _visited.add(_name)
+    # R116：按实体分组收集点位（原实现拍平成一个点表，丢掉了「哪个实体」这个
+    #   信息，无法做「实体分布」判据）。
+    _ent_pts = []
+    for _ent in doc.blocks[_name]:
+        _pts = []
+        try:
+            _t = _ent.dxftype()
+            if _t == 'LWPOLYLINE':
+                for _p in _ent.get_points('xy'):
+                    _pts.append(_p)
+            elif _t == 'LINE':
+                _pts.append((_ent.dxf.start.x, _ent.dxf.start.y))
+                _pts.append((_ent.dxf.end.x, _ent.dxf.end.y))
+            elif _t == 'CIRCLE':
+                _c = (_ent.dxf.center.x, _ent.dxf.center.y)
+                _r = _ent.dxf.radius
+                _pts.append((_c[0]-_r, _c[1]-_r))
+                _pts.append((_c[0]+_r, _c[1]+_r))
+            elif _t == 'INSERT':
+                # 嵌套 INSERT：按 DXF 变换规范组合 p_world = insert + R(rot)·S·(p − base)。
+                # 旧实现既不减子块基点也不处理子块旋转——子块带旋转时父块 bbox 直接算错。
+                _bb = block_world_bbox(doc, _ent.dxf.name, _visited, _cache)
+                if _bb is not None:
+                    _ipt = (_ent.dxf.insert.x, _ent.dxf.insert.y)
+                    _xs = _ent.dxf.xscale; _ys = _ent.dxf.yscale
+                    try:
+                        _nb = doc.blocks[_ent.dxf.name].block.dxf.base_point
+                        _nbx, _nby = _nb.x, _nb.y
+                    except Exception:
+                        _nbx = _nby = 0.0
+                    _nc = [(_bb[0]-_nbx, _bb[1]-_nby), (_bb[2]-_nbx, _bb[1]-_nby),
+                           (_bb[0]-_nbx, _bb[3]-_nby), (_bb[2]-_nbx, _bb[3]-_nby)]
+                    _nc = [(_p[0]*_xs, _p[1]*_ys) for _p in _nc]
+                    _nrot = getattr(_ent.dxf, 'rotation', 0)
+                    if _nrot:
+                        _nr = _math.radians(_nrot)   # DXF rotation 单位是度，cos/sin 需弧度
+                        _ncr = _math.cos(_nr); _nsr = _math.sin(_nr)
+                        _nc = [(_p[0]*_ncr - _p[1]*_nsr, _p[0]*_nsr + _p[1]*_ncr) for _p in _nc]
+                    # R122：镜像插入（extrusion=(0,0,-1)）的 OCS→WCS 是
+                    #   (x,y)→(-x,y)，必须整体取反 x —— 否则块内容被搬到 y 轴
+                    #   另一侧，父块 bbox 被撑大（见 _insert_ocs_mirrored）。
+                    _nmir = _insert_ocs_mirrored(_ent)
+                    for _p in _nc:
+                        _wx = _ipt[0] + _p[0]
+                        _wy = _ipt[1] + _p[1]
+                        _pts.append((-_wx if _nmir else _wx, _wy))
+        except Exception:
+            continue
+        if _pts:
+            _ent_pts.append(_pts)
+    if not _ent_pts:
+        _cache[_name] = None
+        return None
+    # ---------- R116：块 bbox 去离群散件（见函数 docstring） ----------
+    _keep_pts = _ent_pts
+    if (os.environ.get('FRAME_PARSER_NO_BLOCK_BBOX_TRIM') != '1'
+            and len(_ent_pts) >= BLOCK_BBOX_TRIM_MIN_ENTS):
+        _ctrs = []
+        for _ps in _ent_pts:
+            _sx = 0.0; _sy = 0.0
+            for _p in _ps:
+                _sx += _p[0]; _sy += _p[1]
+            _n = len(_ps)
+            _ctrs.append((_sx / _n, _sy / _n))
+        _mcx = sorted(p[0] for p in _ctrs)[len(_ctrs) // 2]
+        _mcy = sorted(p[1] for p in _ctrs)[len(_ctrs) // 2]
+        _dists = [_math.hypot(p[0] - _mcx, p[1] - _mcy) for p in _ctrs]
+        _mdist = sorted(_dists)[len(_dists) // 2]
+        _rad = _mdist * BLOCK_BBOX_TRIM_MULT
+        _kept = [_ent_pts[_i] for _i, _d in enumerate(_dists) if _d <= _rad]
+        _drop_n = len(_ent_pts) - len(_kept)
+        # R116 护栏（退化情形）：多数实体中心重合时中位偏移 = 0，半径塌成 0，
+        #   会把「只偏了一点点」的正常实体当散件剔掉（实测 4 个实体里 3 个
+        #   中心重合 → 第 4 个哪怕只偏 100mm 也被剔）。所以再验两条：
+        #   ① 主体区跨度必须非退化（>= 1mm）；
+        #   ② 散件到主体区 bbox 的距离必须 >= 主体区跨度的 2 倍——「离群」
+        #     是相对主体自身尺度说的，不是相对 0 说的。真实散件相距 100 万，
+        #     主体区跨度只有 62mm（sdeg）或 84100mm（图框块），两个量级都远超。
+        if 1 <= _drop_n <= max(1, len(_ent_pts) // 10) and len(_kept) >= 3:
+            _kx = [p[0] for _ps in _kept for p in _ps]
+            _ky = [p[1] for _ps in _kept for p in _ps]
+            _kb = (min(_kx), min(_ky), max(_kx), max(_ky))
+            _kspan = max(_kb[2] - _kb[0], _kb[3] - _kb[1])
+            _min_gap = None
+            for _i, _d in enumerate(_dists):
+                if _d <= _rad:
+                    continue
+                _c = _ctrs[_i]
+                _gx = max(_kb[0] - _c[0], _c[0] - _kb[2], 0.0)
+                _gy = max(_kb[1] - _c[1], _c[1] - _kb[3], 0.0)
+                _g = _math.hypot(_gx, _gy)
+                if _min_gap is None or _g < _min_gap:
+                    _min_gap = _g
+            if _kspan >= 1.0 and _min_gap is not None and _min_gap >= _kspan * 2.0:
+                # R116 第二道收口：**只有当块的主体本身就是一张图幅时**，才有独立
+                #   证据说"其余散件不属于这个块"——图幅装配块（图框 + 图签 + 属性）
+                #   的主体必然是一整张纸，而纸的尺寸有绝对答案（A 系幅面整数倍 / ×
+                #   标准出图比例，或 ≥15000mm 的建筑页下限，与 R115 判据④ 同口径）。
+                #   没有这条，凡是"小块 + 远处几个散件"都会被削：实测 1#,8#住宅 里
+                #   螺栓详图块 wetwwtwt（真实内容 2463×6003，4 个散件在 78m 外）
+                #   被削成 2463×6003，父块 ewtewtwey 的 bbox 随之变干净 → R27 从
+                #   "拒绝"翻成"接受"，R40 块内救援不再触发，5 张 52550×29700 表格页
+                #   只剩 2 张（fc 23→20）。详图块的范围该按原始几何算，本就不该削。
+                _kw = _kb[2] - _kb[0]
+                _kh = _kb[3] - _kb[1]
+                _kshort = min(_kw, _kh)
+                if (_kshort >= GIANT_PAGE_MEMBER_MIN_SHORT
+                        or is_paper_short_side(_kshort)):
+                    _keep_pts = _kept
+                    safe_log(
+                        f"  [R116·块 bbox 去散件] 块 {_name}：{len(_ent_pts)} 个实体中 "
+                        f"{_drop_n} 个离主体 {_rad:.0f}mm 之外（主体 {_kw:.0f}×{_kh:.0f}"
+                        f"＝一张图幅，最近散件相距 {_min_gap:.0f}mm）→ 不作 bbox 范围")
+    _all = [p for _ps in _keep_pts for p in _ps]
+    _bb_ret = (min(p[0] for p in _all), min(p[1] for p in _all),
+               max(p[0] for p in _all), max(p[1] for p in _all))
+    _cache[_name] = _bb_ret
+    return _bb_ret
+
+
 def calculate_layout_total_bbox(layout, doc):
     """计算单个 layout 中所有实体的总包围盒面积。
     面积占比的分母必须与候选同源（同一 layout）：
@@ -2319,160 +2498,14 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     _A_SERIES_SHORT_SIDES = (841, 594, 420, 297, 210, 148, 105)
     import math as _math
     _block_bbox_cache = {}
+
     def _get_block_world_bbox(_name, _visited=None):
-        """递归求块的 bbox（块定义内坐标，未应用 INSERT xscale/yscale）。
+        """R132：实现已提升为模块级 block_world_bbox（供条件D/条件I 共用）。
 
-        R116：bbox 去「离群散件」。块定义里常挂着一个远距离垃圾实例，把 bbox 撑到
-          量级失真，而块的真实内容只占其中很小一块。现场（16(AC-T01-A).dwg 识 0
-          实际 1，841x594 = A1）：
-            q234325435 是 A1 图框装配块（X-Tlbk 层 84100x59400 外框 + 80700x57500
-            内框 + 图签子块 + 属性，78 个贡献点位的实体），但块内还挂了一个 Wall 层
-            嵌套 INSERT（展开后跨 4952977x8972222，离图框 500 万单位），bbox 被撑成
-            5032724x8978306。后果两条：
-              ① R27 边框证据分母虚高：块内 84100 的图框矩形只占「块长边」0.94%
-                 < 50% → 整块被判「非图框内容块」剔除，入库 0 个 → fc=0；
-              ② 世界尺寸虚高：实例 scale 0.01，真框世界尺寸 841x594（A1 纸面 mm），
-                 却被算成 50327x89783。
-          判据用**实体分布**，不是几何极值：以实体中心的中位数为中心，取各实体中心
-            偏移距离的中位数 md，半径 R = 20xmd 之外的实体视为散件。中位数对个别
-            极端值免疫——78 个实体里 1 个在 500 万之外，动不了 md（实测 md≈1.5e4，
-            R≈3e5，散件 5.1e6 被剔，77 个真内容全在 4e4 内不受影响）。
-          护栏（保守，只缩不放）：
-            ① 实体数 >= 4 才判断（太少时中位数本身不可靠）；
-            ② 剔除数 <= max(1, n/10) —— 超过 10% 不是「个别散件」而是块真这么分布
-               （多页拼版块每页都有成百实体，不会被误削）；
-            ③ 剩余实体 >= 3；
-            ④ 只可能缩小 bbox，永不放大。
-          开关 FRAME_PARSER_NO_BLOCK_BBOX_TRIM=1 回退到纯几何极值。
+        这里保留薄包装只为不改动 collect_candidates_from_layout 内既有的 6 处
+        调用点；行为等价 —— 同一个 doc、同一个 _block_bbox_cache 字典。
         """
-        if _name in _block_bbox_cache:
-            return _block_bbox_cache[_name]
-        if _visited is None:
-            _visited = set()
-        if _name in _visited:
-            return None
-        if _name not in doc.blocks:
-            return None
-        _visited.add(_name)
-        # R116：按实体分组收集点位（原实现拍平成一个点表，丢掉了「哪个实体」这个
-        #   信息，无法做「实体分布」判据）。
-        _ent_pts = []
-        for _ent in doc.blocks[_name]:
-            _pts = []
-            try:
-                _t = _ent.dxftype()
-                if _t == 'LWPOLYLINE':
-                    for _p in _ent.get_points('xy'):
-                        _pts.append(_p)
-                elif _t == 'LINE':
-                    _pts.append((_ent.dxf.start.x, _ent.dxf.start.y))
-                    _pts.append((_ent.dxf.end.x, _ent.dxf.end.y))
-                elif _t == 'CIRCLE':
-                    _c = (_ent.dxf.center.x, _ent.dxf.center.y)
-                    _r = _ent.dxf.radius
-                    _pts.append((_c[0]-_r, _c[1]-_r))
-                    _pts.append((_c[0]+_r, _c[1]+_r))
-                elif _t == 'INSERT':
-                    # 嵌套 INSERT：按 DXF 变换规范组合 p_world = insert + R(rot)·S·(p − base)。
-                    # 旧实现既不减子块基点也不处理子块旋转——子块带旋转时父块 bbox 直接算错。
-                    _bb = _get_block_world_bbox(_ent.dxf.name, _visited)
-                    if _bb is not None:
-                        _ipt = (_ent.dxf.insert.x, _ent.dxf.insert.y)
-                        _xs = _ent.dxf.xscale; _ys = _ent.dxf.yscale
-                        try:
-                            _nb = doc.blocks[_ent.dxf.name].block.dxf.base_point
-                            _nbx, _nby = _nb.x, _nb.y
-                        except Exception:
-                            _nbx = _nby = 0.0
-                        _nc = [(_bb[0]-_nbx, _bb[1]-_nby), (_bb[2]-_nbx, _bb[1]-_nby),
-                               (_bb[0]-_nbx, _bb[3]-_nby), (_bb[2]-_nbx, _bb[3]-_nby)]
-                        _nc = [(_p[0]*_xs, _p[1]*_ys) for _p in _nc]
-                        _nrot = getattr(_ent.dxf, 'rotation', 0)
-                        if _nrot:
-                            _nr = _math.radians(_nrot)   # DXF rotation 单位是度，cos/sin 需弧度
-                            _ncr = _math.cos(_nr); _nsr = _math.sin(_nr)
-                            _nc = [(_p[0]*_ncr - _p[1]*_nsr, _p[0]*_nsr + _p[1]*_ncr) for _p in _nc]
-                        # R122：镜像插入（extrusion=(0,0,-1)）的 OCS→WCS 是
-                        #   (x,y)→(-x,y)，必须整体取反 x —— 否则块内容被搬到 y 轴
-                        #   另一侧，父块 bbox 被撑大（见 _insert_ocs_mirrored）。
-                        _nmir = _insert_ocs_mirrored(_ent)
-                        for _p in _nc:
-                            _wx = _ipt[0] + _p[0]
-                            _wy = _ipt[1] + _p[1]
-                            _pts.append((-_wx if _nmir else _wx, _wy))
-            except Exception:
-                continue
-            if _pts:
-                _ent_pts.append(_pts)
-        if not _ent_pts:
-            _block_bbox_cache[_name] = None
-            return None
-        # ---------- R116：块 bbox 去离群散件（见函数 docstring） ----------
-        _keep_pts = _ent_pts
-        if (os.environ.get('FRAME_PARSER_NO_BLOCK_BBOX_TRIM') != '1'
-                and len(_ent_pts) >= BLOCK_BBOX_TRIM_MIN_ENTS):
-            _ctrs = []
-            for _ps in _ent_pts:
-                _sx = 0.0; _sy = 0.0
-                for _p in _ps:
-                    _sx += _p[0]; _sy += _p[1]
-                _n = len(_ps)
-                _ctrs.append((_sx / _n, _sy / _n))
-            _mcx = sorted(p[0] for p in _ctrs)[len(_ctrs) // 2]
-            _mcy = sorted(p[1] for p in _ctrs)[len(_ctrs) // 2]
-            _dists = [_math.hypot(p[0] - _mcx, p[1] - _mcy) for p in _ctrs]
-            _mdist = sorted(_dists)[len(_dists) // 2]
-            _rad = _mdist * BLOCK_BBOX_TRIM_MULT
-            _kept = [_ent_pts[_i] for _i, _d in enumerate(_dists) if _d <= _rad]
-            _drop_n = len(_ent_pts) - len(_kept)
-            # R116 护栏（退化情形）：多数实体中心重合时中位偏移 = 0，半径塌成 0，
-            #   会把「只偏了一点点」的正常实体当散件剔掉（实测 4 个实体里 3 个
-            #   中心重合 → 第 4 个哪怕只偏 100mm 也被剔）。所以再验两条：
-            #   ① 主体区跨度必须非退化（>= 1mm）；
-            #   ② 散件到主体区 bbox 的距离必须 >= 主体区跨度的 2 倍——「离群」
-            #     是相对主体自身尺度说的，不是相对 0 说的。真实散件相距 100 万，
-            #     主体区跨度只有 62mm（sdeg）或 84100mm（图框块），两个量级都远超。
-            if 1 <= _drop_n <= max(1, len(_ent_pts) // 10) and len(_kept) >= 3:
-                _kx = [p[0] for _ps in _kept for p in _ps]
-                _ky = [p[1] for _ps in _kept for p in _ps]
-                _kb = (min(_kx), min(_ky), max(_kx), max(_ky))
-                _kspan = max(_kb[2] - _kb[0], _kb[3] - _kb[1])
-                _min_gap = None
-                for _i, _d in enumerate(_dists):
-                    if _d <= _rad:
-                        continue
-                    _c = _ctrs[_i]
-                    _gx = max(_kb[0] - _c[0], _c[0] - _kb[2], 0.0)
-                    _gy = max(_kb[1] - _c[1], _c[1] - _kb[3], 0.0)
-                    _g = _math.hypot(_gx, _gy)
-                    if _min_gap is None or _g < _min_gap:
-                        _min_gap = _g
-                if _kspan >= 1.0 and _min_gap is not None and _min_gap >= _kspan * 2.0:
-                    # R116 第二道收口：**只有当块的主体本身就是一张图幅时**，才有独立
-                    #   证据说"其余散件不属于这个块"——图幅装配块（图框 + 图签 + 属性）
-                    #   的主体必然是一整张纸，而纸的尺寸有绝对答案（A 系幅面整数倍 / ×
-                    #   标准出图比例，或 ≥15000mm 的建筑页下限，与 R115 判据④ 同口径）。
-                    #   没有这条，凡是"小块 + 远处几个散件"都会被削：实测 1#,8#住宅 里
-                    #   螺栓详图块 wetwwtwt（真实内容 2463×6003，4 个散件在 78m 外）
-                    #   被削成 2463×6003，父块 ewtewtwey 的 bbox 随之变干净 → R27 从
-                    #   "拒绝"翻成"接受"，R40 块内救援不再触发，5 张 52550×29700 表格页
-                    #   只剩 2 张（fc 23→20）。详图块的范围该按原始几何算，本就不该削。
-                    _kw = _kb[2] - _kb[0]
-                    _kh = _kb[3] - _kb[1]
-                    _kshort = min(_kw, _kh)
-                    if (_kshort >= GIANT_PAGE_MEMBER_MIN_SHORT
-                            or is_paper_short_side(_kshort)):
-                        _keep_pts = _kept
-                        safe_log(
-                            f"  [R116·块 bbox 去散件] 块 {_name}：{len(_ent_pts)} 个实体中 "
-                            f"{_drop_n} 个离主体 {_rad:.0f}mm 之外（主体 {_kw:.0f}×{_kh:.0f}"
-                            f"＝一张图幅，最近散件相距 {_min_gap:.0f}mm）→ 不作 bbox 范围")
-        _all = [p for _ps in _keep_pts for p in _ps]
-        _bb_ret = (min(p[0] for p in _all), min(p[1] for p in _all),
-                   max(p[0] for p in _all), max(p[1] for p in _all))
-        _block_bbox_cache[_name] = _bb_ret
-        return _bb_ret
-
+        return block_world_bbox(doc, _name, _visited, _block_bbox_cache)
     # ---------- R26：图框块「边框证据」校验 ----------
     # 场景：6、10号楼住宅户型.dwg —— 块 -1fxhs0421 定义 bbox 143285×105800（图框级、
     #   ratio 1.354），3 个实例曾被当图框（R25 还为它做了斜放块去旋转口径）。渲染+实体
@@ -5522,6 +5555,19 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         COND_D_INNER_TOL = 1.0     # 严格内缩容差（mm）
         _cond_d_ent_bbs = {}
 
+        # ---------- R132：修一个静默 NameError（跨作用域引用） ----------
+        # 本函数里两处调 `_get_block_world_bbox(...)`，但那个名字只 def 在
+        # `collect_candidates_from_layout` 的闭包内（L2502），本函数
+        # （`get_bounding_box_from_bytes`）里是 **global 查找**，模块级无定义 →
+        # 必然 NameError，且两处都被 `except Exception` 吞掉：
+        #   · R58 块内候选分支 → `continue`，块定义内的 INSERT 子块实例从来没被
+        #     计入条件D 的实体数；
+        #   · 条件I 的 `_table_lines_in_block_def` → `_res = (0, 0)`，于是 R62 形态B
+        #     「块定义内表格线增量证据」**恒为 0**，判据实际没生效。
+        # 修法：实现提升为模块级 `block_world_bbox`（见 L1835），两处直接调它。
+        # 语义与作者原意一致（同一份实现，不再有第二份近似版）。
+        _blk_wbb_cache = {}    # 块名 -> block_world_bbox 结果（块定义坐标系）
+
         def _cond_d_entity_count(c):
             _ln = c['layout']
             # R58：救援候选（块内闭合线）的内容证据在源子块定义内计数——
@@ -5550,7 +5596,11 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                     _bx = [p[0] for p in _ps]; _by = [p[1] for p in _ps]
                                     _bb = (min(_bx), min(_by), max(_bx), max(_by))
                                 elif _t == 'INSERT':
-                                    _sbb = _get_block_world_bbox(ent.dxf.name)
+                                    # R132：原为 `_get_block_world_bbox(...)`（名字只存在于
+                                    #   另一个函数的闭包里 → NameError 被吞）。这里用作者原意
+                                    #   的实现：模块级 block_world_bbox。
+                                    _sbb = block_world_bbox(doc, ent.dxf.name,
+                                                            None, _blk_wbb_cache)
                                     if _sbb is None:
                                         continue
                                     _sx = getattr(ent.dxf, 'xscale', 1) or 1
@@ -6502,8 +6552,26 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 if _bn in _blk_tl_cache:
                     return _blk_tl_cache[_bn]
                 _res = (0, 0)
+                # R132：这条证据原本因跨作用域 NameError 恒返回 (0,0)（见下方注释），
+                #   即「R62 形态B」自上线起从未生效。把根因修好之后实测**过度识别**：
+                #     · PC-M01~M12-A.dwg 12→16 框（多出 4 个 36800×28700 轴网子块，
+                #       与 R118 回退①「关 R95 矩形证据」暴露的那 4 张假页同源）；
+                #     · Px-13-ALL.dwg 多出 1 个 81136×76615；
+                #     · R117 回退对照的基线份数也跟着漂。
+                #   原因：形态B 的阈值（`_nh >= 30 and _nv >= 6`）当初是照着「只有
+                #   顶层线参与」标定的，现在分母里突然多了整块表格线，阈值等于被放宽。
+                #   所以默认**保持关闭**：本轮只修根因、留开关，不擅自改判定。
+                #   要启用需单独一轮重新标定阈值 + 全量回归，不夹杂在这里。
+                if os.environ.get('FRAME_PARSER_BLOCK_TABLE_LINES') != '1':
+                    _blk_tl_cache[_bn] = _res
+                    return _res
                 try:
-                    _bb = _get_block_world_bbox(_bn)
+                    # R132：原为 `_get_block_world_bbox(_bn)` —— 那个名字只 def 在
+                    #   collect_candidates_from_layout 的闭包内，本函数里是 global
+                    #   查找 → 必然 NameError，被下面的 `except Exception` 吞成
+                    #   _res = (0,0)，于是 R62 形态B「块定义内表格线增量证据」一直
+                    #   恒为 0（条件I 的 `_nh >= 30 and _nv >= 6` 只剩顶层线参与）。
+                    _bb = block_world_bbox(doc, _bn, None, _blk_wbb_cache)
                     _blk = doc.blocks.get(_bn)
                     if _bb is not None and _blk is not None:
                         _lx1, _ly1, _lx2, _ly2 = _bb

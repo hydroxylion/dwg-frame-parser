@@ -7689,4 +7689,165 @@ else:
     print('SKIP  R131 真实图用例（未找到 MC-P03~P04-A.dwg）')
 
 
+# ==========================================================================
+# R132：跨作用域引用（静默 NameError）—— 两个判据实际从未生效
+# ==========================================================================
+# 现场：`get_bounding_box_from_bytes` 里两处调 `_get_block_world_bbox(...)`，
+#   那个名字只 `def` 在 `collect_candidates_from_layout` 的闭包内，本函数里是
+#   **global 查找**、模块级无定义 → 必然 NameError，且两处都被 `except Exception`
+#   吞掉：
+#     · R58 块内候选分支 → `continue`（块定义内的 INSERT 子块从不计入条件D）
+#     · 条件I `_table_lines_in_block_def` → `_res = (0, 0)`（R62 形态B 恒为 0）
+#   修法：实现提升为模块级 `block_world_bbox`，两处直接调它。
+# 下面第 ① 条是**类级守卫**：静态扫全文件，任何「模块级未定义却被 global 引用」
+#   的名字都会被抓出来 —— 这条测试本身就能拦住原 bug。
+
+import builtins as _bi
+import symtable as _st
+
+_APP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app.py')
+with io.open(_APP_PATH, encoding='utf-8') as _f:
+    _APP_SRC = _f.read()
+
+
+def _r132_undefined_globals():
+    _tbl = _st.symtable(_APP_SRC, 'app.py', 'exec')
+    _known = {_s.get_name() for _s in _tbl.get_symbols()} | set(dir(_bi))
+    _bad = {}
+
+    def _scan(_t):
+        for _s in _t.get_symbols():
+            _n = _s.get_name()
+            if _s.is_global() and _s.is_referenced() and _n not in _known:
+                _bad.setdefault(_n, set()).add(_t.get_name())
+        for _c in _t.get_children():
+            _scan(_c)
+
+    _scan(_tbl)
+    return {k: sorted(v)[:3] for k, v in sorted(_bad.items())}
+
+
+check('R132-① 静态守卫：app.py 无「模块级未定义却被 global 引用」的名字（原 bug 的类级拦截）',
+      _r132_undefined_globals,
+      lambda got: got == {})
+
+
+def _r132_nested_doc():
+    """父块 = 外框 1000×800 + 子块插入（子块 200×100，insert=(100,200)）。"""
+    _d = ezdxf.new('R2010', setup=False)
+    _child = _d.blocks.new('CHILD')
+    _r126_rect(_child, 0, 0, 200, 100)
+    _parent = _d.blocks.new('PARENT')
+    _r126_rect(_parent, 0, 0, 1000, 800)
+    _parent.add_blockref('CHILD', (100, 200))
+    _d.modelspace().add_blockref('PARENT', (0, 0))
+    return _d
+
+
+check('R132-② 模块级 block_world_bbox 可用：父块 1000×800 → (0,0,1000,800)',
+      lambda: __import__('app').block_world_bbox(_r132_nested_doc(), 'PARENT'),
+      lambda got: got is not None and tuple(round(v) for v in got) == (0, 0, 1000, 800))
+
+
+def _r132_offset_sub():
+    """父块只有子块，子块 insert=(5000,7000) → 父块 bbox 必须跟着平移。"""
+    _d = ezdxf.new('R2010', setup=False)
+    _child = _d.blocks.new('CHILD')
+    _r126_rect(_child, 0, 0, 200, 100)
+    _parent = _d.blocks.new('PARENT')
+    _parent.add_blockref('CHILD', (5000, 7000))
+    _d.modelspace().add_blockref('PARENT', (0, 0))
+    return _d
+
+
+check('R132-③ 嵌套 INSERT 的 insert 位移参与计算：(5000,7000,5200,7100)',
+      lambda: __import__('app').block_world_bbox(_r132_offset_sub(), 'PARENT'),
+      lambda got: got is not None and tuple(round(v) for v in got) == (5000, 7000, 5200, 7100))
+
+
+def _r132_rotated_sub():
+    """子块 insert=(1000,0) + rotation=90 → 200×100 转成 100×200。
+
+    90° 逆时针：四角 (0,0)/(200,0)/(200,100)/(0,100) → (0,0)/(0,200)/(-100,200)/(-100,0)，
+    再加 insert(1000,0) → x∈[900,1000]、y∈[0,200]。
+    """
+    _d = ezdxf.new('R2010', setup=False)
+    _child = _d.blocks.new('CHILD')
+    _r126_rect(_child, 0, 0, 200, 100)
+    _parent = _d.blocks.new('PARENT')
+    _parent.add_blockref('CHILD', (1000, 0), dxfattribs={'rotation': 90})
+    _d.modelspace().add_blockref('PARENT', (0, 0))
+    return _d
+
+
+check('R132-④ 嵌套 INSERT 的 rotation 参与计算（90° → x 跨度 100、y 跨度 200）',
+      lambda: __import__('app').block_world_bbox(_r132_rotated_sub(), 'PARENT'),
+      lambda got: got is not None
+      and abs((got[2] - got[0]) - 100) <= 1
+      and abs((got[3] - got[1]) - 200) <= 1)
+
+
+check('R132-⑤ `_math` 已在模块级定义（提升后子函数靠 global 查找，缺它必 NameError）',
+      lambda: hasattr(__import__('app'), '_math'),
+      lambda got: got is True)
+
+
+# ---- R132-⑥ 留档：R62 形态B 修好后会过度识别，所以默认关闭 ----
+# 形态B（块定义内表格线增量证据）此前因同一个 NameError 恒返回 (0,0)，从未生效。
+# 根因修好后实测过度识别：PC-M01~M12-A 12→16（多 4 个 36800×28700 轴网子块），
+# Px-13-ALL 把 1 个 59450×42050 换成 81136×76615（份数对但组成错）。
+# 阈值 `_nh>=30 and _nv>=6` 当初照着「只有顶层线」标定，所以默认关闭，
+# 开关 `FRAME_PARSER_BLOCK_TABLE_LINES=1` 才能打开。这条测试把这个事实钉住。
+_R132_TL = os.path.join(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）',
+                        'PC-M01~M12-A.dwg')
+if os.path.exists(_R132_TL):
+    with open(_R132_TL, 'rb') as _f:
+        _r132_tl_bin = _f.read()
+
+    def _r132_tl(_on):
+        _env = {'FRAME_PARSER_BLOCK_TABLE_LINES': '1'} if _on else {}
+        _saved = {_k: os.environ.get(_k) for _k in _env}
+        for _k, _v in _env.items():
+            os.environ[_k] = _v
+        try:
+            return _r122_census(_r131_run(_r132_tl_bin, _name='PC-M01~M12-A.dwg'))
+        finally:
+            for _k, _v in _saved.items():
+                if _v is None:
+                    os.environ.pop(_k, None)
+                else:
+                    os.environ[_k] = _v
+
+    check('R132-⑥ 形态B 默认关闭：PC-M01~M12-A 仍 12 框（6×59450×42050 + 6×42050×29700）',
+          lambda: _r132_tl(False),
+          lambda got: got == {(59450, 42050): 6, (42050, 29700): 6})
+
+    check('R132-⑥b 形态B 打开会过度识别：多出 4 个 36800×28700（故默认关闭）',
+          lambda: _r132_tl(True),
+          lambda got: got.get((36800, 28700)) == 4 and sum(got.values()) == 16)
+else:
+    print('SKIP  R132-⑥ 形态B 留档用例（未找到 PC-M01~M12-A.dwg）')
+
+
+# ---- 真实图守卫：修复后这些图的识别结果必须不变 ----
+_R132_GUARDS = [
+    (os.path.join(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）', '13#-bang.dwg'),
+     {(105125, 59400): 1, (84100, 59400): 1, (74300, 42000): 3, (59400, 42000): 1}),
+    (os.path.join(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）', 'MC-P03~P04-A.dwg'),
+     {(1784, 841): 1, (1189, 841): 1}),
+    (os.path.join(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）', '非圆减速器装配.dwg'),
+     {(2378, 1682): 1}),
+]
+for _p, _want in _R132_GUARDS:
+    if not os.path.exists(_p):
+        print(f'SKIP  R132 真实守卫（未找到 {os.path.basename(_p)}）')
+        continue
+    with open(_p, 'rb') as _f:
+        _b = _f.read()
+    _nm = os.path.basename(_p)
+    check(f'R132守卫: {_nm} 识别结果不变 {sorted(_want)}',
+          (lambda _b=_b, _nm=_nm: _r122_census(_r131_run(_b, _name=_nm))),
+          (lambda got, _want=_want: got == _want))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
