@@ -7850,4 +7850,47 @@ for _p, _want in _R132_GUARDS:
           (lambda got, _want=_want: got == _want))
 
 
+# ---------- 第一百三十三轮：v 对窗口索引（detect 段热点治理） ----------
+# R133 把 detect_rectangles_from_lines 主循环里的内层全量扫描，换成「按 (xLo,xHi)
+# 缓存窗口索引 + gap 区间 bisect」。缓存命中依赖「同一窗口被反复使用」，所以这里
+# 专门构造**多个矩形共用同一 x 窗口**的合成图，逼着走缓存命中路径，验证：
+#   ① 同一窗口重复 4 次、且每个 h_pair 的 _H 不同（即同一份缓存要吃 4 个不同的
+#      gap 区间）→ 4 个矩形全部识别，一个不多一个不少；
+#   ② 面积降序契约不变（rects.sort 结果）；
+#   ③ 三个互不相交的窗口各自识别，不互相串味（窗口索引不能跨窗口复用）。
+
+def _r133_detect(*rects):
+    """用 4 条独立 LINE 画若干矩形，直接喂 detect_rectangles_from_lines。"""
+    _d = make_doc()
+    _m = _d.modelspace()
+    for (x, y, w, h) in rects:
+        add_line_rect(_m, x, y, w, h)
+    return detect_rectangles_from_lines(list(_m.query('LINE')))
+
+
+def _r133_areas_desc(rs):
+    a = [(r[2] - r[0]) * (r[3] - r[1]) for r in rs]
+    return all(a[i] >= a[i + 1] for i in range(len(a) - 1))
+
+
+_R133_SAME_WIN = [(0, 0, 1000, 700), (0, 5000, 1000, 700),
+                  (0, 9000, 1000, 700), (0, 13000, 1000, 700)]
+
+check('R133-① 同一 x 窗口重复 4 次（同一缓存吃 4 个不同 gap 区间）：4 框全中',
+      lambda: set(_r133_detect(*_R133_SAME_WIN)),
+      lambda got: got == {(0, 0, 1000, 700), (0, 5000, 1000, 5700),
+                          (0, 9000, 1000, 9700), (0, 13000, 1000, 13700)})
+
+check('R133-② 面积降序契约不变（宽度不同的 3 框混排）',
+      lambda: _r133_areas_desc(_r133_detect((0, 0, 1000, 700), (0, 5000, 1000, 700),
+                                            (3000, 0, 800, 700))),
+      lambda got: got is True)
+
+check('R133-③ 三个互不相交窗口各自识别，窗口索引不跨窗口串味',
+      lambda: set(_r133_detect((0, 0, 1000, 700), (3000, 0, 1000, 700),
+                               (6000, 0, 1000, 700))),
+      lambda got: got == {(0, 0, 1000, 700), (3000, 0, 4000, 700),
+                          (6000, 0, 7000, 700)})
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

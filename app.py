@@ -981,6 +981,7 @@ def detect_rectangles_from_lines(entity_list, rot=None):
     # 200 万组合预算耗尽（实际只在扫"x 对不上的竖对"），真图框横线对排在
     # #414 永远轮不到 → 6 张 LINE 页框（21475×30372/29788×21062/14894×10531）
     # 全漏。坐标包含遍历后全部图框在 examined≈80 万内即被找到。
+    from array import array as _array
     import bisect as _bisect
     PAIR_RATIO_BOUND = 8.0
     # R38 P1 加速索引：按 coord 排序 + bisect 粗筛窗口，替代全量线性扫描。
@@ -1082,28 +1083,128 @@ def detect_rectangles_from_lines(entity_list, rot=None):
     # 但此前 570 万次无效检查把 200 万组合预算耗尽在 ~#200 → 16 张 LINE
     # 图框全漏。该剪枝把目标前的检查量从 572 万降到 41.5 万，零召回损失）
     v_covs = [sum(hi - lo for lo, hi in p[2]) for p in v_by_xa]
+
+    # ---------- R133：v 对窗口索引（治 detect 段最大热点） ----------
+    # 现象（d013 插桩实测）：主循环 171468 个 (h_pair, 覆盖段) 共 **8086 万次**
+    #   内层迭代、6.5s（占 detect 83%、全图 53%），其中 98% 的迭代死在三个前置
+    #   条件上——宽高比 gap 越界 4226 万次（52%）、竖对右界 xb>xHi 3693 万次（46%）、
+    #   竖对覆盖不足 153 万次（2%），最终只得到 132765 个候选（0.16%）。
+    #   g013~g016 同样：detect 139.5s / 全图 224.5s = 62%。
+    # 根因不是"窗口太大"：171468 个覆盖段只对应 **37123 个不同的 (xLo,xHi) 窗口**
+    #   ——同一个窗口被不同 h_pair 反复重扫，反复否决同一批竖对，而这些否决里 98%
+    #   是纯粹"这个竖对放不进这个窗口 / 宽高比不对"，与具体是哪个 h_pair 无关。
+    #   **而且重复是高度不均的**：按"每个覆盖段"平均每个窗口只被用 4.6 次，但按
+    #   "窗口大小加权"则平均被用 26.5 次——大窗口被反复重用，碎窗口基本一次性。
+    #   这就是阈值剪枝（_WIN_CACHE_MIN_USE）的依据：只给真正重复的大窗口建索引。
+    # 做法：按 (xLo, xHi) 缓存窗口索引 = ① 窗口内 xb ≤ xHi 的 v 对下标（省掉 46%）；
+    #   ② 这些下标按 gap 升序排好，配一份同步 gap 数组。命中后每个覆盖段只需两次
+    #   bisect 取出 gap ∈ [_g_lo, _g_hi] 的切片（省掉 52%），再按下标升序重排。
+    #   未命中时**原样跑旧的全量扫描**（见 _cand = range(...) 分支）——所以本优化
+    #   在"窗口重复率低"的图纸上退化为零开销，绝不比原实现慢。
+    #   d013 效果：内层迭代 8086 万 → 构建 166 万 + 候选 167 万；主循环 6.45→2.36s，
+    #   detect 7.9→3.3s、全图 13.4→8.3s；g013~g016 detect 139.5→27.4s、全图
+    #   224.5→112.5s。候选数与顺序零变化。
+    # 等价性：切片按 _vi 升序重排后，进入循环体的候选**集合与顺序与原实现逐条一致**
+    #   （原实现里被 continue 掉的三类迭代在这里根本没进循环体），因此 examined
+    #   计数、MAX_EXAMINED 预算、MAX_LINE_RECT_CANDIDATES 上限、rects 累加顺序
+    #   全部不变，输出逐字节相同。循环体里保留 gap/xb 两道判断，正是为了让"未命中"
+    #   分支能直接用 range() 走旧逻辑而不必另写一份循环体。
+    # 踩坑（R133 第一版上线前实测抓到的回归）：最初是"无脑缓存 + 累计条目超上限后
+    #   **停止缓存**"。`1#8#平面、墙、柱.dwg` 撞到 400 万条目上限后，后续每个窗口
+    #   都变成"每次用到就重建一遍索引"——比不缓存还慢，detect 69.0→84.8s（+23%；
+    #   该图还会撞 MAX_EXAMINED 提前返回，建索引的钱一分没省下来）。改成：
+    #   ① 阈值 _WIN_CACHE_MIN_USE：同一窗口用到第 3 次才建索引（建一次 ≈ 7 次全扫，
+    #      K 实测扫描见 CHANGELOG：K=3 在 d013 / g013~g016 / 1#8# 上同时最优或次优，
+    #      K=1 会让 1#8# 这类"窗口大但几乎不重复"的图把建索引的钱全赔进去）；
+    #   ② 撞条目上限 / 窗口表满时 **彻底关闭** 并清表，全部回到旧的全量扫描
+    #      （此时与原实现逐字节等价、开销差为零，绝不会比原实现慢）。
+    _WIN_CACHE_MIN_USE = 3        # 同一窗口用到第几次才值得建索引（建一次 ≈ 7 次全扫）
+    _WIN_CACHE_MAX = 4000000      # 已缓存条目上限（array 12B/条目 ≈ 48MB）
+    _WIN_MAX_KEYS = 400000        # 窗口表条目上限（防低重复率图纸把内存撑爆）
+    _win_cache = {}               # (xLo,xHi) -> 使用次数(int) 或 (gap 数组, 下标数组)
+    _win_cached = 0               # 已缓存的条目总数（用于 _WIN_CACHE_MAX 判断）
+    _win_off = False              # 撞上限 → 彻底关闭，全部退回旧实现
+
+    def _window_index(xLo, xHi, _xhi):
+        """取窗口 [xLo, xHi] 的 (gap 升序数组, 对应 v 对下标数组)；None = 走旧扫描。
+
+        只保留 xb ≤ xHi + eps 的竖线对（横线盖得住其右界）；按 gap 升序排好，
+        供调用方 bisect 出 gap ∈ [_g_lo, _g_hi] 的切片。定位窗口左界用
+        bisect_left(xLo - eps)、右界 bisect_right(xHi + eps)，与旧实现的
+        range(_lo_i, _hi_i) 完全一致。
+        """
+        nonlocal _win_cached, _win_off
+        if _win_off:
+            return None
+        _k = (xLo, xHi)
+        _e = _win_cache.get(_k)
+        if _e is not None:
+            if not isinstance(_e, int):
+                return _e                    # 已建好索引
+            _n = _e + 1
+            if _n < _WIN_CACHE_MIN_USE:
+                _win_cache[_k] = _n          # 还不够热，继续走旧扫描
+                return None
+        elif len(_win_cache) >= _WIN_MAX_KEYS:
+            _win_off = True                  # 窗口太碎（几乎不重复），放弃优化
+            _win_cache.clear()
+            return None
+        elif _WIN_CACHE_MIN_USE > 1:
+            _win_cache[_k] = 1
+            return None
+        # ---- 建索引 ----
+        _lo_i = _bisect.bisect_left(v_xas, xLo - LINE_CLUSTER_EPS)
+        _hi_i = _bisect.bisect_right(v_xas, _xhi)
+        _tmp = []
+        for _vi in range(_lo_i, _hi_i):
+            _xa, _xb, _ = v_by_xa[_vi]
+            if _xb <= _xhi:
+                _tmp.append((_xb - _xa, _vi))
+        _tmp.sort()
+        _e = (_array('d', [g for g, _ in _tmp]),
+              _array('i', [_i for _, _i in _tmp]))
+        if _win_cached + len(_tmp) > _WIN_CACHE_MAX:
+            _win_off = True                  # 撞内存上限：彻底关闭，回到旧实现
+            _win_cache.clear()
+            _win_cached = 0
+            return None
+        _win_cache[_k] = _e
+        _win_cached += len(_tmp)
+        return _e
+
     for (ya, yb, h_common) in h_pairs:
         _H = yb - ya
         if _H < MIN_LINE_RECT_SIDE:
             continue  # 矩形高 < 短边下限：任何组合短边必 < 下限，整层跳过
         _g_lo = max(MIN_LINE_RECT_SIDE, _H / PAIR_RATIO_BOUND)
         _g_hi = _H * PAIR_RATIO_BOUND
+        _hcov = _H - 2.0
         for (xLo, xHi) in h_common:
-            _seg_w = xHi - xLo
-            if _seg_w < MIN_LINE_RECT_SIDE:
+            if xHi - xLo < MIN_LINE_RECT_SIDE:
                 continue
-            _lo_i = _bisect.bisect_left(v_xas, xLo - LINE_CLUSTER_EPS)
-            _hi_i = _bisect.bisect_right(v_xas, xHi + LINE_CLUSTER_EPS)
-            for _vi in range(_lo_i, _hi_i):
+            _xhi = xHi + LINE_CLUSTER_EPS
+            _e = _window_index(xLo, xHi, _xhi)
+            if _e is None:
+                # 未建索引：区间与原实现完全相同，body 里两道 gap/xb 判断生效
+                _cand = range(_bisect.bisect_left(v_xas, xLo - LINE_CLUSTER_EPS),
+                              _bisect.bisect_right(v_xas, _xhi))
+            else:
+                # 命中索引：bisect 出 gap 合法切片，按下标升序还原旧遍历顺序
+                _pa = _bisect.bisect_left(_e[0], _g_lo)
+                _pb = _bisect.bisect_right(_e[0], _g_hi)
+                _cand = _e[1][_pa:_pb]
+                if _pb - _pa > 1:
+                    _cand = sorted(_cand)
+            for _vi in _cand:
                 xa, xb, v_common = v_by_xa[_vi]
                 _gap = xb - xa
                 # 宽高比例剪枝：图框归一化长宽比上限约 5.5（FRAME_RATIO_MAX），
                 # 剪枝放宽到 8，超出比例的横竖线对不可能是图框，跳过不损失召回
                 if _gap < _g_lo or _gap > _g_hi:
                     continue
-                if xb > xHi + LINE_CLUSTER_EPS:
+                if xb > _xhi:
                     continue  # 竖对右界超出本覆盖段：横线盖不住，必非矩形
-                if v_covs[_vi] < _H - 2.0:
+                if v_covs[_vi] < _hcov:
                     continue  # 竖对公共覆盖总长 < 矩形高(留2mm浮点/聚类容差)：必然纵跨不住，
                               # 不计预算直接跳过。容差不可省——横对高度与竖对覆盖在端点
                               # 重合时仅有 ~1e-8 级浮点尾差，严格比较会把真图框误杀
