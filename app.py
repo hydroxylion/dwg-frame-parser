@@ -8644,18 +8644,31 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             if os.environ.get('FRAME_PARSER_NO_PAGE_IN_PAGE') != '1':
                 _odw = outer.get('block_def_w') or 0
                 _odh = outer.get('block_def_h') or 0
+                _outer_is_page = False
                 if (outer.get('type') == '块参照插入'
                         and _odw > 0 and _odh > 0
-                        and is_paper_sheet_size(_odw, _odh)
-                        and not is_paper_sheet_size(c['width'], c['height'])):
+                        and is_paper_sheet_size(_odw, _odh)):
                     _or_def = max(_odw, _odh) / max(min(_odw, _odh), 1e-9)
                     _obrl = outer.get('block_rect_len') or 0
                     if (abs(_or_def - _or) / _or <= 0.05
                             and (_obrl <= 0 or _obrl >= max(_odw, _odh) * 0.70)):
-                        log_debug(f"    [R126·页内页] 外框 {outer.get('block_name')!r} "
-                                  f"块定义 {_odw:.0f}×{_odh:.0f} 即纸幅单页框 → "
-                                  f"内部 {c['width']:.0f}x{c['height']:.0f} 判为页面内容，照常嵌套剔除")
-                        return False
+                        _outer_is_page = True
+                # ⑦c R130：外层**不是块参照**、但世界尺寸本身就是纸幅级页框时，
+                #   同一条几何事实照样成立（一张纸里套不出第二张纸）。
+                #   现场（13#-bang.dwg 识 8 实际 6）：模型空间用**闭合多段线**画的
+                #   105125×59400 加长 A1 真页（is_paper_sheet_size 认它），里面放了
+                #   2 个 `N-说明框`（22000×55000，与 R126 同一种块）。⑦ 原实现要求
+                #   `outer.type == '块参照插入'`，这里的外层是闭合多段线 → ⑦ 不生效
+                #   → 说明框被 R62 ①~⑥ 全满足后保护下来、绕过嵌套去重，fc 6→8。
+                #   收口仍是 ⑦b：**被包候选本身也不是纸幅**才剔，真页套真页
+                #   （拼版容器里各是整页）照旧保护。
+                if not _outer_is_page and is_paper_sheet_size(ow_, oh_):
+                    _outer_is_page = True
+                if _outer_is_page and not is_paper_sheet_size(c['width'], c['height']):
+                    log_debug(f"    [R126·页内页] 外框 {outer.get('block_name') or outer.get('type')!r} "
+                              f"{ow_:.0f}×{oh_:.0f} 即纸幅页框 → "
+                              f"内部 {c['width']:.0f}x{c['height']:.0f} 判为页面内容，照常嵌套剔除")
+                    return False
             return True
 
         def deduplicate_candidates(cands):

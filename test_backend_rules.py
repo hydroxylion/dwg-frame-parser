@@ -7403,4 +7403,118 @@ check('R129-I 真实耗时表：覆盖全部校验图纸（每张都有耗时才
       lambda got: got == 'SKIP' or (got[0] >= 113 and got[1] == 0))
 
 
+
+# ========== R130：闭合多段线画的页框里也套不出第二张纸（⑦c）==========
+# 现场（13#-bang.dwg 识 8 实际 6）：
+#   实际 6 = 105125×59400 ×1 + 84100×59400 ×1 + 74300×42000 ×3 + 59400×42000 ×1
+#   多出 2 个 22000×55000 —— 还是 R126 那个 `N-说明框`（22m×55m 说明横线框）。
+# 为什么 R126 的 ⑦ 没拦住：⑦ 要求 `outer.type == '块参照插入'`，而这张图的**外层
+#   是闭合多段线**画的 105125×59400 加长 A1 真页（双线画法，R109 认它）。
+#   于是 ⑦ 不生效，说明框把 R62 ①~⑥ 全满足（比例 2.5=候选、rect_len 100%、
+#   与外框 ratio 1.7697 差 41%>10%、外框面积 5.16×、块定义长边 55000≥10512）
+#   → 被保护、绕过嵌套去重，fc 6→8。
+# 修法：⑦ 推广为「**外层候选的世界尺寸本身即纸幅级页框**」也算页（⑦c），
+#   不再限定外层必须是块参照。收口仍是 ⑦b：被包候选本身不是纸幅才剔。
+
+
+def _r130_rect(_lay, _x, _y, _w, _h, _layer='0'):
+    _lay.add_lwpolyline([(_x, _y), (_x + _w, _y), (_x + _w, _y + _h), (_x, _y + _h)],
+                        close=True, dxfattribs={'layer': _layer})
+
+
+def _r130_doc(_ow, _oh):
+    """外层闭合多段线页框（双线画法）+ 页内一个说明框块。"""
+    _d = ezdxf.new('R2010', setup=False)
+    _m = _d.modelspace()
+    _r130_rect(_m, 0, 0, _ow, _oh)
+    _r130_rect(_m, 10, 10, _ow - 20, _oh - 20)
+    _r126_notes_block(_d, 'NOTES_R130')
+    _m.add_blockref('NOTES_R130', (_ow * 0.30, _oh - 2000))
+    return _r126_bytes(_d)
+
+
+def _r130_run(_data, env=None, _name='r130.dxf'):
+    """_name 必须与内容真实格式一致：DWG 传 .dwg（走 ODA 转换），DXF 传 .dxf。"""
+    _saved = os.environ.get('FRAME_PARSER_NO_PAGE_IN_PAGE')
+    if env:
+        os.environ['FRAME_PARSER_NO_PAGE_IN_PAGE'] = env
+    else:
+        os.environ.pop('FRAME_PARSER_NO_PAGE_IN_PAGE', None)
+    _old = sys.stdout
+    sys.stdout = open(os.devnull, 'w')
+    try:
+        return get_bounding_box_from_bytes(_data, _name, 'polyline', 'mm', 'smart')
+    finally:
+        sys.stdout.close()
+        sys.stdout = _old
+        if _saved is None:
+            os.environ.pop('FRAME_PARSER_NO_PAGE_IN_PAGE', None)
+        else:
+            os.environ['FRAME_PARSER_NO_PAGE_IN_PAGE'] = _saved
+
+
+_R130_POLY_PAPER = _r130_doc(105125, 59400)     # 外层=纸幅级加长 A1
+_R130_POLY_NONPAPER = _r130_doc(120000, 70000)  # 外层非纸幅 → ⑦c 不该生效
+
+
+check('R130-① 单元：105125×59400 属纸幅体系、120000×70000 与 22000×55000 都不是',
+      lambda: (_r126_paper(105125, 59400), _r126_paper(120000, 70000),
+               _r126_paper(22000, 55000)),
+      lambda got: got == (True, False, False))
+
+check('R130-② 外层闭合多段线画的纸幅页 + 内含说明框 → 只 1 框（⑦c 剔掉说明框）',
+      lambda: _r122_census(_r130_run(_R130_POLY_PAPER)),
+      lambda got: got == {(105125, 59400): 1})
+
+check('R130-③ 同构造关 PAGE_IN_PAGE → 复现原 bug 2 框（多 22000×55000）',
+      lambda: _r122_census(_r130_run(_R130_POLY_PAPER, env='1')),
+      lambda got: got == {(105125, 59400): 1, (22000, 55000): 1})
+
+check('R130-④ 外层多段线**非纸幅**（120000×70000）时 ⑦c 不生效，说明框照旧保留',
+      lambda: _r122_census(_r130_run(_R130_POLY_NONPAPER)),
+      lambda got: got == {(120000, 70000): 1, (22000, 55000): 1})
+
+
+# ---- 真实图端到端 ----
+_R130_FP = next((p for p in [
+    os.path.join(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）', '13#-bang.dwg'),
+] if os.path.exists(p)), None)
+
+if _R130_FP:
+    with open(_R130_FP, 'rb') as _f:
+        _r130_bin = _f.read()
+    _r130_name = os.path.basename(_R130_FP)
+
+    def _r130_real(env=None):
+        return _r130_run(_r130_bin, env=env, _name=_r130_name)
+
+    check('R130真实图: 13#-bang → 6 框（105125×59400 + 84100×59400 + 74300×42000×3 '
+          '+ 59400×42000）',
+          lambda: _r122_census(_r130_real()),
+          lambda got: got == {(105125, 59400): 1, (84100, 59400): 1,
+                              (74300, 42000): 3, (59400, 42000): 1})
+
+    check('R130真实图回退: 关 PAGE_IN_PAGE → 复现原 bug 8 框（多 2 个说明框）',
+          lambda: _r122_census(_r130_real(env='1')),
+          lambda got: got == {(105125, 59400): 1, (84100, 59400): 1,
+                              (74300, 42000): 3, (59400, 42000): 1,
+                              (22000, 55000): 2})
+
+    # 正向守卫：⑦ 的老场景（块参照外层）必须完全不受 ⑦c 影响
+    _R130_GUARD = next((p for p in [
+        os.path.join(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）', '11 12#-bang.dwg'),
+    ] if os.path.exists(p)), None)
+    if _R130_GUARD:
+        with open(_R130_GUARD, 'rb') as _f:
+            _r130_g_bin = _f.read()
+
+        check('R130守卫: 11 12#-bang（R126 目标图）仍 7 框，未受 ⑦c 影响',
+              lambda: _r122_census(_r130_run(_r130_g_bin, _name='11 12#-bang.dwg')),
+              lambda got: got == {(84100, 59400): 2, (59400, 42000): 5})
+    else:
+        print('SKIP  R130 守卫用例（未找到 11 12#-bang.dwg）')
+else:
+    print('SKIP  R130 真实图用例（未找到 13#-bang.dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
