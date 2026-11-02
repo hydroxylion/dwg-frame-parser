@@ -377,6 +377,73 @@ def parse_one(appmod, filepath, data=None, name=None):
     }
 
 
+def pick_slowest(files, n, keep=None, timings=None):
+    """挑出最慢的 n 张，返回 (被跳过的, 被留下的)（纯函数，便于单测）。
+
+    R129：日常修一个问题要跑好几轮回归、每轮 33 分钟，其中 **8 张图占掉 20 分钟**
+    （最慢那张单张 352s）。迭代阶段没必要每轮都验这 8 张，改动收敛后再跑一次全量。
+
+    **排序必须用实测耗时，不能用体积/负载代理**：实测反例 `暖通（1~12F空调风管…）`
+    缓存负载只有 4.0MB（排不进前 12），单张却要 352s（全图最慢）。按负载挑会恰好
+    漏掉最该跳的那张。耗时来自 `regress_timings.json`（每轮回归自动累积历史最大值），
+    没有耗时记录的图才退回按负载排序、排在耗时组之后。
+
+    跳过必须**可见且可控**：
+      · keep 里的图永不跳过——本轮改动若正好涉及最慢的那几张，用 `--keep` 留住；
+      · 返回两份列表，调用方打印跳过名单并在汇总里单独计数。绝不能静默缩小覆盖
+        （R120 的教训：覆盖静默缩小比漏检本身更危险）。
+    """
+    keep_set = set(keep or ())
+    timings = timings or {}
+    cand = [fp for fp in files if os.path.basename(fp) not in keep_set]
+    if n <= 0:
+        return [], list(files)
+    have_t = [fp for fp in cand if os.path.basename(fp) in timings]
+    no_t = [fp for fp in cand if os.path.basename(fp) not in timings]
+    have_t.sort(key=lambda fp: timings[os.path.basename(fp)], reverse=True)
+    no_t.sort(key=_load_mb, reverse=True)
+    skipped = (have_t + no_t)[:n]
+    skip_set = set(skipped)
+    return skipped, [fp for fp in files if fp not in skip_set]
+
+
+# ---------- R129 每张图的历史耗时（供 --skip-slowest 排序）----------
+TIMINGS_PATH = os.path.join(BASE_DIR, 'regress_timings.json')
+
+
+def load_timings():
+    """读历史耗时表（文件不存在 / 损坏都返回空表，不影响回归主流程）。"""
+    try:
+        with open(TIMINGS_PATH, encoding='utf-8') as f:
+            data = json.load(f)
+        return {k: float(v) for k, v in data.items() if isinstance(v, (int, float))}
+    except Exception:
+        return {}
+
+
+def save_timings(timings):
+    """把本次耗时并入历史表，**取历史最大值**。
+
+    取 max 而不是覆盖：耗时受机器状态影响波动很大（同一张图 48.7~55.3s 都出现过），
+    `--skip-slowest` 要跳过的是"最坏情况下最费时间的那批"，用最大值最贴合这个用途。
+    """
+    hist = load_timings()
+    for k, v in timings.items():
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            continue
+        if v > hist.get(k, 0.0):
+            hist[k] = round(v, 1)
+    try:
+        with open(TIMINGS_PATH, 'w', encoding='utf-8', newline='\n') as f:
+            json.dump({k: hist[k] for k in sorted(hist)}, f,
+                      ensure_ascii=False, indent=2)
+            f.write('\n')
+    except Exception:
+        pass   # 写不进去不影响回归结论
+
+
 def collect_files(folder, only=None):
     files = sorted(f for f in os.listdir(folder) if f.lower().endswith('.dwg'))
     if only:
@@ -445,6 +512,11 @@ def main():
     ap.add_argument('--workers', type=int, default=0,
                     help=f'并行度上限（默认按可用内存自适应，上限 {MAX_WORKERS}）')
     ap.add_argument('--no-cache', action='store_true', help='禁用 DXF 转换缓存（全走 DWG 原路径）')
+    ap.add_argument('--skip-slowest', type=int, default=0, metavar='N',
+                    help='跳过负载最重的 N 张（迭代阶段提速用；8 张≈省 20 分钟，'
+                         '改动收敛后必须跑一次全量）')
+    ap.add_argument('--keep', default='',
+                    help='配合 --skip-slowest：这些图强制参与本次回归（逗号分隔）')
     args = ap.parse_args()
 
     _DXF_CACHE = not args.no_cache
@@ -454,6 +526,29 @@ def main():
     if not files:
         print('未找到待回归图纸')
         sys.exit(2)
+
+    # R129：迭代阶段跳过最慢的 N 张。跳过必须**大声说出来**并单独计数——
+    #   R120 的教训是「覆盖静默缩小比漏检本身更危险」。
+    skipped_files = []
+    if args.skip_slowest > 0:
+        if only:
+            print('ℹ️  --files 已显式指定图纸，--skip-slowest 不生效')
+        else:
+            _keep = {f if f.lower().endswith('.dwg') else f + '.dwg'
+                     for f in (x.strip() for x in args.keep.split(',')) if f}
+            _tim = load_timings()
+            skipped_files, files = pick_slowest(files, args.skip_slowest,
+                                                keep=_keep, timings=_tim)
+            if skipped_files:
+                print(f'\n⏭  跳过最慢的 {len(skipped_files)} 张（本次回归 {len(files)} 张）：')
+                for fp in skipped_files:
+                    _n = os.path.basename(fp)
+                    _t = _tim.get(_n)
+                    _desc = f'历史最慢 {_t:.1f}s' if _t else f'负载 {_load_mb(fp):.1f}MB（无耗时记录）'
+                    print(f'      - {_n}  （{_desc}）')
+                print('   ⚠️ 这些图本轮**未参与对比**。改动收敛后必须跑一次不带'
+                      ' --skip-slowest 的全量；')
+                print('      若本轮改动正好涉及上面某张，用 --keep 文件名 强制包含它。\n')
 
     t_start = time.time()
     # R127：并行度不再写死 8，改为「CPU 数 与 当前可用内存」取小，且按负载分档。
@@ -545,6 +640,10 @@ def main():
               f'{delta_txt}；耗时 {(time.time() - t_start) / 60:.1f} 分钟）')
         if err_kept:
             print(f'   ⚠️ 其中 {len(err_kept)} 张本次解析报错，已保留原基线条目未覆盖')
+        save_timings(_TIMINGS)   # R129：累积历史最慢耗时
+        if skipped_files:
+            print(f'   ⏭  跳过 {len(skipped_files)} 张最慢的图，它们的基线条目'
+                  f'按 R120 规则原样保留（未被改写，也没被删除）')
         _print_slowest()
         return
 
@@ -597,8 +696,14 @@ def main():
     if _DXF_CACHE:
         cache_tag = (f'，DXF缓存 命中{cache_pre}'
                      f'/新增{_cached_n() - cache_pre}')
+    save_timings(_TIMINGS)   # R129：累积每张的历史最慢耗时，供 --skip-slowest 排序
+    skip_tag = f'，⏭ 跳过 {len(skipped_files)} 张' if skipped_files else ''
     print(f'\n=== 一致 {n_same} / 变化 {n_diff}（共 {total} 张，基线含 {len(baseline)} 张，'
-          f'耗时 {(time.time() - t_start) / 60:.1f} 分钟{cache_tag}） ===')
+          f'耗时 {(time.time() - t_start) / 60:.1f} 分钟{cache_tag}{skip_tag}） ===')
+    if skipped_files:
+        print(f'⚠️  本次有 {len(skipped_files)} 张最慢的图**未参与对比**，'
+              f'它们的结论未知；改动收敛后请跑一次全量确认：')
+        print(f'    {" ".join(os.path.basename(fp) for fp in skipped_files)}')
     _print_slowest()
     sys.exit(0 if n_diff == 0 else 1)
 

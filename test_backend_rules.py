@@ -7321,4 +7321,86 @@ check('R127-Y 判定：基线无此图 → NEW（与 baseline 内容无关）',
       lambda got: got == 'new')
 
 
+
+# ========== R129：迭代阶段跳过最慢的 N 张（--skip-slowest / --keep）==========
+# 背景：修一个问题要跑好几轮回归，每轮 33 分钟，其中 8 张图占 20 分钟（最慢单张
+#   352s）。迭代阶段先跳过这 8 张（实测降到 10.9 分钟），改动收敛后再跑全量。
+#
+#   排序**必须用实测耗时**：反例 `暖通（1~12F空调风管…）` 负载只有 4.0MB（按负载排
+#   不进前 12），单张却 352s 全图最慢 —— 按负载挑会恰好漏掉最该跳的那张。
+
+
+def _r129_files(*names):
+    return [os.path.join(os.sep, 'fake', n) for n in names]
+
+
+check('R129-A 按历史耗时降序挑：耗时长的先被跳过',
+      lambda: _rc.pick_slowest(_r129_files('a.dwg', 'b.dwg', 'c.dwg'), 2,
+                               timings={'a.dwg': 10.0, 'b.dwg': 300.0, 'c.dwg': 50.0})[0],
+      lambda got: [os.path.basename(p) for p in got] == ['b.dwg', 'c.dwg'])
+
+check('R129-B 有耗时记录的排在无记录之前（耗时组优先，不混排单位）',
+      lambda: _rc.pick_slowest(_r129_files('big.dwg', 'tiny.dwg'), 1,
+                               timings={'tiny.dwg': 5.0})[0],
+      lambda got: [os.path.basename(p) for p in got] == ['tiny.dwg'])
+
+check('R129-C keep 里的图永不跳过（本轮改动涉及时用 --keep 留住）',
+      lambda: _rc.pick_slowest(_r129_files('a.dwg', 'b.dwg', 'c.dwg'), 2,
+                               keep={'b.dwg'},
+                               timings={'a.dwg': 10.0, 'b.dwg': 300.0, 'c.dwg': 50.0})[0],
+      lambda got: [os.path.basename(p) for p in got] == ['c.dwg', 'a.dwg'])
+
+check('R129-D 留下的图保持原顺序（报告顺序不被打乱）',
+      lambda: _rc.pick_slowest(_r129_files('c.dwg', 'a.dwg', 'b.dwg'), 1,
+                               timings={'a.dwg': 10.0, 'b.dwg': 300.0, 'c.dwg': 50.0})[1],
+      lambda got: [os.path.basename(p) for p in got] == ['c.dwg', 'a.dwg'])
+
+check('R129-E n=0 时一张都不跳过（默认行为不变）',
+      lambda: _rc.pick_slowest(_r129_files('a.dwg', 'b.dwg'), 0,
+                               timings={'a.dwg': 9.0})[0],
+      lambda got: got == [])
+
+check('R129-F n 大于总数时全部跳过，不抛异常',
+      lambda: (lambda t: (len(t[0]), len(t[1])))(
+          _rc.pick_slowest(_r129_files('a.dwg', 'b.dwg'), 99, timings={'a.dwg': 9.0})),
+      lambda got: got == (2, 0))
+
+
+def _r129_tmp_json():
+    import tempfile as _tf
+    return os.path.join(_tf.mkdtemp(prefix='r129_'), 'timings.json')
+
+
+def _r129_roundtrip():
+    """在临时路径上验证 save/load 语义，不碰真实的 regress_timings.json。"""
+    old = _rc.TIMINGS_PATH
+    _rc.TIMINGS_PATH = _r129_tmp_json()
+    try:
+        first = _rc.load_timings()                     # 文件不存在 → 空表
+        _rc.save_timings({'a.dwg': 10.0, 'b.dwg': 5.0})
+        _rc.save_timings({'a.dwg': 3.0, 'c.dwg': 7.0})  # a 更小 → 不该覆盖
+        _rc.save_timings({'b.dwg': 8.0, 'bad': 'x'})    # b 更大 → 覆盖；bad 忽略
+        return first, _rc.load_timings()
+    finally:
+        _rc.TIMINGS_PATH = old
+
+
+_R129_IO = _r129_roundtrip()
+
+check('R129-G 耗时表文件不存在时返回空表（不影响回归主流程）',
+      lambda: _R129_IO[0],
+      lambda got: got == {})
+
+check('R129-H save_timings 取历史最大值（小值不覆盖大值，非法值忽略）',
+      lambda: _R129_IO[1],
+      lambda got: got == {'a.dwg': 10.0, 'b.dwg': 8.0, 'c.dwg': 7.0})
+
+check('R129-I 真实耗时表：覆盖全部校验图纸（每张都有耗时才能排准）',
+      lambda: (lambda tim, fs: (len(tim), len([p for p in fs
+                                              if os.path.basename(p) not in tim])))(
+          _rc.load_timings(), _rc.collect_files(_rc.DEFAULT_FOLDER))
+      if os.path.isdir(_rc.DEFAULT_FOLDER) else 'SKIP',
+      lambda got: got == 'SKIP' or (got[0] >= 113 and got[1] == 0))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

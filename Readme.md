@@ -240,6 +240,8 @@ python app.py
 ```
 python test_backend_rules.py      # 后端规则单测（358 项）
 python regress_check.py           # 全量回归（按负载分档并行 + DXF 缓存）
+python regress_check.py --skip-slowest 8  # 迭代阶段：跳过最慢 8 张（约 11 分钟）
+python regress_check.py --skip-slowest 8 --keep a.dwg,b.dwg  # 强制保留某几张
 python regress_check.py --serial  # 串行对照（排查用）
 python regress_check.py --workers 2   # 手动压并行度上限（机器忙时用）
 python regress_check.py --update  # 把当前结果写回基线（确认行为正确后使用）
@@ -255,6 +257,12 @@ node test_judge_logic.js          # 也可单独跑某一个（其余 test_*.js 
 > 每档的并行度 = 可用内存×0.75 ÷ 档内最重那张的峰值（峰值 ≈ 负载 × 0.8GB），上限 8。
 > 所以同一份图纸在不同机器/不同时刻跑，档位和路数可能不同——这是刻意的，因为
 > **单 worker 解析大图的峰值实测能到 5GB**，写死并行度在内存紧张的机器上会 OOM。
+>
+> **迭代阶段怎么跑（R129）**：日常改规则用 `--skip-slowest 8`，跳过最慢的 8 张
+> （占全量 33.2 分钟里的 20.3 分钟，实测降到 **10.9 分钟**）；排序依据是
+> `regress_timings.json` 里的实测耗时（每轮回归自动累积、取历史最大值），不是体积代理。
+> 跳过名单会逐条打印、汇总单独计数——**覆盖缩小必须可见**。改动收敛或发版前
+> 必须跑一次不带该参数的全量；若本轮改动涉及那 8 张里的某张，用 `--keep` 留住它。
 
 > `--update` 默认**不删除**「本次没跑到」的既有基线条目，只列出来提醒（这些多为
 > 图纸改名后的残留，删掉就等于让那张图退出回归覆盖）；确认要清理时加 `--prune`。
@@ -286,6 +294,7 @@ node test_judge_logic.js          # 也可单独跑某一个（其余 test_*.js 
 | `docs/CHANGELOG.md` | 逐轮优化记录 R1~R86（需求 / 根因 / 修法 / 验证 / 踩坑）+ 轮次索引 + 环境变量开关全清单 |
 | `regress_check.py` | 全量回归脚本（按负载分档并行 + DXF 缓存，`--serial` 串行、`--workers N` 压并行度上限、`--files` 冒烟、`--update` 补录基线、`--update --prune` 补录并清理未命中条目、`--folder` 指定目录、`--no-cache` 禁用转换缓存） |
 | `regression_baseline.json` | 回归基线（每张图的 frame_count / 尺寸 / 各布局分组） |
+| `regress_timings.json` | 每张图的**历史最慢耗时**（每轮回归自动累积），供 `--skip-slowest` 排序；删掉会退回按负载排序 |
 | `index.html` | 前端上传页面 |
 | `app.js` | 前端逻辑（调用 /upload 接口） |
 | `style.css` | 前端样式 |
