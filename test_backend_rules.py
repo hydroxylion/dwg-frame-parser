@@ -7517,4 +7517,176 @@ else:
     print('SKIP  R130 真实图用例（未找到 13#-bang.dwg）')
 
 
+# ============================ R131 ============================
+# R131：匿名包装块 + 块定义递归零文字 → 包装的是图形内容，不是图框
+#   现场（MC-P03~P04-A.dwg 识 3 实际 2，用户口径"实际只有 2 个图框，均在布局中，
+#   尺寸 1784×841、1189×841"）：真图框全在布局（块 `A0++`/`A0`，块定义递归各含
+#   80 处文字），模型空间底图里的风管匿名块 `*U59`（块定义 3000×2100 = 外框 +
+#   2850×1950 内框的双线画法，递归零文字、全 0 层）被两条"尺寸凑巧"通道喂饱：
+#     · 条件E 预放大模板：短边 2100 = 841×2.5 → A1@2.5 目标 2102.5×2973.4，
+#       实例 2100×3000 偏差 0.9% < 1% 容差 → via='E'；
+#     · R113 ⑨ 块内双线画法：2850×1950 = 95.0%×92.9% 于 3000×2100 → 孤证 1.0 分
+#       （≥ 阈值 0.5，且 via='E' 不在孤证复核的 via='C' 范围内）。
+#   判据：块名以 `*` 开头（CAD 软件自动生成的匿名包装块，用户无法这样命名）且
+#   块定义递归（深度≤6）无 TEXT/MTEXT/ATTDEF/ATTRIB —— 图框必有图名/图号/比例/
+#   日期，即必有文字或属性。两条必须同时成立，见 app.py 内 _scan_block_text_len
+#   上方注释。
+_R131_OFF = {'FRAME_PARSER_NO_ANON_BLOCK': '1'}
+
+
+def _r131_doc(_anon=True, _text=False, _bn=None, _far=False):
+    """模型空间 1 个 3000×2100 双线画法块 + 布局 2 张纸面图框（1784×841、1189×841）。
+
+    _far=True 时在模型空间再摆一个 40000×35000 的闭合矩形当 **rel 分母**：
+    `rel_area_ratio = 候选面积 / 本 layout 最大候选面积`（见 app.py 内 R79/R105
+    段），现场那张图的分母是 460204×756759 的机电总图底块，*U59 的 rel 只有
+    0.0018%；不加这个分母块时模型空间只有块自己，rel 恒为 100%。
+    该矩形自身也会被算成 1 个图框，断言里一并计入。
+    """
+    _d = ezdxf.new('R2010', setup=False)
+    for _n in ('tukuang', 'H-VT-DUCT-P'):
+        _d.layers.new(_n)
+    _bn = _bn or ('*U59' if _anon else 'DUCTBOX')
+    _b = _d.blocks.new(_bn)
+    _r126_rect(_b, 0, 0, 3000, 2100)
+    _r126_rect(_b, 75, 75, 2925, 2025)          # 95.0%×92.9% → R113 ⑨ 双线画法
+    if _text:
+        _b.add_text('风管', height=100, dxfattribs={'insert': (1000, 1000)})
+    _m = _d.modelspace()
+    _m.add_blockref(_bn, (0, 0), dxfattribs={'layer': 'H-VT-DUCT-P'})
+    if _far:
+        _m.add_lwpolyline([(100000, 0), (140000, 0), (140000, 35000),
+                           (100000, 35000)], close=True,
+                          dxfattribs={'layer': 'H-VT-DUCT-P'})
+    _lay = _d.layouts.new('M03')
+    for _nm, _w, _y in (('A0PP', 1784, 0), ('A0', 1189, -1000)):
+        _fb = _d.blocks.new(_nm)
+        _r126_rect(_fb, 0, 0, _w, 841, 'tukuang')
+        _r126_rect(_fb, 25, 20, _w - 50, 801, 'tukuang')
+        _fb.add_text(_nm, height=40,
+                     dxfattribs={'insert': (100, 100), 'layer': 'tukuang'})
+        _lay.add_blockref(_nm, (0, _y))
+    return _r126_bytes(_d)
+
+
+_R131_ANON = _r131_doc(_far=True)                  # 匿名 + 零文字 + rel 0.5% → 该剔
+_R131_ANON_TEXT = _r131_doc(_text=True, _far=True)
+_R131_NAMED = _r131_doc(_anon=False, _far=True)
+_R131_PAPER = _r131_doc(_bn='*Paper_Space0', _far=True)   # CAXA 布局块，不该剔
+_R131_ANON_DOM = _r131_doc()                       # 匿名但 rel 100%，不该剔
+
+_R131_BASE = {(40000, 35000): 1, (1784, 841): 1, (1189, 841): 1}      # 分母块 + 布局 2 页
+_R131_WITH_DUCT = {(40000, 35000): 1, (3000, 2100): 1,
+                   (1784, 841): 1, (1189, 841): 1}                    # 再加上风管块
+
+check('R131-① 合成：匿名块零文字（3000×2100，rel 0.5%）→ 被剔（只 3 框）',
+      lambda: _r122_census(_r121_parse(_R131_ANON)),
+      lambda got: got == _R131_BASE)
+
+check('R131-② 合成回退：关 ANON_BLOCK → 复现现场形态 4 框（多 3000×2100）',
+      lambda: _r122_census(_r121_parse(_R131_ANON, _R131_OFF)),
+      lambda got: got == _R131_WITH_DUCT)
+
+check('R131-③ 守卫：匿名块但块内有文字（风管标注）→ 两态都 4 框，不越界',
+      lambda: (_r122_census(_r121_parse(_R131_ANON_TEXT)),
+               _r122_census(_r121_parse(_R131_ANON_TEXT, _R131_OFF))),
+      lambda got: got == (_R131_WITH_DUCT, _R131_WITH_DUCT))
+
+check('R131-④ 守卫：具名块零文字（DUCTBOX）→ 两态都 4 框（判据须"匿名"前提）',
+      lambda: (_r122_census(_r121_parse(_R131_NAMED)),
+               _r122_census(_r121_parse(_R131_NAMED, _R131_OFF))),
+      lambda got: got == (_R131_WITH_DUCT, _R131_WITH_DUCT))
+
+# ⑤ 块名守卫：`*Paper_Space0` 是布局块（CAXA 导出的机械图把整张幅面包在里面，
+#    块内同样零文字），块名正则不认它 → 两态都保留。
+check('R131-⑤ 守卫：`*Paper_Space0` 布局块（CAXA 幅面块，零文字）→ 两态都 4 框',
+      lambda: (_r122_census(_r121_parse(_R131_PAPER)),
+               _r122_census(_r121_parse(_R131_PAPER, _R131_OFF))),
+      lambda got: got == (_R131_WITH_DUCT, _R131_WITH_DUCT))
+
+# ⑥ rel 守卫：匿名块但自己是本 layout 的主导框（rel 100%）→ 是"这张图的幅面"，
+#    不是零头小框 → 两态都保留。
+check('R131-⑥ 守卫：`*U59` 但 rel=100%（主导框）→ 两态都 3 框',
+      lambda: (_r122_census(_r121_parse(_R131_ANON_DOM)),
+               _r122_census(_r121_parse(_R131_ANON_DOM, _R131_OFF))),
+      lambda got: got == ({(3000, 2100): 1, (1784, 841): 1, (1189, 841): 1},
+                          {(3000, 2100): 1, (1784, 841): 1, (1189, 841): 1}))
+
+
+def _r131_run(_data, env=None, _name='r131.dxf'):
+    _saved = os.environ.get('FRAME_PARSER_NO_ANON_BLOCK')
+    if env:
+        os.environ['FRAME_PARSER_NO_ANON_BLOCK'] = env
+    else:
+        os.environ.pop('FRAME_PARSER_NO_ANON_BLOCK', None)
+    _old = sys.stdout
+    sys.stdout = open(os.devnull, 'w')
+    try:
+        return get_bounding_box_from_bytes(_data, _name, 'polyline', 'mm', 'smart')
+    finally:
+        sys.stdout.close()
+        sys.stdout = _old
+        if _saved is None:
+            os.environ.pop('FRAME_PARSER_NO_ANON_BLOCK', None)
+        else:
+            os.environ['FRAME_PARSER_NO_ANON_BLOCK'] = _saved
+
+
+# ---- 真实图端到端 ----
+_R131_FP = next((p for p in [
+    os.path.join(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）', 'MC-P03~P04-A.dwg'),
+] if os.path.exists(p)), None)
+
+if _R131_FP:
+    with open(_R131_FP, 'rb') as _f:
+        _r131_bin = _f.read()
+    _r131_name = os.path.basename(_R131_FP)
+
+    def _r131_real(env=None):
+        return _r131_run(_r131_bin, env=env, _name=_r131_name)
+
+    check('R131真实图: MC-P03~P04-A → 2 框（布局 1784×841 + 1189×841）',
+          lambda: _r122_census(_r131_real()),
+          lambda got: got == {(1784, 841): 1, (1189, 841): 1})
+
+    check('R131真实图回退: 关 ANON_BLOCK → 复现原 bug 3 框（多模型空间 3000×2100）',
+          lambda: _r122_census(_r131_real(env='1')),
+          lambda got: got == {(3000, 2100): 1, (1784, 841): 1, (1189, 841): 1})
+
+    # 正向守卫：R130 的目标图（真页套说明框，全在模型空间闭合多段线）不受影响
+    _R131_GUARD = next((p for p in [
+        os.path.join(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）', '13#-bang.dwg'),
+    ] if os.path.exists(p)), None)
+    if _R131_GUARD:
+        with open(_R131_GUARD, 'rb') as _f:
+            _r131_g_bin = _f.read()
+
+        check('R131守卫: 13#-bang（R130 目标图）仍 6 框，未受匿名块判据影响',
+              lambda: _r122_census(_r131_run(_r131_g_bin, _name='13#-bang.dwg')),
+              lambda got: got == {(105125, 59400): 1, (84100, 59400): 1,
+                                  (74300, 42000): 3, (59400, 42000): 1})
+    else:
+        print('SKIP  R131 守卫用例（未找到 13#-bang.dwg）')
+
+    # 反向守卫（本轮踩到过）：CAXA 电子图板导出的机械图把整张图纸幅面包在
+    #   `*Paper_Space0` 里，块内同样零文字、rel 98.88% —— 只按 `startswith('*')`
+    #   判会把它唯一图框 2378×1682 剔掉、整图变成「未检测到图框」。
+    _R131_CAXA = next((p for p in [
+        os.path.join(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）',
+                     '非圆减速器装配.dwg'),
+    ] if os.path.exists(p)), None)
+    if _R131_CAXA:
+        with open(_R131_CAXA, 'rb') as _f:
+            _r131_c_bin = _f.read()
+
+        check('R131守卫: 非圆减速器装配（CAXA `*Paper_Space0` 幅面块）仍 1 框 '
+              '2378×1682',
+              lambda: _r122_census(_r131_run(_r131_c_bin, _name='非圆减速器装配.dwg')),
+              lambda got: got == {(2378, 1682): 1})
+    else:
+        print('SKIP  R131 CAXA 守卫用例（未找到 非圆减速器装配.dwg）')
+else:
+    print('SKIP  R131 真实图用例（未找到 MC-P03~P04-A.dwg）')
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

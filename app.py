@@ -5655,6 +5655,66 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     return True
             return False
 
+        # ---------- R131：匿名包装块 + 块内零文字 = 图纸内容，不是图框 ----------
+        #   现场（MC-P03~P04-A.dwg 识 3 实际 2，用户口径"实际 2 个图框，均在布局
+        #   中，尺寸 1784×841、1189×841"）：真图框全在布局 `M03、M04`（块 `A0++`
+        #   1784×841 与 `A0` 1189×841，块定义递归各含 80 处文字），而模型空间底图
+        #   （460204×756759 的机电总图）里一个匿名块 `*U59` 被当成第 3 张图框。
+        #   该块：图层 `H-VT-DUCT-P`（风管层）、块定义 3000×2100 恰好是「外框
+        #   3000×2100 + 内框 2850×1950」的双线画法、块内 10 个嵌套 INSERT + 8 条
+        #   LINE（全在 0 层，递归零文字）、实例 rotation 273.03°（任意角）。
+        #   GB 图框不可能没有文字——图名/图号/比例/日期要么是 TEXT/MTEXT，要么是
+        #   属性 ATTDEF（属性块的定义里必有 ATTDEF，实例上有 ATTRIB）。所以「块
+        #   定义递归一处文字都没有」等价于「块里只有几何，没有图签」。
+        #   它这次过关靠的全是尺寸凑巧：
+        #     · 条件E 预放大模板：短边 2100 = 841×2.5 → A1@2.5 目标 2102.5×2973.4，
+        #       实例 2100×3000 偏差 0.9% 落在 1% 容差内 → via='E'；
+        #     · R113 ⑨ 块内双线画法自证：2850×1950 = 95.0%×92.9% 于 3000×2100，
+        #       与「图框外框 + 内缩内框」一模一样 → 孤证 score=1.0 不会被剔；
+        #     · 孤证复核只查 via='C'，E 通道天然豁免。
+        #   为什么两个条件必须同时成立：
+        #     · 只认「零文字」→ 会误伤把图签文字外挂单独插入的具名图框块；
+        #     · 只认「匿名块」→ 会误伤匿名块里包着真图框的图纸（那种情况由 R40/
+        #       R46 块内救援把内部矩形提成候选，不会丢页框；但具名块图框被错判
+        #       就没有兜底了）。
+        #   CAD 匿名块（块名 `*U`/`*D`/`*T`/`*A`…）本身是软件自动生成的包装容器
+        #   （组、复制粘贴、WBLOCK、动态块匿名实例），用户无法以 `*` 命名块，
+        #   所以「设计者建的图框模板」不可能是匿名块。本图模型空间 242 种 INSERT
+        #   里大半是 `*U`，都是包底图内容的。
+        #   ⚠️ **不能一条 `startswith('*')` 了事**：`*Paper_Space0` / `*Model_Space`
+        #   是布局块，CAXA 电子图板导出的机械图把整张图纸幅面包在 `*Paper_Space0`
+        #   里（`非圆减速器装配.dwg` 全图唯一图框 2378×1682，rel 98.88%，块内递归
+        #   同样零文字）。所以块名判据收紧为「`*` + 1~3 个大写字母 + 数字」——
+        #   AutoCAD 内部匿名块的命名式；带下划线/小写的布局块天然排除。再叠一道
+        #   rel < 50% 的护栏（与 R77「块参照主导框豁免」同数量级）：整张图纸幅面
+        #   的包装块在它所在 layout 里必然是主导框，不会是零头小框。
+        _ANON_BLOCK_RE = re.compile(r'^\*[A-Z]{1,3}\d+$')
+        _anon_text_cache = {}
+
+        def _scan_block_text_len(_bn, _depth, _seen):
+            """块定义（递归，深度≤6）内的文字类实体数。出异常按 1 处理=保守不否决。"""
+            if _bn not in doc.blocks:
+                return 0
+            try:
+                for _e in doc.blocks[_bn]:
+                    _t = _e.dxftype()
+                    if _t in ('TEXT', 'MTEXT', 'ATTDEF', 'ATTRIB'):
+                        return 1
+                    if _t == 'INSERT' and _depth < 6:
+                        _sub = _e.dxf.name
+                        if _sub in _seen:
+                            continue
+                        if _scan_block_text_len(_sub, _depth + 1, _seen | {_sub}):
+                            return 1
+            except Exception:
+                return 1
+            return 0
+
+        def _block_has_text(_bn):
+            if _bn not in _anon_text_cache:
+                _anon_text_cache[_bn] = _scan_block_text_len(_bn, 0, {_bn})
+            return _anon_text_cache[_bn]
+
         def is_frame_like(c):
             if not (FRAME_RATIO_MIN <= c['ratio'] <= FRAME_RATIO_MAX):
                 return False
@@ -5683,6 +5743,19 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #   574×400）。真实异常（巨块 8296%）远超 0.1%，不受影响。
             if c['area_ratio'] > 1.0 + 0.001:
                 return False
+            # R131：匿名包装块 + 块内递归零文字 → 包装的是内容几何，不是图框。
+            #   （判据依据与现场见 _ANON_BLOCK_RE / _scan_block_text_len 上方注释；
+            #   开关 FRAME_PARSER_NO_ANON_BLOCK=1 回退。）
+            if (c['type'] == '块参照插入'
+                    and os.environ.get('FRAME_PARSER_NO_ANON_BLOCK') != '1'):
+                _bn131 = c.get('block_name') or ''
+                if (_ANON_BLOCK_RE.match(_bn131)
+                        and c.get('rel_area_ratio', 0) < 0.5
+                        and not _block_has_text(_bn131)):
+                    log_debug(f"  [R131·匿名包装块] 块 {_bn131}（{c['width']:.0f}×{c['height']:.0f}，"
+                              f"图层 {c.get('insert_layer', '?')}，rel {c.get('rel_area_ratio', 0):.4%}）"
+                              f"块内递归零文字 → 包装的是图形内容，不是图框")
+                    return False
             # 长宽比约束（条件B/C 共用基础）：
             #   _near_sqrt2：长宽比接近 √2（±10%）——条件B 用，
             #     过滤家具/设备外框等小矩形（2000×5050 长宽比2.525 等）。
