@@ -296,6 +296,7 @@ node test_judge_logic.js          # 也可单独跑某一个（其余 test_*.js 
 | --- | --- |
 | `app.py` | Flask 后端服务：接收 DXF/DWG 上传，智能识别图框并返回宽×高（mm） |
 | `docs/CHANGELOG.md` | 逐轮优化记录 R1~R86（需求 / 根因 / 修法 / 验证 / 踩坑）+ 轮次索引 + 环境变量开关全清单 |
+| `docs/ARCHITECTURE.md` | **架构评估：app.py 该不该拆**（2026-11-03）。量化了 9506 行的构成（两个巨型函数占 73%、694/499 个局部变量）、为什么不能按三层架构拆、以及「纯搬运 / 提取内层函数 / 判据 pass 化」三批方案与**启动判据**。没有痛点之前不动手 |
 | `regress_check.py` | 全量回归脚本（按负载分档并行 + DXF 缓存，`--serial` 串行、`--workers N` 压并行度上限、`--files` 冒烟、`--update` 补录基线、`--update --prune` 补录并清理未命中条目、`--folder` 指定目录、`--no-cache` 禁用转换缓存） |
 | `regression_baseline.json` | 回归基线（每张图的 frame_count / 尺寸 / 各布局分组） |
 | `regress_timings.json` | 每张图的**历史最慢耗时**（每轮回归自动累积），供 `--skip-slowest` 排序；删掉会退回按负载排序 |
