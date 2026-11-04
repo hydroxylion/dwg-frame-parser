@@ -1980,6 +1980,19 @@ def block_world_bbox(doc, _name, _visited=None, _cache=None):
             if _t == 'LWPOLYLINE':
                 for _p in _ent.get_points('xy'):
                     _pts.append(_p)
+            elif _t == 'POLYLINE':
+                # R137：旧式二维多段线（heavy POLYLINE）。此前这里只认 LWPOLYLINE，
+                #   这类实体整块被静默跳过 → 块 bbox 算成 None 或明显偏小。
+                #   JQCG300-26侧式刮板取料机.dwg 的 A0 图框块 *U123 通体只有 2 条
+                #   闭合 POLYLINE（1189×841 外框 + 1149×801 内框，均 4 顶点矩形），
+                #   按 1:50 插入即 59450×42050 —— bbox 返回 None 使该实例在收集阶段
+                #   连预筛都没进（日志「共 77 个 | 剔除 76 个 | 入库 0 个」，少的那 1
+                #   个正是它），最终只捞出两个表格小格 1750×3300 当图框。
+                #   取 vertex.dxf.location（OCS）而非 WCS，与上面 LWPOLYLINE 分支
+                #   用 get_points('xy') 的口径保持一致。
+                for _v in _ent.vertices:
+                    _loc = _v.dxf.location
+                    _pts.append((_loc.x, _loc.y))
             elif _t == 'LINE':
                 _pts.append((_ent.dxf.start.x, _ent.dxf.start.y))
                 _pts.append((_ent.dxf.end.x, _ent.dxf.end.y))
@@ -2640,12 +2653,24 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                 if _t == 'LINE':
                     _s, _e = _ent.dxf.start, _ent.dxf.end
                     _mx = max(_mx, _math.hypot(_e.x - _s.x, _e.y - _s.y))
-                elif _t == 'LWPOLYLINE':
-                    _ps = _ent.get_points('xy')
+                elif _t in ('LWPOLYLINE', 'POLYLINE'):
+                    # R137：POLYLINE 一并计入「最长直边构件」。此前只认 LWPOLYLINE，
+                    #   图画成旧式多段线的图框块构件证据恒为 0 → 被 R26 辅判剔除
+                    #   （JQCG300-26侧式刮板取料机.dwg 的 A0 图框块 *U123：
+                    #   「最长直边构件 0mm < 块长边 1189mm × 30%」，明明两条闭合
+                    #   矩形的边就是 1189 和 841）。LWPOLYLINE 走原 get_points，
+                    #   POLYLINE 取 vertices，两者口径完全相同。
+                    if _t == 'LWPOLYLINE':
+                        _ps = _ent.get_points('xy')
+                        _pclosed = bool(_ent.closed)
+                    else:
+                        _ps = [(_v.dxf.location.x, _v.dxf.location.y)
+                               for _v in _ent.vertices]
+                        _pclosed = bool(is_polyline_closed(_ent))
                     if len(_ps) >= 2:
                         for _a, _b in zip(_ps, _ps[1:]):
                             _mx = max(_mx, _math.hypot(_b[0] - _a[0], _b[1] - _a[1]))
-                        if _ent.closed:
+                        if _pclosed:
                             _a, _b = _ps[-1], _ps[0]
                             _mx = max(_mx, _math.hypot(_b[0] - _a[0], _b[1] - _a[1]))
                         _xs2 = [p[0] for p in _ps]; _ys2 = [p[1] for p in _ps]
@@ -2701,7 +2726,15 @@ def collect_candidates_from_layout(layout, doc, layout_name):
         try:
             _pts5 = _ent.get_points('xyseb')
         except Exception:
-            return 0.0
+            # R137：旧式 POLYLINE 没有 get_points()，按同口径（x, y, 起宽, 终宽,
+            #   bulge）从 vertices 现场拼一份 —— 否则这块「矩形证据」对 POLYLINE
+            #   恒为 0，图画成 POLYLINE 的图框块会被判成「非图框内容块」剔掉。
+            try:
+                _pts5 = [(_v.dxf.location.x, _v.dxf.location.y,
+                          _v.dxf.start_width, _v.dxf.end_width, _v.dxf.bulge)
+                         for _v in _ent.vertices]
+            except Exception:
+                return 0.0
         if len(_pts5) < 3:
             return 0.0
         if any(abs(_p[4]) > 1e-9 for _p in _pts5):
@@ -2811,13 +2844,24 @@ def collect_candidates_from_layout(layout, doc, layout_name):
                         _h_lines.append((min(_s.y, _e.y), min(_s.x, _e.x), max(_s.x, _e.x)))
                     elif abs(_dx) <= _tol_p:
                         _v_lines.append((min(_s.x, _e.x), min(_s.y, _e.y), max(_s.y, _e.y)))
-                elif _t == 'LWPOLYLINE':
-                    _ps = _ent.get_points('xy')
+                elif _t in ('LWPOLYLINE', 'POLYLINE'):
+                    # R137：POLYLINE（旧式二维多段线）此前完全不在证据通道里 ——
+                    #   JQCG300-26侧式刮板取料机.dwg 的 A0 图框块 *U123 只有 2 条
+                    #   闭合 POLYLINE，证据恒为 0 → 被判「非图框内容块」剔除。
+                    #   LWPOLYLINE 仍走原来的 get_points('xy')（OCS，口径一字未动），
+                    #   POLYLINE 取 vertices 的 OCS 坐标；闭合判定统一走
+                    #   is_polyline_closed（对 LWPOLYLINE 等价于「closed 标志或
+                    #   首尾点重合」，无行为变化）。
+                    if _t == 'LWPOLYLINE':
+                        _ps = _ent.get_points('xy')
+                    else:
+                        _ps = [(_v.dxf.location.x, _v.dxf.location.y)
+                               for _v in _ent.vertices]
                     if len(_ps) < 3:
                         continue
                     _xs2 = [p[0] for p in _ps]; _ys2 = [p[1] for p in _ps]
                     # closed 标志，或首尾点重合（画框忘设 closed 标志的常见画法）
-                    _is_loop = bool(_ent.closed) or _math.hypot(
+                    _is_loop = bool(is_polyline_closed(_ent)) or _math.hypot(
                         _ps[-1][0] - _ps[0][0], _ps[-1][1] - _ps[0][1]) <= _tol_p * 2
                     if _is_loop:
                         if _rect_only:

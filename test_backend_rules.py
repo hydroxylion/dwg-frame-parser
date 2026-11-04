@@ -8174,4 +8174,88 @@ check('R136-④ 开关 FRAME_PARSER_NO_STRUCT_FAMILY=1 可回退到旧行为',
       lambda got: got == (1, [(42000, 29700)]))
 
 
+# ---------------------------------------------------------------------------
+# R137：旧式二维多段线（heavy POLYLINE）—— 图框画成 POLYLINE 时整条链路都得认
+#   报障：JQCG300-26侧式刮板取料机.dwg 识 2 实际 1，用户给出真框 59450×42050。
+#   程序却报了两个 1750×3300（图里两张表格的相邻小格）。
+#   真框是块 *U123：块定义里**只有 2 条闭合 POLYLINE**（1189×841 外框 = A0、
+#   1149×801 内框），按 1:50 插入 → 59450×42050，与 $EXTMIN/$EXTMAX 完全吻合。
+#   app.py 里有三处「内联类型分派」只写了 'LWPOLYLINE'，POLYLINE 整类被静默跳过：
+#     ① block_world_bbox      → 块 bbox 返回 None，实例连预筛都没进
+#                              （日志「共 77 个 | 剔除 76 个 | 入库 0 个」，少的就是它）
+#     ② _block_closed_frame_len → 闭合边框证据恒 0
+#     ③ _block_max_member_len   → 最长直边构件恒 0 → R26 辅判「碎线拼成」剔除
+#  三处叠加，真框从头到尾没进候选池，只剩表格小格顶上。
+#   注：顶层直接画的闭合 POLYLINE 一直能识别（collect_candidates 的
+#   `dxftype in ('LWPOLYLINE','POLYLINE')` 写全了），缺口只在**块内**。
+# ---------------------------------------------------------------------------
+def add_closed_polyline(layout, x, y, w, h, close=True, repeat_first=False):
+    """用旧式二维多段线（POLYLINE，DXF 里的 heavy polyline）画矩形。
+
+    刻意不用 add_lwpolyline —— 要复现的正是「图画成 POLYLINE」这一种画法。
+    repeat_first=True 复现老图常见做法：不设闭合标志，靠末点回到起点闭合。
+    """
+    _pts = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+    if repeat_first:
+        _pts.append((x, y))
+    return layout.add_polyline2d(_pts, close=close)
+
+
+def _build_r137_frame_doc(close=True, repeat_first=False):
+    """A0 图框块（外框 1189×841 + 内框 1149×801，两条 POLYLINE）×50 插入。"""
+    _doc = make_doc()
+    _b = _doc.blocks.new(name='FRAME_POLY')
+    add_closed_polyline(_b, -20, -20, 1189, 841, close=close, repeat_first=repeat_first)
+    add_closed_polyline(_b, 0, 0, 1149, 801, close=close, repeat_first=repeat_first)
+    _doc.modelspace().add_blockref('FRAME_POLY', (0, 0),
+                                  dxfattribs={'xscale': 50, 'yscale': 50})
+    _doc.layouts.new('布局1')
+    return to_bytes(_doc)
+
+
+def _r137_sizes(data):
+    _r = parse(data)
+    return (_r['frame_count'],
+            sorted((round(c['width']), round(c['height'])) for c in _r['candidates']))
+
+
+# R137-① 与报障图同为 A0×50。三处缺口任缺一处这条就会红：
+#   缺 ①→ 块 bbox=None，无候选；缺 ②→ 判「非图框内容块」；缺 ③→ 判「碎线拼成」。
+check('R137-① 图框块用两条闭合 POLYLINE 画（A0 1189×841 ×1:50）→ 59450×42050 必须识别',
+      lambda: _r137_sizes(_build_r137_frame_doc()),
+      lambda got: got == (1, [(59450, 42050)]))
+
+# R137-② 不设闭合标志、靠末点回到起点闭合的老画法。走的是 _block_closed_frame_len
+#   里 `hypot(last-first) <= tol*2` 那条补判，不是 POLYLINE 的 flags&1。
+check('R137-② POLYLINE 不设闭合标志（首尾顶点重合画法）同样识别',
+      lambda: _r137_sizes(_build_r137_frame_doc(close=False, repeat_first=True)),
+      lambda got: got == (1, [(59450, 42050)]))
+
+
+def _build_r137_lshape_doc():
+    """非矩形闭合 POLYLINE 大块 + 一张真图框并排。
+
+    L 形块外接 42000×29700，与真图框并排后 area_ratio 仍达 16.4%（> 条件A 的
+    15%）、短边 29700、ratio 1.414 —— 除了「不是矩形」这一点，其余条件全都够。
+    所以这条断言守的正是 R137 的另一半：把 POLYLINE 纳入通道时，
+    _closed_polyline_rect_len 的矩形度判据（面积比 ≥0.92 / 4 顶点斜放矩形）
+    必须照样生效，不能退化成「闭合 POLYLINE 一律放行」。
+    若哪天有人图省事跳过矩形度检查，这条会从 1 框变 2 框。
+    """
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    _msp.add_lwpolyline([(0, 0), (84100, 0), (84100, 59400), (0, 59400)], close=True)
+    _b = _doc.blocks.new(name='FRAME_LSHAPE')
+    _b.add_polyline2d([(0, 0), (42000, 0), (42000, 8000), (8000, 8000),
+                       (8000, 29700), (0, 29700)], close=True)
+    _msp.add_blockref('FRAME_LSHAPE', (86100, 0))
+    _doc.layouts.new('布局1')
+    return to_bytes(_doc)
+
+
+check('R137-③ 非矩形闭合 POLYLINE 大块（L 形，外接 42000×29700、ar 16.4%）仍不得当图框',
+      lambda: _r137_sizes(_build_r137_lshape_doc()),
+      lambda got: got == (1, [(84100, 59400)]))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
