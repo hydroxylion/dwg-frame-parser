@@ -7996,4 +7996,94 @@ check('R134-④b /upload 白名单字段未缩水（原有 5 个字段仍在）'
       lambda got: got is True)
 
 
+# ---- R135 用例：运输带全图.dwg 识 6 实际 7 —— 条件E 白名单补 15 ----
+# 现场：模型空间 7 张图框实为「同一个图框模板复制成 5 个独立块定义
+# （*U2/*U29/*U30/*U33/*U34，实体结构完全一致 54LINE+2LWPOLYLINE+25TEXT）、
+# 再按不同倍率插入」。7 张的倍率谱系 15/20/30/40/50/72/100：
+#   42000×29700 走条件A（ar 17.5%）、33600×23760 / 25200×17820 /
+#   21384×15120×2 走条件C（rel 64%/36%/25.9%）、4200×5940 走条件E（A4×20）。
+#   唯独 4455×3150 是「A 灭（ar 0.197%）、C 灭（rel 1.125%，分母是同图 42000×29700）、
+#   B/J/J2 不适用（块参照非 EXPLICIT_TYPES）、E 只差 15 不在白名单」→ 唯一漏检。
+# 关键：15 必须是**合法等比倍率**而非宽松化兜底——210×15=3150 与 297×15=4455
+# 同时精确命中，与白名单既有的 2.5/75/80 同性质；不命中白名单的倍率（如 13）
+# 必须继续被拒，否则条件E 就退化成"任何 A 系倍数都收"。
+def _build_r135_doc(k_total):
+    """构造「大图框 + 一个等效 A4×k 小图框」的模型空间。
+
+    小框按现场原样复刻：块定义 1485×1050（= A4 短边 210 × 5 / 长边 297 × 5，
+    **不是** A 系裸尺寸 → 走条件E 的「预放大模板」分支），实例再按 k_total/5 缩放。
+    k_total=15 → 实例 4455×3150（= 210×15 / 297×15，白名单命中）
+    k_total=13 → 实例 3861×2730（A 系等比，但 13 不在白名单）
+    两种情况的小框都离 A/C 通道很远（ar < 1%、rel ≈ 1%），唯一可走的是条件E，
+    因此这是一条"干净"的单通道探针——通过与否只由白名单决定。
+    """
+    doc = make_doc()
+    msp = doc.modelspace()
+    # [0] 大图框块：定义 42000×29700（短边 29700 ≥ 预筛 500、ratio 1.414），
+    #     靠条件A（占 layout 面积 ≥15%）稳过，充当 rel 分母。
+    _b0 = doc.blocks.new(name='FRAME_BIG')
+    add_closed_rect(_b0, 0, 0, 42000, 29700)
+    _b0.add_line((3000, 3000), (39000, 3000))          # 标题栏长边，保证构件证据
+    _b0.add_text('图名', height=500, dxfattribs={}).set_placement((3000, 5000))
+    msp.add_blockref('FRAME_BIG', (0, 0))
+    # [1] 小图框块：块定义 1485×1050 = A4 × 5，实例 ×(k_total/5)
+    _w0, _h0 = 1485.0, 1050.0
+    _k_ins = k_total / 5.0
+    _b1 = doc.blocks.new(name='FRAME_SMALL')
+    add_closed_rect(_b1, 0, 0, _w0, _h0)
+    _b1.add_line((100, 100), (_w0 - 100, 100))
+    _b1.add_text('详图', height=60, dxfattribs={}).set_placement((100, 200))
+    msp.add_blockref('FRAME_SMALL', (60000, 0),
+                     dxfattribs={'xscale': _k_ins, 'yscale': _k_ins})
+    doc.layouts.new('布局1')
+    return to_bytes(doc)
+
+
+_r135_ok = _build_r135_doc(15)
+_r135_bad = _build_r135_doc(13)
+
+check('R135-① A4×15（4455×3150）靠条件E 入选：运输带全图第 7 张框不再漏',
+      lambda: (lambda _r: (_r['frame_count'],
+                           sorted((c['width'], c['height']) for c in _r['candidates'])))(
+          parse(_r135_ok)),
+      lambda got: got == (2, [(4455, 3150), (42000, 29700)]))
+# 修这句话的来由：4455×3150 在修复前只差「15 ∉ COMMON_PLOT_SCALES」这一条，
+# 其余五通道均已判死；若哪天有人为了别的图把白名单改成"任意整数倍率"，
+# 或把 ratio 容差放大，这条会先红——它守的是条件E 的收窄边界，不是这张图本身。
+check('R135-② A 系 × 13（2730×3861）仍被拒：白名单是收窄判据，不是"任何倍数都收"',
+      lambda: (lambda _r: (_r['frame_count'],
+                           [c['width'] for c in _r['candidates']]))(parse(_r135_bad)),
+      lambda got: got == (1, [42000]))
+
+
+def _r135_py_scales():
+    """取 app.py 里条件E 用的 COMMON_PLOT_SCALES（它是函数内局部常量，不是模块级）。"""
+    import ast as _ast
+    _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app.py')
+    _src = open(_p, encoding='utf-8', newline='').read()
+    for _n in _ast.walk(_ast.parse(_src)):
+        if isinstance(_n, _ast.Assign):
+            for _t in _n.targets:
+                if isinstance(_t, _ast.Name) and _t.id == 'COMMON_PLOT_SCALES':
+                    return tuple(_ast.literal_eval(_n.value))
+    return ()
+
+
+def _r135_js_has_15():
+    """前端 const COMMON_PLOT_SCALES = [...] 里是否含 15。"""
+    import re as _re
+    _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app.js')
+    _src = open(_p, encoding='utf-8').read()
+    _m = _re.search(r'const COMMON_PLOT_SCALES = \[([^\]]*)\]', _src)
+    if not _m:
+        return False
+    return 15 in [float(_x) for _x in _m.group(1).split(',') if _x.strip()]
+
+
+check('R135-③ 前后端白名单同口径（都含 15，前端 app.js 不得落后于 app.py）',
+      lambda: (15 in _r135_py_scales(), _r135_js_has_15()),
+      lambda got: got == (True, True))
+
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
