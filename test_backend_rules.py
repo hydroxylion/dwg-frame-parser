@@ -8016,6 +8016,12 @@ def _build_r135_doc(k_total):
     k_total=13 → 实例 3861×2730（A 系等比，但 13 不在白名单）
     两种情况的小框都离 A/C 通道很远（ar < 1%、rel ≈ 1%），唯一可走的是条件E，
     因此这是一条"干净"的单通道探针——通过与否只由白名单决定。
+
+    ⚠ R136 之后必须让两个块的**实体结构签名不同**：R136「结构签名族传播」的语义是
+    「同一模板复制成多份、其中一份已确认是图框 → 整族放行」，它**不认倍率**。若大小框
+    同为 LWPOLYLINE1+LINE1+TEXT1，R136 会无条件把 3861×2730 放行，R135-② 就测不到
+    「白名单是收窄判据」这件事了（实测正是这么红的）。故给小框多加一条 LINE，使其签名
+    为 LINE2+LWPOLYLINE1+TEXT1 —— 本用例仍是条件E 的单通道探针。
     """
     doc = make_doc()
     msp = doc.modelspace()
@@ -8032,6 +8038,9 @@ def _build_r135_doc(k_total):
     _b1 = doc.blocks.new(name='FRAME_SMALL')
     add_closed_rect(_b1, 0, 0, _w0, _h0)
     _b1.add_line((100, 100), (_w0 - 100, 100))
+    # 第二条 LINE：让本块签名（LINE2+LWPOLYLINE1+TEXT1）与大框（LINE1+…）区分开，
+    # 隔断 R136 结构签名族传播（否则 3861×2730 会被整族放行，见上方 ⚠）
+    _b1.add_line((100, _h0 - 100), (_w0 - 100, _h0 - 100))
     _b1.add_text('详图', height=60, dxfattribs={}).set_placement((100, 200))
     msp.add_blockref('FRAME_SMALL', (60000, 0),
                      dxfattribs={'xscale': _k_ins, 'yscale': _k_ins})
@@ -8084,6 +8093,85 @@ check('R135-③ 前后端白名单同口径（都含 15，前端 app.js 不得�
       lambda: (15 in _r135_py_scales(), _r135_js_has_15()),
       lambda got: got == (True, True))
 
+
+# ---- R136 用例：输送线出图6.01.dwg 识 4 实际 5 —— 结构签名族传播 ----
+# 现场：5 个图框是同一模板被复制成多个**匿名块定义**、各自 1:1 插入，块定义尺寸
+#   就等于最终尺寸（41615×29435 / 5940×4200×2 / 2970×2100 / 2520×1782），块名互不
+#   相同 → 「同块名族传播」失效。2520×1782 逐条判死：A（area_ratio 0.05%）、
+#   C（rel 0.37%）、B（块参照非 EXPLICIT_TYPES）、E（= A3 短边 297×6，6 不在
+#   COMMON_PLOT_SCALES）。R136 新增「块定义结构签名族」通道：签名相同的块定义里
+#   已有种子通过既有判定 → 整族放行（要求全族 ratio≈√2、目标块内有文字、rel≥0.3%）。
+def _build_r136_doc(variant='ok'):
+    """同签名族传播的探针模型。
+
+    FRAME_BIG_SIG   42000×29700 —— 靠条件A（area_ratio 67% ≥ 15%）稳过，充当种子
+    FRAME_SMALL_SIG 2520×1782  —— A3×6，A/B/C/E/F 全灭，唯一活路是 R136 传播
+    variant:
+      'ok'        两块实体结构一致（LWPOLYLINE 1 + LINE 1 + TEXT 1）→ 应传播
+      'diffsig'   小框少一条 LINE → 签名不同 → 不传播
+      'oddratio'  再插一个同签名块 9000×4500（ratio 2.0，偏离 √2 达 41%，但在
+                  预筛 [1.05,5.5] 内会进 all_candidates）→ 全族放弃传播
+    """
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    _b0 = _doc.blocks.new(name='FRAME_BIG_SIG')
+    add_closed_rect(_b0, 0, 0, 42000, 29700)
+    _b0.add_line((3000, 3000), (39000, 3000))
+    _b0.add_text('图名', height=500, dxfattribs={}).set_placement((3000, 5000))
+    _msp.add_blockref('FRAME_BIG_SIG', (0, 0))
+
+    _b1 = _doc.blocks.new(name='FRAME_SMALL_SIG')
+    add_closed_rect(_b1, 0, 0, 2520, 1782)
+    if variant != 'diffsig':
+        _b1.add_line((100, 100), (2400, 100))
+    _b1.add_text('详图', height=50, dxfattribs={}).set_placement((100, 200))
+    _msp.add_blockref('FRAME_SMALL_SIG', (60000, 0))
+
+    if variant == 'oddratio':
+        _b2 = _doc.blocks.new(name='FRAME_ODD_SIG')
+        add_closed_rect(_b2, 0, 0, 9000, 4500)
+        _b2.add_line((100, 100), (8900, 100))
+        _b2.add_text('条', height=50, dxfattribs={}).set_placement((100, 200))
+        _msp.add_blockref('FRAME_ODD_SIG', (70000, 0))
+
+    _doc.layouts.new('布局1')
+    return to_bytes(_doc)
+
+
+def _r136_sizes(variant):
+    _r = parse(_build_r136_doc(variant))
+    return (_r['frame_count'], sorted((c['width'], c['height']) for c in _r['candidates']))
+
+
+check('R136-① 同模板复制成多块定义：2520×1782 靠结构签名族传播入选（输送线 4→5）',
+      lambda: _r136_sizes('ok'),
+      lambda got: got == (2, [(2520, 1782), (42000, 29700)]))
+# 守的是「族键是块定义的**实体结构**，不是块名也不是尺寸」：小框少一条 LINE 就换签名，
+# 传播必须失效。若哪天有人把族键放宽成「同图层」「同块颜色」之类，这条会先红。
+check('R136-② 块定义实体结构不同 → 不传播（块参照的签名必须逐类型计数完全一致）',
+      lambda: _r136_sizes('diffsig'),
+      lambda got: got == (1, [(42000, 29700)]))
+# 守的是「族内一致性是硬约束」：混进一个 ratio 偏离 √2 的实例即整族放弃。这条防的是
+# 装饰块/家具块与真图框块恰好同结构签名时被连带放行（保守取向，宁可漏收）。
+check('R136-③ 族内出现 ratio 异常实例（9000×4500，偏离 √2 达 41%）→ 整族放弃传播',
+      lambda: _r136_sizes('oddratio'),
+      lambda got: got == (1, [(42000, 29700)]))
+def _r136_sizes_env_off():
+    """带开关跑一次：R136 通道关闭后应回退旧行为（fc=1）。"""
+    _saved = os.environ.get('FRAME_PARSER_NO_STRUCT_FAMILY')
+    os.environ['FRAME_PARSER_NO_STRUCT_FAMILY'] = '1'
+    try:
+        return _r136_sizes('ok')
+    finally:
+        if _saved is None:
+            os.environ.pop('FRAME_PARSER_NO_STRUCT_FAMILY', None)
+        else:
+            os.environ['FRAME_PARSER_NO_STRUCT_FAMILY'] = _saved
+
+
+check('R136-④ 开关 FRAME_PARSER_NO_STRUCT_FAMILY=1 可回退到旧行为',
+      _r136_sizes_env_off,
+      lambda got: got == (1, [(42000, 29700)]))
 
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

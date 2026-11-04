@@ -6414,6 +6414,99 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             if _propagated_total:
                 pass_feature_count = len(frame_like)
 
+        # ---------- R136：结构签名族传播（同一模板被复制成多个块定义、各自 1:1 插入） ----------
+        # 场景（输送线出图6.01.dwg fc 4→5）：同一张图框模板被复制成多个**匿名块定义**
+        #   再各自 1:1 插入，块定义尺寸就等于最终图框尺寸，彼此尺寸毫不相干：
+        #   41615×29435 / 5940×4200×2 / 2970×2100 / 2520×1782。于是"同块名族传播"
+        #   完全失效——块名各不相同（*X160 / *X118 / *X125 / *X211）。
+        #   小尺寸实例逐条判死（2520×1782 实测）：
+        #     · A 灭：area_ratio 0.052% < 15%（分母被 41615×29435 独占）
+        #     · C 灭：rel 0.367% < REL_AREA_THRESHOLD 10%
+        #     · B 灭：块参照不在 EXPLICIT_TYPES
+        #     · E 灭：条件是"实例 = A 系短边 × 白名单倍率"，它是 A3 短边 297×6=1782、
+        #       长边 297×√2×6=2520.1 两边都精确命中，唯独 6 不在 COMMON_PLOT_SCALES
+        # ⚠ 白名单是**收窄**判据，补数字只能治标：本图 5 个框的倍率谱系是 35/20/20/10/6，
+        #   35 与 6 都不在白名单（35 只因面积最大靠条件A 侥幸过关）；上一轮 R135 运输带
+        #   全图缺 15、本轮缺 6 —— 连续两张漏在同一处，说明"出图比例白名单"对不按标准
+        #   比例排版的图（皮带输送机/非标设备出图）本质上不成立。故不再往白名单里塞数字，
+        #   改用与倍率无关的结构判据。
+        # 判据：族键从"块名"换成"块定义实体结构签名"（实体类型 → 数量元组）——
+        #   ① 族内已有 ≥1 个实例通过既有判定（种子）——"这个模板画的是图框"是被现有
+        #      判据证实过的事实，不是猜测；
+        #   ② 同签名族内 ≥2 个**不同块定义**（单个块定义的多实例已由同块名族传播负责，
+        #      本条只管"模板被复制成多块"的情形）；
+        #   ③ 族内**所有**候选实例 ratio 与 √2 偏差 ≤10%（与同块名族传播同口径）——
+        #      装饰块阵列/柱网/家具比例远离 √2，不会被连带放行；
+        #   ④ 目标块定义内递归有文字（图框必有标题栏/图名/图号，纯几何包装块不算）；
+        #   ⑤ 目标 instance 的 rel ≥ 0.3%（与条件F 的 rel 窗口下沿同口径）——挡掉
+        #      "碰巧同签名"的零星碎块。
+        # decoy 实测：本图签名 (LINE 62, LWPOLYLINE 23, MTEXT 34) 全图恰好 2 块
+        #   （*X160 种子 + *X211 目标），零多余命中；R135 运输带全图签名
+        #   (LINE 54, LWPOLYLINE 2, TEXT 25) 全图恰好 5 块、全部是真图框，其余同签名组
+        #   都是 2200×53 / 43×80 这类小内容块（短边过不了预筛）。开关
+        #   FRAME_PARSER_NO_STRUCT_FAMILY=1 可关（回退旧行为）。
+        if os.environ.get('FRAME_PARSER_NO_STRUCT_FAMILY') != '1' and frame_like:
+            _sig_cache = {}
+
+            def _block_struct_sig(_bn):
+                """块定义的直接实体结构签名（类型→数量）。出异常返回 None=不参与。"""
+                if _bn in _sig_cache:
+                    return _sig_cache[_bn]
+                _sig = None
+                if _bn and _bn in doc.blocks:
+                    try:
+                        _cnt = {}
+                        for _e in doc.blocks[_bn]:
+                            _t = _e.dxftype()
+                            _cnt[_t] = _cnt.get(_t, 0) + 1
+                        _sig = tuple(sorted(_cnt.items()))
+                    except Exception:
+                        _sig = None
+                _sig_cache[_bn] = _sig
+                return _sig
+
+            _seed_sigs = {}
+            for _c in frame_like:
+                if _c.get('type') != '块参照插入':
+                    continue
+                _s = _block_struct_sig(_c.get('block_name') or '')
+                if _s:
+                    _seed_sigs.setdefault(_s, _c.get('block_name'))
+            if _seed_sigs:
+                _sig_family = {}
+                for _c in all_candidates:
+                    if _c.get('type') != '块参照插入':
+                        continue
+                    _s = _block_struct_sig(_c.get('block_name') or '')
+                    if _s in _seed_sigs:
+                        _sig_family.setdefault(_s, []).append(_c)
+                _in_fl_sig = {id(c) for c in frame_like}
+                _sig_added = 0
+                for _s, _fam in _sig_family.items():
+                    _add = [c for c in _fam if id(c) not in _in_fl_sig]
+                    if not _add:
+                        continue
+                    if len({c.get('block_name') for c in _fam}) < 2:
+                        continue
+                    if not all(abs(c['ratio'] - _SQRT2_FAMILY) / _SQRT2_FAMILY <= 0.10
+                               for c in _fam):
+                        safe_log(f"  [结构签名族] 族 {_seed_sigs[_s]} 内存在比例异常实例 → 放弃传播")
+                        continue
+                    _ok = [c for c in _add
+                           if c.get('rel_area_ratio', 0) >= 0.003
+                           and _block_has_text(c.get('block_name') or '')]
+                    if not _ok:
+                        continue
+                    frame_like.extend(_ok)
+                    _in_fl_sig.update(id(c) for c in _ok)
+                    _sig_added += len(_ok)
+                    safe_log(f"  [R136·结构签名族传播] 种子 {_seed_sigs[_s]}（签名 "
+                             f"{len(_s)} 类实体）→ 同模板族的 "
+                             f"{', '.join(c.get('block_name') or '?' for c in _ok)} 一并放行："
+                             f"{', '.join('%.0fx%.0f' % (c['width'], c['height']) for c in _ok)}")
+                if _sig_added:
+                    pass_feature_count = len(frame_like)
+
         # ---------- 条件G：同模板缩放套图救援（2026-09-14，胜利公寓２ 4→6） ----------
         # 场景：6 个图框是同一模板按 1×/1:2.5/1:4/1:4.46 四种出图比例排版，长宽比
         #   全部精确等于 1.4257。特征判定是"逐实例"的，小尺寸实例必然吃亏：
