@@ -9288,8 +9288,35 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             ln = c.get('layout', '未知')
             frame_counts_by_layout[ln] = frame_counts_by_layout.get(ln, 0) + 1
 
+        # ---------- R134：真·无候选 → 「无图框」，不是「解析失败」 ----------
+        # 固定环01--05.dwg 实测：128 个实体（机械零件图）里没有任何标准图框，collect
+        #   只产出 1 个 180×239 直线矩形，又被后置「孤证复核」剔光，于是
+        #   all_candidates 为空。此时 smart 模式按设计抛「未检测到图框」让前端切
+        #   force_max 重试，而 force_max 的 max(all_candidates) 直接崩在空序列上，
+        #   被外层 except 包装成「解析失败: max() iterable argument is empty」。
+        # 语义上「0 个图框」是合法结果（前端 app.js 早就按 frame_count=0 渲染 "0"、
+        #   并明确要求"不能当无效值兜底成 1"），不该表现为失败。故返回显式无图框
+        #   载荷：width/height=0 表示"没有可报的尺寸"，no_frame=True 让前端把
+        #   「无图框」与「解析失败」分成两个不同状态。
+        # 不做兜底尺寸：这张图若拿 layout 总包围盒会得到 11963×11963，被前端幅面
+        #   判定当成本图尺寸，等于用一个新的错误掩盖旧错误。
+        def _no_frame_payload():
+            safe_log("ℹ️ 无图框：本次没有任何可用候选矩形（如实记为 0 框，不属于解析失败）")
+            return {
+                'width': 0,
+                'height': 0,
+                'frame_count': 0,
+                'frame_counts_by_layout': {},
+                'candidates': [],
+                'xref_warnings': xref_warnings,
+                'no_frame': True,
+            }
+
         # ---------- 强制最大矩形模式 ----------
         if mode == 'force_max':
+            if not all_candidates:
+                # 空候选时 force_max 无「最大」可取：这是 R134 修复的崩溃点
+                return _no_frame_payload()
             best = max(all_candidates, key=lambda c: c['area'])
             safe_log(f"✅ [强制最大矩形] 选中: {best['type']} | 布局: {best['layout']} | 尺寸: {best['width']:.2f} x {best['height']:.2f}")
             x1, y1, x2, y2 = best['bbox']
@@ -9313,6 +9340,12 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         valid_candidates = frame_like
 
         if not valid_candidates:
+            # R134：候选本身为空时，「未检测到图框」这条重试链没有意义——前端会切
+            #   force_max 重试，而 force_max 只能对同一个空列表取 max，非崩即同样
+            #   无框，等于白解析一遍整图（固定环01--05 单张就要几十秒）。这里直接
+            #   给出无图框结果，省掉一次整图重解析。
+            if not all_candidates:
+                return _no_frame_payload()
             safe_log("⚠️ 未检测到图框：所有候选矩形均不符合图框特征")
             safe_log("   - 候选矩形列表：")
             for i, c in enumerate(all_candidates, 1):
@@ -9467,6 +9500,10 @@ def upload_file():
             'frame_counts_by_layout': result.get('frame_counts_by_layout', {}),
             'candidates': result['candidates'],
             'xref_warnings': result.get('xref_warnings', []),
+            # R134：真·无图框标记（width/height 同时为 0）。前端据此把这一行
+            #   渲染成「无图框」而不是「解析失败」。此处是白名单字段，漏传会让
+            #   前端退回旧的"0 尺寸 = 无效"判断，故必须显式列出。
+            'no_frame': result.get('no_frame', False),
         })
     except Exception as e:
         # 写日志文件（不能用 print_exc，控制台写入本身可能失败）

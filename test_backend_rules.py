@@ -67,10 +67,23 @@ def parse(data, mode='smart'):
     return get_bounding_box_from_bytes(data, 'test.dxf', 'polyline', 'mm', mode)
 
 
+def is_zero_frame_result(r):
+    """R134：无图框载荷（0 框 + 无尺寸 + 显式 no_frame=True）。"""
+    return bool(r.get('no_frame')) and r.get('frame_count') == 0
+
+
 def expect_error_no_frame(data):
+    """断言「这张图不应产出一个图框」（即 0 框）。
+
+    R134 之前只有一种表现：smart 抛 RuntimeError('未检测到图框…') → 前端切
+      force_max 重试。
+    R134 之后多了一种合法表现：候选被剔到**一个不剩**时，直接返回无图框载荷
+      （width=height=0 / frame_count=0 / no_frame=True），省掉前端那次必然同样
+      失败的整图重解析（固定环01--05 单张就要几十秒）。
+    两种都表示"0 框"，断言认可两者；但**绝不接受"给出一个图框"**。
+    """
     try:
-        parse(data)
-        return False
+        return is_zero_frame_result(parse(data))
     except RuntimeError as e:
         return '未检测到图框' in str(e)
 
@@ -82,11 +95,7 @@ def expect_error_no_frame_env(data, **switches):
     for _k, _v in switches.items():
         _os.environ[_k] = _v
     try:
-        try:
-            parse(data)
-            return False
-        except RuntimeError as e:
-            return '未检测到图框' in str(e)
+        return expect_error_no_frame(data)   # 口径统一（含 R134 的无图框载荷）
     finally:
         for _k, _v in _saved.items():
             if _v is None:
@@ -1615,9 +1624,10 @@ def _run008_no_rescue():
 # ---- R43 开关守卫：NO_BLOCK_FRAME_RESCUE=1（回退：无救援、无让位）----
 # 巨块被拒不提升 → 顶层小框 10500×26406（ratio 2.515 出条件C 窗、rel 1.1%
 # ar 0.03%）全灭 → fc=0 抛错"未检测到图框"。
-check('R43开关 NO_BLOCK_FRAME_RESCUE=1: 无救援, 抛错未检测到图框',
+check('R43开关 NO_BLOCK_FRAME_RESCUE=1: 无救援 → 0 框（抛错或 R134 无图框载荷）',
       _run008_no_rescue,
-      lambda r: 'error' in r and '未检测到图框' in r['error'])
+      lambda r: (('error' in r and '未检测到图框' in r['error'])
+                 or is_zero_frame_result(r)))
 
 
 # ---- 用例 59：立面图.dwg 形态——双线框图纸孪生 + 空壳锚点，误剔真框须救回 ----
@@ -7891,6 +7901,99 @@ check('R133-③ 三个互不相交窗口各自识别，窗口索引不跨窗口�
                                (6000, 0, 1000, 700))),
       lambda got: got == {(0, 0, 1000, 700), (3000, 0, 4000, 700),
                           (6000, 0, 7000, 700)})
+
+
+# ---------- 第一百三十四轮：真·无图框（0 框）是合法结果，不是解析失败 ----------
+# 固定环01--05.dwg（128 实体的机械零件图）实测：collect 只产出 1 个 180×239 直线
+#   矩形，又被后置「孤证复核」剔光 → all_candidates 为空。旧代码此时：
+#     smart 抛「未检测到图框」→ 前端按设计切 force_max 重试
+#     force_max 的 max(all_candidates) 崩在空序列 → 外层 except 包成
+#     「解析失败: max() iterable argument is empty」
+#   于是"图纸本来没有图框"被显示成"程序解析失败"。R134 改成显式的无图框载荷：
+#   width=height=0 + frame_count=0 + no_frame=True。
+_R134_NF = os.path.join(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）',
+                        '固定环01--05.dwg')
+_R134_BIG0 = os.path.join(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）', '一层.dwg')
+
+
+def _r134_run(_data, _mode, _name='r134.dwg'):
+    _old = sys.stdout
+    _sink = open(os.devnull, 'w')
+    sys.stdout = _sink
+    try:
+        return get_bounding_box_from_bytes(_data, _name, 'polyline', 'mm', _mode)
+    finally:
+        sys.stdout = _old
+        _sink.close()
+
+
+def _r134_sig(_r):
+    return (_r['width'], _r['height'], _r['frame_count'],
+            bool(_r.get('no_frame')), len(_r['candidates']))
+
+
+if os.path.exists(_R134_NF):
+    with open(_R134_NF, 'rb') as _f:
+        _r134_nf_bin = _f.read()
+
+    check('R134-① 无候选时 smart / force_max 都不抛异常，均返回无图框载荷 '
+          '(0×0, 0 框, no_frame=True, 空候选)',
+          lambda: [_r134_sig(_r134_run(_r134_nf_bin, _m, '固定环01--05.dwg'))
+                   for _m in ('smart', 'force_max')],
+          lambda got: got == [(0, 0, 0, True, 0), (0, 0, 0, True, 0)])
+
+    check('R134-② 无图框载荷不带任何伪造尺寸（宽高必须严格为 0，不能拿 layout '
+          '总包围盒顶替——该图总包围盒是 11963×11963）',
+          lambda: _r134_sig(_r134_run(_r134_nf_bin, 'force_max', '固定环01--05.dwg'))[:2],
+          lambda got: got == (0, 0))
+else:
+    print('SKIP  R134-①② 无图框载荷（未找到 固定环01--05.dwg）')
+
+if os.path.exists(_R134_BIG0):
+    with open(_R134_BIG0, 'rb') as _f:
+        _r134_b0 = _f.read()
+
+    # 一层.dwg 是相反的样本：候选非空但都不过图框特征 → force_max 仍给尺寸 + 0 框。
+    # 这条边界必须保住：no_frame 只认"连候选都没有"，不能把"有候选但 0 框"也吞进去，
+    # 否则 一层.dwg 会从 7530×2730 变成 0×0，回归基线会整片漂。
+    check('R134-③ 有候选但 0 框（一层.dwg）不得判成无图框：force_max 仍返回 '
+          '7530×2730 且 no_frame 不为真',
+          lambda: (lambda _r: (_r['width'], _r['height'], _r['frame_count'],
+                               bool(_r.get('no_frame'))))(
+              _r134_run(_r134_b0, 'force_max', '一层.dwg')),
+          lambda got: got == (7530, 2730, 0, False))
+else:
+    print('SKIP  R134-③ 有候选但 0 框边界（未找到 一层.dwg）')
+
+
+def _r134_route_keys():
+    """取 /upload 路由 return 的 jsonify 字典键集合。
+
+    路由是按白名单逐字段拼响应的（不是把 result 直接抖出去），新增字段漏加就会
+    静默丢——R134 的 no_frame 差点就这样被吞掉。
+    """
+    import ast as _ast
+    _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app.py')
+    _src = open(_p, encoding='utf-8', newline='').read()
+    _keys = set()
+    for _n in _ast.walk(_ast.parse(_src)):
+        if isinstance(_n, _ast.FunctionDef) and _n.name == 'upload_file':
+            for _x in _ast.walk(_n):
+                if isinstance(_x, _ast.Dict):
+                    for _k in _x.keys:
+                        if isinstance(_k, _ast.Constant) and isinstance(_k.value, str):
+                            _keys.add(_k.value)
+    return _keys
+
+
+check('R134-④ /upload 白名单含 no_frame（漏加会让前端退回"0 尺寸=无效尺寸"）',
+      lambda: 'no_frame' in _r134_route_keys(),
+      lambda got: got is True)
+
+check('R134-④b /upload 白名单字段未缩水（原有 5 个字段仍在）',
+      lambda: {'width', 'height', 'unit', 'frame_count',
+               'frame_counts_by_layout', 'candidates'} <= _r134_route_keys(),
+      lambda got: got is True)
 
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

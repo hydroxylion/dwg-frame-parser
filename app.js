@@ -586,10 +586,22 @@ async function parseSingleFile(file) {
                 return false;
             }
             // 成功解析
+            const name = file.relativePath || file.name.replace(/\.[^.]+$/, '');
+            // R134：真·无图框是一条**成功**路径，先于 judgeSize 拦下来。
+            //   宽高给 0（表示"没有可报的尺寸"），由图框数列显示 "0"、尺寸列显示 "—"，
+            //   绝不拿 layout 总包围盒之类的量冒充图纸尺寸。
+            if (isNoFrameResult(data)) {
+                addRecord(0, 0, noFrameResult(), name, filePath, {
+                    frameCount: 0,
+                    candidates: [],
+                    layoutCounts: null,
+                    xrefWarnings: Array.isArray(data.xref_warnings) ? data.xref_warnings : [],
+                });
+                return true;
+            }
             const w = data.width;
             const h = data.height;
             const result = judgeSize(w, h);
-            const name = file.relativePath || file.name.replace(/\.[^.]+$/, '');
             // 多图框信息：后端返回本次检测到的全部图框候选 + 按布局分组的图框数
             const candidates = Array.isArray(data.candidates) ? data.candidates : [];
             // frame_count=0 是合法结果（真·无图框图纸，如 一层.dwg）：必须如实
@@ -864,6 +876,36 @@ function mixedSummary(rec) {
         .join(' · ');
 }
 
+// ---------- R134：真·无图框（0 框）是合法结果，不是解析失败 ----------
+// 背景：固定环01--05.dwg（机械零件图）里没有任何标准图框，后端 collect 出的唯一
+//   候选（180×239 直线矩形）又被后置剔除，all_candidates 为空。智能模式按设计抛
+//   「未检测到图框」让前端切 force_max 重试，而 force_max 的 max([]) 直接崩，外层
+//   except 包装成「解析失败: max() iterable argument is empty」——于是"0 框"被显示
+//   成了"解析失败"。本文件早已按 frame_count=0 是合法值来写（见解析成功分支的注释
+//   与图框数列的渲染），缺的只是后端这一路的状态与前端这条分支。
+// 语义约定：
+//   no_frame=true（或 0 尺寸 + 0 框的旧后端数据）→ 记为「无图框」，尺寸留 "—"；
+//   任何异常/traceback 仍然走 addFailedRecord → 「解析失败」，两者不能混。
+function isNoFrameResult(data) {
+    if (!data || typeof data !== 'object') return false;
+    if (data.no_frame === true) return true;
+    // 兜底：旧后端/历史数据没有 no_frame 字段时，用「0 框 + 无有效尺寸」判定。
+    // 注意不能用 || 判真假——width 可能就是 0，要显式比大小。
+    return data.frame_count === 0 && !(data.width > 0) && !(data.height > 0);
+}
+
+// 无图框记录的"判断结果"对象：结构与 judgeSize() 的返回值一致，供 addRecord 复用。
+// 不走 judgeSize(0,0)——那会得到 label='无效尺寸'/'非标准'，把"没图框"说成"尺寸错"。
+function noFrameResult() {
+    return {
+        type: 'no_frame',
+        label: '未检测到图框',
+        detail: '图中没有任何可作为图框的候选矩形（如实记为 0 个图框，非解析失败）',
+        confidenceFrame: 0,
+        confidenceScale: 0,
+    };
+}
+
 function addFailedRecord(name, errorMsg, path) {
     const timestamp = new Date().toLocaleString('zh-CN', { hour12: false });
     const record = {
@@ -1092,10 +1134,15 @@ function recordMatchesFilter(rec) {
     }
     // 图框数维度：独立于类型筛选（AND 交集）。未勾选任何图框数项时不做约束。
     // 无 frameCount 的记录（手动输入/解析失败/旧记录导入）不匹配任何图框数筛选。
+    // R134：0 框不能落进"单图框 (=1)"——`0 > 1` 为假会走 fc1 分支，把真·无图框
+    //   的图纸当成单图框（一层.dwg、固定环01--05 这类会被错误地留在"单图框"视图里）。
+    //   0 框归到 'fc0' 桶，而 UI 里不提供该筛选项 → 勾了任一图框数条件时自然被过滤掉。
     const fcActive = getActiveFcFilters();
     if (fcActive.length > 0) {
         if (typeof rec.frameCount !== 'number') return false;
-        if (!fcActive.includes(rec.frameCount > 1 ? 'fcmany' : 'fc1')) return false;
+        const _fcKey = rec.frameCount > 1 ? 'fcmany'
+            : (rec.frameCount === 1 ? 'fc1' : 'fc0');
+        if (!fcActive.includes(_fcKey)) return false;
     }
     return true;
 }
@@ -1195,6 +1242,9 @@ function renderRecords() {    const tbody = document.getElementById('recordBody'
         extended: { label: '非标加长', cls: 'extended' },
         fallback: { label: '近似匹配', cls: 'fallback' },
         nonstandard: { label: '非标准', cls: 'nonstandard' },
+        // R134：0 个图框（图纸里确实没有标准图框）——独立一档，不能并进"非标准"
+        // （那会让人以为尺寸判错了）更不能并进"解析失败"（那是程序出错）
+        no_frame: { label: '无图框', cls: 'noframe' },
         failed: { label: '解析失败', cls: 'failed' },
     };
 
@@ -1704,12 +1754,15 @@ function computeColWidths(headers, rows) {
 // 需求：批量识别完成后，统计当前文件夹中不同类型图纸的百分比——页面显示
 // 分布条，导出 Excel 时写入单独 sheet「图纸类型统计」。口径与主表一致：
 // getRecordType（isFailed→failed，否则 rec.type，缺省归 nonstandard）。
-// 固定 5 类顺序输出（含 0 数量类型），便于 sheet 结构稳定、行序可预期。
+// 固定 6 类顺序输出（含 0 数量类型），便于 sheet 结构稳定、行序可预期。
+// R134 新增 no_frame（0 个图框）：不并进 nonstandard/failed——它既不是"尺寸不标准"
+// 也不是"程序出错"，混进去会让类型分布失去意义。
 const TYPE_STATS_META = [
     { key: 'standard',    label: '标准',     color: '#0a623a' },
     { key: 'extended',    label: '非标加长', color: '#8f6318' },
     { key: 'fallback',    label: '近似匹配', color: '#1a4b8c' },
     { key: 'nonstandard', label: '非标准',   color: '#8f2f2f' },
+    { key: 'no_frame',    label: '无图框',   color: '#6b5b95' },
     { key: 'failed',      label: '解析失败', color: '#5e6f8d' },
 ];
 
@@ -1718,7 +1771,7 @@ function buildTypeStats(data) {
     const counts = {};
     data.forEach(rec => {
         const t = getRecordType(rec);
-        // 兜底：5 类之外的值（异常数据/历史遗留）归入 nonstandard，不静默丢数
+        // 兜底：6 类之外的值（异常数据/历史遗留）归入 nonstandard，不静默丢数
         const k = TYPE_STATS_META.some(m => m.key === t) ? t : 'nonstandard';
         counts[k] = (counts[k] || 0) + 1;
     });
@@ -1729,7 +1782,7 @@ function buildTypeStats(data) {
     });
 }
 
-// 导出 sheet 用数据表：表头 + 5 类型行 + 合计行（占比保留 1 位小数，数字型
+// 导出 sheet 用数据表：表头 + 6 类型行 + 合计行（占比保留 1 位小数，数字型
 // 便于 Excel 内二次计算；逐行四舍五入合计可能 99.9/100.1，合计行固定 100）
 function buildTypeStatsTable(data) {
     const total = data.length;
@@ -1787,11 +1840,14 @@ function buildExportSuffix() {
         extended: '非标加长',
         fallback: '近似匹配',
         nonstandard: '非标准',
+        no_frame: '无图框',
         failed: '解析失败',
         mixed_strong: '混合强',
         mixed_weak: '混合弱',
     };
-    const allTypes = ['standard', 'extended', 'fallback', 'nonstandard', 'failed', 'mixed_strong', 'mixed_weak'];
+    // 必须与 index.html 的 #filterCheckboxes 完全一致：少一项，"全部勾选"就永远
+    // 判不出来，导出文件名会从"全部"退化成把 7 个标签全串起来。
+    const allTypes = ['standard', 'extended', 'fallback', 'nonstandard', 'no_frame', 'failed', 'mixed_strong', 'mixed_weak'];
     const active = getActiveFilters();
     return (active.length === allTypes.length || active.length === 0)
         ? '全部'
@@ -2004,6 +2060,10 @@ document.getElementById('importFileInput').addEventListener('change', function(e
             const w = parseInt(cell(r, iW)) || 0;
             const h = parseInt(cell(r, iH)) || 0;
             const type = cell(r, iType) || 'nonstandard';
+            // R134：导出的「类型」列对 0 框图纸写的是 no_frame（导出走 getRecordType），
+            // 中文表头也可能是手填的「无图框」。导回来必须还原同一状态，否则这一行
+            // 会因为 宽/高 为空被判成 isFailed，变成"解析失败"——来回一趟数据就坏了。
+            const isNoFrame = (type === 'no_frame' || type === '无图框');
             const actualResult = cell(r, iRes) || '';
             const frameConf = cell(r, iFc);
             const scaleConf = cell(r, iSc);
@@ -2013,14 +2073,17 @@ document.getElementById('importFileInput').addEventListener('change', function(e
             if (matchRaw === '是') match = 'yes';
             else if (matchRaw === '否') match = 'no';
             const note = cell(r, iNote);
-            const frameCount = parseInt(cell(r, iCnt)) || 1;
-            const isFailed = (w <= 0 || h <= 0) || type === 'failed' || actualResult.includes('解析失败');
+            // 0 是合法图框数，不能再用 `|| 1` 吞掉（缺列时 parseInt('')=NaN 才兜底为 1）
+            const _fcRaw = parseInt(cell(r, iCnt));
+            const frameCount = Number.isNaN(_fcRaw) ? 1 : _fcRaw;
+            const isFailed = !isNoFrame
+                && ((w <= 0 || h <= 0) || type === 'failed' || actualResult.includes('解析失败'));
             const record = {
                 id: ++recordIdCounter,
                 name: name,
                 w: (w > 0) ? w : null,
                 h: (h > 0) ? h : null,
-                type: isFailed ? 'failed' : (type || 'nonstandard'),
+                type: isFailed ? 'failed' : (isNoFrame ? 'no_frame' : (type || 'nonstandard')),
                 actualResult: actualResult || '（空）',
                 frameConf: frameConf,
                 scaleConf: scaleConf,

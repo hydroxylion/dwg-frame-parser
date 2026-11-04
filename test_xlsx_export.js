@@ -216,7 +216,7 @@ const mix = [
     { isFailed: true }, { isFailed: true },
 ];
 const st = buildTypeStats(mix);
-check('类型数固定 5 类', st.length, 5);
+check('类型数固定 6 类', st.length, 6);
 check('顺序稳定（standard 在首）', st[0].key, 'standard');
 check('standard 计数 4', st.find(s => s.key === 'standard').count, 4);
 check('extended 计数 2', st.find(s => s.key === 'extended').count, 2);
@@ -224,6 +224,14 @@ check('fallback 计数 1', st.find(s => s.key === 'fallback').count, 1);
 check('nonstandard 计数 1', st.find(s => s.key === 'nonstandard').count, 1);
 check('isFailed → failed 计数 2', st.find(s => s.key === 'failed').count, 2);
 check('standard 百分比 40', st.find(s => s.key === 'standard').pct, 40);
+// R134：「无图框」（0 框）是独立一档，既不能并进 nonstandard（会被读成"尺寸判错"），
+//   也不能并进 failed（会被读成"程序出错"）。未出现时也保留该行，保证 sheet 结构稳定。
+check('no_frame 未出现时计数仍为 0（档位保留）',
+    st.find(s => s.key === 'no_frame').count, 0);
+const stNoFrame = buildTypeStats([{ type: 'no_frame' }, { type: 'no_frame' }, { type: 'unknown_x' }]);
+check('no_frame 独立计数 2，未被并进 nonstandard',
+    [stNoFrame.find(s => s.key === 'no_frame').count,
+     stNoFrame.find(s => s.key === 'nonstandard').count], [2, 1]);
 check('failed 百分比 20', st.find(s => s.key === 'failed').pct, 20);
 check('百分比均为数字（非字符串）', st.every(s => typeof s.pct === 'number'), true);
 
@@ -236,7 +244,7 @@ check('未知类型缺省归 nonstandard（与主表口径一致）',
 
 const tbl = buildTypeStatsTable(mix);
 check('sheet 表头', tbl[0], ['图纸类型', '数量(张)', '占比(%)']);
-check('行数 = 表头 + 5 类型 + 合计', tbl.length, 7);
+check('行数 = 表头 + 6 类型 + 合计', tbl.length, 8);
 check('合计行数量 = 10', tbl[tbl.length - 1][1], 10);
 check('合计行占比 = 100', tbl[tbl.length - 1][2], 100);
 check('逐行占比数字型', tbl.slice(1).every(r => typeof r[2] === 'number'), true);
@@ -252,7 +260,7 @@ wsStats44['!cols'] = [{ wch: 12 }, { wch: 10 }, { wch: 10 }];
 XLSX.utils.book_append_sheet(wbR44, wsStats44, '图纸类型统计');
 check('工作簿含 2 个 sheet', wbR44.SheetNames, ['图框检测记录', '图纸类型统计']);
 const statRows = XLSX.utils.sheet_to_json(wbR44.Sheets['图纸类型统计']);
-check('统计 sheet 读回行数 6（5 类型 + 合计）', statRows.length, 6);
+check('统计 sheet 读回行数 7（6 类型 + 合计）', statRows.length, 7);
 check('统计 sheet 读回合计占比 100',
     statRows[statRows.length - 1]['占比(%)'], 100);
 

@@ -501,6 +501,7 @@
         .legend-item .dot.ext { background: #b47d1f; }
         .legend-item .dot.fallback { background: #1a4b8c; }
         .legend-item .dot.non { background: #b13e3e; }
+        .legend-item .dot.noframe { background: #6b5b95; }
         .legend-item .dot.failed { background: #8a9bb5; }
         /* ===== 记录表格 ===== */
         .record-section {
@@ -658,6 +659,9 @@
         .type-tag.extended { background: #fdf0d5; color: #8f6318; }
         .type-tag.fallback { background: #dde7f6; color: #1a4b8c; }
         .type-tag.nonstandard { background: #fde8e8; color: #8f2f2f; }
+        /* R134：无图框（0 框，有效结果）——中性紫灰，刻意区别于红系"非标准"与
+           蓝灰系"解析失败"，一眼能看出"不是判错、也不是程序出错" */
+        .type-tag.noframe { background: #ece8f5; color: #6b5b95; }
         .type-tag.failed { background: #eef2f7; color: #5e6f8d; }
         .type-tag.mixed {
             margin-left: 4px;
