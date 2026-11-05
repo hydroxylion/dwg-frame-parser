@@ -8504,4 +8504,112 @@ check('R140-③ 门槛设为 0 后 R140-② 又变回 2 框（证明是版面门
       lambda got: got == (2, [(1530, 2180), (1530, 2180)]))
 
 
+
+# ============================================================================
+# R141：A20125340S-1.dwg 识 12 实际 17
+#   用户报障：程序 12 框，实际 17 —— 2100×1485×5 / 630×446×6 / 420×594×1 /
+#   1781×1260×4 / 2375×1680×1。缺的 5 个框几何全都在（外边框 1782.00×1260.00
+#   ×4 与 2376.00×1680.00×1），但踩了两道判据：
+#     ① P1 四角相接要求 0.5mm，而这 5 个框的**左下角**横线止于 x0+2、竖线止于
+#        y0+2 —— 各短 2mm 绕开角点 → 矩形根本不成立（连候选都没有）；
+#     ② 外边框画在 Defpoints（不打印层），R119 一律否决。
+#   两条都要补，缺一个就还是 0 框。
+# ============================================================================
+
+def _r141_board(msp, size=3500.0):
+    """撑出一个 size×size 的**正方形**版面（两条平行长横线 + 一条够不着它们的
+    短竖线，三者两两配不出矩形）。
+
+    为什么必须撑版面：不走 P1 的「全实体包围盒」兜底候选会顶着用例里的框。
+    这里让包围盒是 1:1 —— ratio 1.0 过不了 FRAME_RATIO_MIN(1.05)，兜底候选
+    自动出局；同时版面 3500² = 12.25M，用例框 2.245M 占 18% ≥ 15%（条件A）。
+    这是 R140 用例踩过同一个坑后总结的写法（见 _build_r140_dim_frame 注释）。
+    """
+    msp.add_line((0.0, 0.0), (size, 0.0))
+    msp.add_line((0.0, size), (size, size))
+    msp.add_line((0.0, size * 0.42), (0.0, size * 0.58))
+
+
+def _build_r141_gap_frame(w=1782.0, h=1260.0, gap=2.0, layer=None):
+    """复现报障图的框：四边都在、都精确共线，只有左下角两端各短 gap。"""
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    _attr = {'layer': layer} if layer else {}
+    _x0, _y0 = 1000.0, 1000.0
+    _x1, _y1 = _x0 + w, _y0 + h
+    _msp.add_line((_x0 + gap, _y0), (_x1, _y0), dxfattribs=_attr)    # 下边：左端短 gap
+    _msp.add_line((_x0, _y1), (_x1, _y1), dxfattribs=_attr)          # 上边：完整
+    _msp.add_line((_x0, _y0 + gap), (_x0, _y1), dxfattribs=_attr)    # 左边：下端短 gap
+    _msp.add_line((_x1, _y0), (_x1, _y1), dxfattribs=_attr)          # 右边：完整
+    _r141_board(_msp)
+    _doc.layouts.new('布局1')
+    return to_bytes(_doc)
+
+
+def _build_r141_noplot_doc():
+    """外边框是**直线矩形**画在不打印层 Defpoints；版面里再放一个同层
+    **闭合多段线**矩形作对照（R119 必须继续剔除它）。"""
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    _x0, _y0 = 1000.0, 1000.0
+    _x1, _y1 = _x0 + 1782.0, _y0 + 1260.0
+    _r141_board(_msp)          # 版面线在 0 层（可打印），R119 的 layout 护栏才成立
+    # 对照组：不打印层上的闭合多段线矩形（范围线形态，R119 的原始目标）
+    add_closed_rect(_msp, 1500.0, 2600.0, 1189.0, 841.0, layer='Defpoints')
+    # 报障图那种「外边框逐笔画成 LINE」的写法（四条边各有完整线）
+    for _seg in (((_x0, _y0), (_x1, _y0)), ((_x0, _y1), (_x1, _y1)),
+                 ((_x0, _y0), (_x0, _y1)), ((_x1, _y0), (_x1, _y1))):
+        _msp.add_line(_seg[0], _seg[1], dxfattribs={'layer': 'Defpoints'})
+    _doc.layouts.new('布局1')
+    return to_bytes(_doc)
+
+
+def _r141_sizes(data):
+    _r = parse(data)
+    return (_r['frame_count'],
+            sorted((round(c['width']), round(c['height'])) for c in _r['candidates']))
+
+
+def _r141_run_with_env(data, **switches):
+    """带环境开关跑一次（用后恢复），用于钉死因果。"""
+    import os as _os
+    _saved = {k: _os.environ.get(k) for k in switches}
+    for _k, _v in switches.items():
+        _os.environ[_k] = _v
+    try:
+        return _r141_sizes(data)
+    finally:
+        for _k, _v in _saved.items():
+            if _v is None:
+                _os.environ.pop(_k, None)
+            else:
+                _os.environ[_k] = _v
+
+
+# R141-① 角点各短 2mm 的 1782×1260 页框必须识别出来（原判据 0.5mm 不够用）。
+check('R141-① 左下角横/竖各短 2mm 的 1782×1260 页框必须识别为 1 框',
+      lambda: _r141_sizes(_build_r141_gap_frame()),
+      lambda got: got == (1, [(1782, 1260)]))
+
+# R141-② 因果钉死：角点松弛量设 0（回到 R140 的 0.5mm 口径）→ R141-① 认不出。
+check('R141-② 角点松弛量设 0 后 R141-① 认不出来（证明是这条在起作用）',
+      lambda: expect_error_no_frame_env(
+          _build_r141_gap_frame(), FRAME_PARSER_P1_CORNER_SLACK='0'),
+      lambda got: got is True)
+
+# R141-③ 守卫：缺口放大到 5mm（超过 3mm 松弛量）必须仍然认不出 ——
+#   证明放开的是"毫米级接缝"，不是"只要有四条边就算"。
+check('R141-③ 左下角缺 5mm（超过 3mm 松弛量）仍不得当图框',
+      lambda: expect_error_no_frame(_build_r141_gap_frame(gap=5.0)),
+      lambda got: got is True)
+
+# R141-④ 守卫：不打印层(plot=0)上的**直线矩形**必须照样识别。
+#   报障图 5 个框的外边框就画在 Defpoints（内边框在 0 层）。此判据今天靠的是
+#   「直线矩形候选没有 insert_layer 字段 → R119 条件恒假」这个实现细节；将来
+#   谁给它补上字段、让 R119 开始生效，这条会立刻报警（同图同层闭合多段线仍须剔除）。
+check('R141-④ 不打印层 Defpoints 上的直线矩形仍须识别（1 框 1782×1260）',
+      lambda: _r141_sizes(_build_r141_noplot_doc()),
+      lambda got: got == (1, [(1782, 1260)]))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

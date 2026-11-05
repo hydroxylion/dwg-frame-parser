@@ -702,6 +702,16 @@ def _estimate_global_rotation(entities, _blocks=None):
 #   3) 有效性过滤：短边 ≥ MIN_LINE_RECT_SIDE，过滤家具/表格/标题栏等小矩形
 LINE_CLUSTER_EPS = 0.5            # 近似共线容差（图形单位，mm 图纸即 0.5mm）
 LINE_CLUSTER_MAX_FOR_ALL_PAIRS = 16  # 每个方向聚类数不超过该值时才做全配对
+# R141：P1「四角相接」松弛量（图形单位，mm）。容差只用在这个语义上——
+#   「这条边线是否延伸到与邻边相交的那个角」，不用于判断两线是否共线
+#   （共线仍用 LINE_CLUSTER_EPS=0.5）。开关 FRAME_PARSER_P1_CORNER_SLACK。
+#   动机（A20125340S-1.dwg 识 12 实际 17）：5 个框的四条边都齐、都精确共线，
+#   但每个框的**左下角**两端各短 2mm（横线止于 x+2、竖线止于 y+2，恰好绕开
+#   那个角），0.5mm 容差判"没接上" → 整框不成立；下游 is_frame_like 本来
+#   必过（ratio 1.4143、rel 0.72）。2mm 相对 1782mm 边长是 0.11%，与
+#   手绘/复制粘贴边框的正常误差同量级。取 3.0 而非 2.0：本图缺口恰为 2.0mm，
+#   贴边取值会让"改一个浮点末位就复现"的脆弱判据上线。
+P1_CORNER_SLACK = 3.0
 MIN_LINE_RECT_SIDE = 100          # 直线矩形最小短边（图形单位）
 MAX_LINE_RECT_CANDIDATES = 5000   # 直线矩形候选数上限，防止异常图纸拖垮解析。
                                   # 坐标包含遍历在预算内处理的窗口远多于旧 gap 扫描，
@@ -1004,6 +1014,28 @@ def detect_rectangles_from_lines(entity_list, rot=None):
     from array import array as _array
     import bisect as _bisect
     PAIR_RATIO_BOUND = 8.0
+    # R141：角点相接松弛量（见模块级 P1_CORNER_SLACK 注释）。在函数内读取，
+    #   让单测能用环境变量翻转、把因果钉死（同 COND_D_RATIO_TOL / R140 面板门槛口径）。
+    _p1_slack = P1_CORNER_SLACK
+    try:
+        if os.environ.get('FRAME_PARSER_P1_CORNER_SLACK'):
+            _p1_slack = float(os.environ['FRAME_PARSER_P1_CORNER_SLACK'])
+    except ValueError:
+        pass
+    if _p1_slack < 0:
+        _p1_slack = 0.0
+    # 窗口检索用的外扩量：既要覆盖原有的共线容差，也要覆盖新的角点松弛
+    _sl_win = max(LINE_CLUSTER_EPS, _p1_slack)
+
+    def _shrink(lo, hi):
+        """把「必须被覆盖」的区间两端各收 _p1_slack，即允许端点各差一点不接到角上。"""
+        _a = lo + _p1_slack
+        _b = hi - _p1_slack
+        if _b < _a:
+            _m = (lo + hi) * 0.5
+            return _m, _m
+        return _a, _b
+
     # R38 P1 加速索引：按 coord 排序 + bisect 粗筛窗口，替代全量线性扫描。
     # 窗口在 ±eps 基础上外扩 1e-6mm 只做粗筛，窗口内逐条用原条件
     # （abs(c-coord)<=eps + 覆盖判断）精判——命中集合与线性扫描完全等价。
@@ -1018,7 +1050,7 @@ def detect_rectangles_from_lines(entity_list, rot=None):
         for _k in range(_i, _j):
             _c, _l, _h = h_sorted[_k]
             if (abs(_c - coord) <= LINE_CLUSTER_EPS
-                    and _l <= lo + LINE_CLUSTER_EPS and _h >= hi - LINE_CLUSTER_EPS):
+                    and _l <= lo + _p1_slack and _h >= hi - _p1_slack):
                 return True
         return False
 
@@ -1028,7 +1060,7 @@ def detect_rectangles_from_lines(entity_list, rot=None):
         for _k in range(_i, _j):
             _c, _l, _h = v_sorted[_k]
             if (abs(_c - coord) <= LINE_CLUSTER_EPS
-                    and _l <= lo + LINE_CLUSTER_EPS and _h >= hi - LINE_CLUSTER_EPS):
+                    and _l <= lo + _p1_slack and _h >= hi - _p1_slack):
                 return True
         return False
 
@@ -1057,18 +1089,20 @@ def detect_rectangles_from_lines(entity_list, rot=None):
     def _h_side_merged(coord, lo, hi):
         _i = _bisect.bisect_left(_h_cs_clusters, coord - LINE_CLUSTER_EPS - 1e-6)
         _j = _bisect.bisect_right(_h_cs_clusters, coord + LINE_CLUSTER_EPS + 1e-6)
+        _clo, _chi = _shrink(lo, hi)
         for _k in range(_i, _j):
             if abs(_h_cs_clusters[_k] - coord) <= LINE_CLUSTER_EPS:
-                if _coverage_contains(h_clusters[_k][1], lo, hi):
+                if _coverage_contains(h_clusters[_k][1], _clo, _chi):
                     return True
         return False
 
     def _v_side_merged(coord, lo, hi):
         _i = _bisect.bisect_left(_v_cs_clusters, coord - LINE_CLUSTER_EPS - 1e-6)
         _j = _bisect.bisect_right(_v_cs_clusters, coord + LINE_CLUSTER_EPS + 1e-6)
+        _clo, _chi = _shrink(lo, hi)
         for _k in range(_i, _j):
             if abs(_v_cs_clusters[_k] - coord) <= LINE_CLUSTER_EPS:
-                if _coverage_contains(v_clusters[_k][1], lo, hi):
+                if _coverage_contains(v_clusters[_k][1], _clo, _chi):
                     return True
         return False
 
@@ -1213,7 +1247,7 @@ def detect_rectangles_from_lines(entity_list, rot=None):
             _win_cache[_k] = 1
             return None
         # ---- 建索引 ----
-        _lo_i = _bisect.bisect_left(v_xas, xLo - LINE_CLUSTER_EPS)
+        _lo_i = _bisect.bisect_left(v_xas, xLo - _sl_win)
         _hi_i = _bisect.bisect_right(v_xas, _xhi)
         _tmp = []
         for _vi in range(_lo_i, _hi_i):
@@ -1238,15 +1272,17 @@ def detect_rectangles_from_lines(entity_list, rot=None):
             continue  # 矩形高 < 短边下限：任何组合短边必 < 下限，整层跳过
         _g_lo = max(MIN_LINE_RECT_SIDE, _H / PAIR_RATIO_BOUND)
         _g_hi = _H * PAIR_RATIO_BOUND
-        _hcov = _H - 2.0
+        # R141：竖对覆盖下限同步放宽（原 2.0 是给浮点/聚类尾差留的绝对松弛，
+        #   现按角点松弛量两端各让 _p1_slack）
+        _hcov = _H - 2.0 * max(_p1_slack, 1.0)
         for (xLo, xHi) in h_common:
             if xHi - xLo < MIN_LINE_RECT_SIDE:
                 continue
-            _xhi = xHi + LINE_CLUSTER_EPS
+            _xhi = xHi + _sl_win
             _e = _window_index(xLo, xHi, _xhi)
             if _e is None:
                 # 未建索引：区间与原实现完全相同，body 里两道 gap/xb 判断生效
-                _cand = range(_bisect.bisect_left(v_xas, xLo - LINE_CLUSTER_EPS),
+                _cand = range(_bisect.bisect_left(v_xas, xLo - _sl_win),
                               _bisect.bisect_right(v_xas, _xhi))
             else:
                 # 命中索引：bisect 出 gap 合法切片，按下标升序还原旧遍历顺序
@@ -1274,9 +1310,11 @@ def detect_rectangles_from_lines(entity_list, rot=None):
                     rects.sort(key=lambda r: (r[2] - r[0]) * (r[3] - r[1]), reverse=True)
                     return rects
                 # 覆盖校验：横线必须横跨 [xa, xb]，纵线必须纵跨 [ya, yb]
-                if not _coverage_contains(h_common, xa, xb):
+                _cov_xa, _cov_xb = _shrink(xa, xb)
+                if not _coverage_contains(h_common, _cov_xa, _cov_xb):
                     continue
-                if not _coverage_contains(v_common, ya, yb):
+                _cov_ya, _cov_yb = _shrink(ya, yb)
+                if not _coverage_contains(v_common, _cov_ya, _cov_yb):
                     continue
                 # P1 严格矩形判定：4 条边的每一侧都必须至少有一条完整 LINE 覆盖
                 # 防止"边线残段+内部标注线拼凑出假矩形"
@@ -6370,6 +6408,16 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         #       fc 还是 10。
         #     · 放在这里 → 分母与结构判定保持原状，救援通道也够不着，零连锁。
         #   块参照插入不剔除（块能否打印由块内图元各自图层决定）。
+        #
+        #   R141 核查：R119 对「直线矩形」候选**从来不生效** —— collect 里
+        #   detect_rectangles_from_lines 产出的直线矩形 dict 只有
+        #   type/area/bbox/width/height/layout 六个字段，**没有 insert_layer**，
+        #   于是下面 `(c.get('insert_layer') or '') not in ('', '0')` 恒为 False，
+        #   整条条件恒 False。A20125340S-1.dwg 那 5 个外边框画在 Defpoints 的框
+        #   不是被 R119 挡住的（它们压根没进候选，是 P1 角点缺口的问题）。
+        #   因此这里既不加豁免、也不改判据；若将来给直线矩形补上 insert_layer
+        #   字段、使 R119 开始生效，单测 R141-④ 会立刻报警（它要求不打印层上的
+        #   直线矩形仍被识别为图框）。
         if _noplot_all:
             _n_before19 = len(all_candidates)
             all_candidates[:] = [
