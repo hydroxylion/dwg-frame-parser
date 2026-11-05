@@ -712,14 +712,23 @@ LINE_CLUSTER_MAX_FOR_ALL_PAIRS = 16  # 每个方向聚类数不超过该值时�
 #   手绘/复制粘贴边框的正常误差同量级。取 3.0 而非 2.0：本图缺口恰为 2.0mm，
 #   贴边取值会让"改一个浮点末位就复现"的脆弱判据上线。
 P1_CORNER_SLACK = 3.0
-MIN_LINE_RECT_SIDE = 100          # 直线矩形最小短边（图形单位）
+# R142：最小短边 100 → 70。动机（(20100214_1305)刮板输送机16.dwg 识 63 实际 70）：
+#   漏的 7 个是图里最小的一档**小页框** —— 210×148.5 ×4、105×74 ×2（实测 74.25
+#   与 72.00）、157.5×111.38 ×1。其中 105×74 的高度 74.25/72.00 < 100，被下方
+#   `if _H < MIN_LINE_RECT_SIDE: continue` 在**整层**跳过（横线对间距即矩形高，
+#   高不够则任何组合都不值得试），P1 连候选都产不出。
+#   取值依据：A6 幅面短边恰为 105×74（A4 的一半，也是本图实测最小的页框），70 略
+#   低于它；而常见表格行高 21/24/30、标题栏格 8~15 仍远在门外。「表格格子冒充图框」
+#   靠 has_internal_divider（框内有整条贯穿的行/列线）+ is_frame_like 的 √2/同尺寸
+#   重复约束拦，不靠这条尺寸门槛 —— 本图 4 个 105×84 明细表格子实测仍被正确拒掉。
+MIN_LINE_RECT_SIDE = 70           # 直线矩形最小短边（图形单位）
 MAX_LINE_RECT_CANDIDATES = 5000   # 直线矩形候选数上限，防止异常图纸拖垮解析。
                                   # 坐标包含遍历在预算内处理的窗口远多于旧 gap 扫描，
                                   # 200 上限会在真图框组合到达前被表格/格栅小矩形占满
                                   # （电子称皮带输送系统：200 个时图框还没轮到，5000 仍
                                   #  远小于该类图纸可能检出的真实候选量；后续 is_frame_like
                                   #  的 √2/相对面积约束会过滤绝大多数小矩形）
-LINE_PAIR_FULL_SPAN = 180         # 聚类合并跨度 ≥ 该值视为"图框级长边"，密集聚类时也做全配对
+LINE_PAIR_FULL_SPAN = 70          # 聚类合并跨度 ≥ 该值视为"图框级长边"，密集聚类时也做全配对
                                   # （机械图纸细节线可致聚类数百组，真实图框边界相隔几十组，
                                   #   仅相邻配对永远配对不到；长边全配对找回远距离图框边界）
                                   # 300→180：原 300 对"短边<300 的 LINE 图框"漏检——锁芯总装图
@@ -727,6 +736,19 @@ LINE_PAIR_FULL_SPAN = 180         # 聚类合并跨度 ≥ 该值视为"图框�
                                   # 配对隔 98 个聚类永远够不到 → 真图框漏识别、8 个 2.5×4 微孔
                                   # 反成候选。180 覆盖 A4 竖边 210/A3 297 等常用下限（A5 148 仍
                                   # 不入，A5 LINE 图框极罕见）。防组合爆炸由预过滤+比例剪枝+预算兜底。
+                                  # 180→70（R142）：180 覆盖的是 A4 竖边 210 / A3 297，对小页框
+                                  # 仍然太高。刮板输送机16 漏掉的 5 个框（210×148.5 ×4、
+                                  # 105×74 ×2、157.5×111.38 ×1）的**竖边长度恰好等于框高**
+                                  # （148.5 / 111.38 / 74.25 / 72.00），全部 < 180 → 进不了长配
+                                  # 通道；而它们在 x 聚类序列里与对边隔着 13~48 个其它竖线聚类
+                                  # （机械图细节线），相邻配对也够不到 → 竖对永远配不上 → 矩形
+                                  # 在**候选阶段**就不成立。横边那边通常是很长的贯穿线
+                                  # （long=True），所以漏检**只发生在竖对**——这是结构性偏差：
+                                  # 矩形的高决定竖线长度，小页框的竖边天然短。
+                                  # 降到 70 = MIN_LINE_RECT_SIDE，语义统一为「一条线至少要有一个
+                                  # 短边的长度，才可能充当某条边」，不再有两套口径。
+                                  # 代价：本图 v_long 921→约 1500，全量耗时 36.2→41.2s（+14%）；
+                                  # 召回上只多出那 7 个真页框，表格格子无一漏网。
 # R140：P1「同坐标共线拆段」通道的版面占比门槛（见 _h_side_merged 注释）。
 #   矩形面积 / 本 layout 水平垂直线整体范围面积 ≥ 该值，才允许用"多段拼接"充当边。
 #   依据：图框就是整张纸 —— 报障图 136097×84100 占版面 98%；而 一层.dwg 被判成
@@ -831,7 +853,8 @@ def detect_rectangles_from_lines(entity_list, rot=None):
       不允许用边线残段+内部标注线拼凑
     - 矩形内部若存在整条穿越的分隔线（如两个并排图框的公共边），判定为
       拼合外包络，予以剔除，避免把"包住多个图框的大矩形"当成图框
-    - 短边 ≥ MIN_LINE_RECT_SIDE，过滤家具/表格/标题栏等小矩形
+    - 短边 ≥ MIN_LINE_RECT_SIDE（R142 起 70，覆盖到 A6 105×74 这一档小页框），
+      过滤表格行（高 21/24/30）与标题栏格（8~15）等更小的矩形
 
     rot: 全局旋转矫正参数 (cosθ, sinθ)。图纸在自定义 UCS 下整体倾斜绘制时，
     线段端点先经该矩阵旋转回水平/垂直，使水平/垂直聚类恢复有效。
@@ -846,6 +869,21 @@ def detect_rectangles_from_lines(entity_list, rot=None):
             _min_merged_ratio = float(os.environ['FRAME_PARSER_P1_MERGED_MIN_RATIO'])
         except ValueError:
             pass
+    # R142：短边下限与"长配通道"跨度门槛（同口径，见模块级两条常量的注释）。
+    #   函数内读取以便单测用环境变量翻转、把因果钉死（与 COND_D_RATIO_TOL /
+    #   P1_MERGED_MIN_LAYOUT_RATIO / P1_CORNER_SLACK 同一套做法）。
+    _min_side = MIN_LINE_RECT_SIDE
+    _full_span = LINE_PAIR_FULL_SPAN
+    try:
+        if os.environ.get('FRAME_PARSER_MIN_LINE_RECT_SIDE'):
+            _min_side = float(os.environ['FRAME_PARSER_MIN_LINE_RECT_SIDE'])
+    except ValueError:
+        pass
+    try:
+        if os.environ.get('FRAME_PARSER_LINE_PAIR_FULL_SPAN'):
+            _full_span = float(os.environ['FRAME_PARSER_LINE_PAIR_FULL_SPAN'])
+    except ValueError:
+        pass
     for ent in entity_list:
         if ent.dxftype() != 'LINE':
             continue
@@ -931,7 +969,7 @@ def detect_rectangles_from_lines(entity_list, rot=None):
             common = _intersect_segments(s1, s2)
             if not common:
                 return
-            if sum(hi - lo for lo, hi in common) < MIN_LINE_RECT_SIDE:
+            if sum(hi - lo for lo, hi in common) < _min_side:
                 return  # 公共覆盖过短，不可能形成合法矩形，预过滤丢弃
             pairs.append((min(c1, c2), max(c1, c2), common))
 
@@ -946,7 +984,7 @@ def detect_rectangles_from_lines(entity_list, rot=None):
                 add_pair(i, i + 1)
             # 通道②：图框级长边聚类全配对
             long_idx = [i for i in range(n)
-                        if clusters[i][1][-1][1] - clusters[i][1][0][0] >= LINE_PAIR_FULL_SPAN]
+                        if clusters[i][1][-1][1] - clusters[i][1][0][0] >= _full_span]
             for a in range(len(long_idx)):
                 for b in range(a + 1, len(long_idx)):
                     add_pair(long_idx[a], long_idx[b])
@@ -1268,15 +1306,15 @@ def detect_rectangles_from_lines(entity_list, rot=None):
 
     for (ya, yb, h_common) in h_pairs:
         _H = yb - ya
-        if _H < MIN_LINE_RECT_SIDE:
+        if _H < _min_side:
             continue  # 矩形高 < 短边下限：任何组合短边必 < 下限，整层跳过
-        _g_lo = max(MIN_LINE_RECT_SIDE, _H / PAIR_RATIO_BOUND)
+        _g_lo = max(_min_side, _H / PAIR_RATIO_BOUND)
         _g_hi = _H * PAIR_RATIO_BOUND
         # R141：竖对覆盖下限同步放宽（原 2.0 是给浮点/聚类尾差留的绝对松弛，
         #   现按角点松弛量两端各让 _p1_slack）
         _hcov = _H - 2.0 * max(_p1_slack, 1.0)
         for (xLo, xHi) in h_common:
-            if xHi - xLo < MIN_LINE_RECT_SIDE:
+            if xHi - xLo < _min_side:
                 continue
             _xhi = xHi + _sl_win
             _e = _window_index(xLo, xHi, _xhi)
@@ -1332,7 +1370,7 @@ def detect_rectangles_from_lines(entity_list, rot=None):
                     if not (_h_side_merged(ya, xa, xb) and _h_side_merged(yb, xa, xb)
                             and _v_side_merged(xa, ya, yb) and _v_side_merged(xb, ya, yb)):
                         continue
-                if min(w, h) < MIN_LINE_RECT_SIDE:
+                if min(w, h) < _min_side:
                     continue
                 if has_internal_divider(xa, ya, xb, yb):
                     continue
@@ -6770,6 +6808,17 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         # 家具详图边框 3900×2720（ratio 1.4338，距 1.4259 仅 0.55%）被误救（fc 2→3）。
         # 收紧到 ±0.5% 后两簇各自凑不满 ≥3 → 主导不存在 → 该图 H 自动失效。
         COND_H_RATIO_TOL = 0.005
+        # R142：救援对象必须是「图纸页」，不是「几何轮廓」。
+        #   起因（2.8米皮带线.DWG 基线 13，R142 后 14）：门槛降到 70 后，
+        #   管子端面轮廓 113×80（ratio 1.4125 落在主导 √2 簇 ±0.5% 内、框内
+        #   31 个实体 ≥12）被 H 救入。但它是纯几何：ARC 15 / CIRCLE 8 /
+        #   LWPOLYLINE 2 / LINE 6，零文字零标注——是零件截面，不是出图页。
+        #   判据：框内完全包含的实体里必须有「文字/标注/块参照」类（图框是
+        #   页面，页内必有图名、图号、说明、标注，或整块的内容参照）。
+        #   校验：春风公寓2 的 10 个 H 救援对象全部含 MTEXT(5~11) +
+        #   DIMENSION(10~32)，无一受影响；113×80 三类全无 → 被拒。
+        COND_H_PAGE_CONTENT_TYPES = ('TEXT', 'MTEXT', 'DIMENSION', 'INSERT')
+        _COND_H_TEXT_REQ = os.environ.get('FRAME_PARSER_COND_H_NO_TEXT_REQ') != '1'
         if _COND_H_ENABLED and frame_like:
             _dominant = {}   # layout -> {ratio, ...}
             for _ln in {c['layout'] for c in frame_like}:
@@ -6804,6 +6853,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 if _h_cands:
                     # 每个 layout 一次性收集实体 bbox（O(N)），再对少量候选做包含计数
                     _ent_bbs = {}
+                    _txt_bbs = {}
                     for _ln in {c['layout'] for c in _h_cands}:
                         if _ln == '模型空间':
                             _lay = doc.modelspace()
@@ -6813,6 +6863,7 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                             except Exception:
                                 continue
                         _bbs = []
+                        _tbs = []
                         for ent in _lay:
                             _t = ent.dxftype()
                             if _t not in ('LINE', 'LWPOLYLINE', 'POLYLINE', 'ARC', 'CIRCLE',
@@ -6832,7 +6883,10 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                 continue
                             if _bb is not None:
                                 _bbs.append(_bb)
+                                if _t in COND_H_PAGE_CONTENT_TYPES:
+                                    _tbs.append(_bb)
                         _ent_bbs[_ln] = _bbs
+                        _txt_bbs[_ln] = _tbs
                     _h_added = []
                     # 防护栏：已被某个"已入选"图框完全包住的候选不救援——嵌套去重
                     # 反正会把它剔掉，救入只是噪音。春风公寓2 实证：1280×1850 虚线
@@ -6864,6 +6918,18 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                 _n += 1
                                 if _n >= COND_H_MIN_ENTITIES:
                                     break
+                        if _n >= COND_H_MIN_ENTITIES and _COND_H_TEXT_REQ:
+                            # R142：框内须有文字/标注/块参照之一（见常量处注释）
+                            _has_page = False
+                            for _tb in _txt_bbs.get(c['layout'], ()):
+                                if (_tb[0] >= _x1 - 1 and _tb[1] >= _y1 - 1 and
+                                        _tb[2] <= _x2 + 1 and _tb[3] <= _y2 + 1):
+                                    _has_page = True
+                                    break
+                            if not _has_page:
+                                safe_log('  [条件H·页面内容校验] 拒绝纯几何轮廓 %s'
+                                         % ('%.0fx%.0f' % (c['width'], c['height'])))
+                                continue
                         if _n >= COND_H_MIN_ENTITIES:
                             frame_like.append(c)
                             _in_fl_h.add(id(c))

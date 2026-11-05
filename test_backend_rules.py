@@ -589,6 +589,11 @@ def build_dominant_ratio_doc(small_inside_frame):
     for _k in range(12):   # 框内 12 条短线（图纸内容；竖线错位不成矩形）
         msp.add_line((sx + 100 + _k * 400, sy + 100),
                      (sx + 100 + _k * 400, sy + 300 + (_k % 3) * 200))
+    # R142：条件H 新增「页面内容」判据——救援对象必须有文字/标注/块参照。
+    #   旧 fixture 只放 12 条直线、零文字，形态上与 2.8米皮带线那类「纯几何
+    #   轮廓」无法区分，与春风公寓2 的真实场景（每个 H 页框含 MTEXT+
+    #   DIMENSION）不符。补一段图名文字还原真实页面。
+    msp.add_text('图名', height=200).set_placement((sx + 200, sy + 2500))
     msp.add_line((400000, 50000), (400100, 50100))   # 远端散点拉大总面积
     return to_bytes(doc)
 
@@ -2572,6 +2577,7 @@ _pl2 = msp.add_lwpolyline(
      (450000 + 11221, 20000 + 7961), (450000, 20000 + 7961)], close=True)
 for _k in range(14):                                  # 小框内内容 ≥12（条件H）
     msp.add_line((450100 + _k * 500, 20500), (450100 + _k * 500, 27000))
+msp.add_text('图名', height=300).set_placement((450600, 25000))   # R142：真页面有文字
 data = to_bytes(doc)
 check('R68被剔外包络内H候选: 边线框内孤立小框撤销, fc=3 (smart)',
       lambda: parse(data),
@@ -2606,6 +2612,7 @@ add_line_rect(msp, _hx, _hy, 4000, 7076)              # 小框 3（ratio 1.769 �
 for _k in range(14):
     msp.add_line((_hx + 100 + _k * 250, _hy + 100),
                  (_hx + 100 + _k * 250, _hy + 300 + (_k % 3) * 200))
+msp.add_text('说明', height=300).set_placement((_hx + 300, _hy + 5000))  # R142：真页面有文字
 data = to_bytes(doc)
 check('R69量级断层: 三小框短边<20%被撤, fc=3 (smart)',
       lambda: parse(data),
@@ -8612,4 +8619,164 @@ check('R141-④ 不打印层 Defpoints 上的直线矩形仍须识别（1 框 17
       lambda got: got == (1, [(1782, 1260)]))
 
 
+# ---------------------------------------------------------------------------
+# R142：(20100214_1305)刮板输送机16.dwg 识 63 实际 70 —— 小页框的竖边太短，
+#   既进不了长配通道（LINE_PAIR_FULL_SPAN 180），又被短边下限整层跳过
+#   （MIN_LINE_RECT_SIDE 100）。
+#
+#   漏的 7 个是图里最小的一档页框：210×148.5 ×4、105×74 ×2（实测 74.25 与
+#   72.00）、157.5×111.38 ×1。它们的**竖边长度恰好等于框高**，全部 < 180 →
+#   不在 long_idx 里；而在 x 聚类序列中与对边隔着 13~48 个其它竖线聚类（机械图
+#   细节线），相邻配对也够不到 → 竖对永远配不上 → 矩形在候选阶段就不成立。
+#   横边那边通常是很长的贯穿线（long=True），所以漏检只发生在**竖对** —— 这是
+#   结构性偏差：矩形的高决定竖线长度，小页框的竖边天然短。
+#
+#   用例直接锁 P1（detect_rectangles_from_lines），不绕 is_frame_like 那多条
+#   放行通道，断言只对"矩形有没有被检出"负责，不受下游判据演进影响。
+# ---------------------------------------------------------------------------
+_R142_A6_W, _R142_A6_H = 105.0, 74.25     # A6 那一档短边（报障图里 74.25 / 72.00 两个）
+_R142_A4H_W, _R142_A4H_H = 210.0, 148.5   # A4 的半张（报障图里 4 个）
+
+
+def _build_r142_small_frames():
+    """复现报障图的小页框形态：一个 105×74.25、一个 210×148.5。
+
+    每个框内插一排**短竖线**（只占框高中段、不贯穿）—— 模拟机械图的细节线。
+    这样左右竖边在 x 聚类序列里各隔了 20 个其它聚类，"相邻配对"通道够不到对边，
+    只有"长配通道"能把它们配成对。这正是报障图的真实形态（实测隔 13~48 个）。
+    短竖线不贯穿整个框高，所以不会触发 has_internal_divider。
+    """
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+
+    def _frame(x0, y0, w, h, n, step, lo, hi):
+        _msp.add_line((x0, y0), (x0 + w, y0))
+        _msp.add_line((x0, y0 + h), (x0 + w, y0 + h))
+        _msp.add_line((x0, y0), (x0, y0 + h))
+        _msp.add_line((x0 + w, y0), (x0 + w, y0 + h))
+        for _i in range(n):
+            _xx = x0 + step * (_i + 1)
+            _msp.add_line((_xx, y0 + lo), (_xx, y0 + hi))
+
+    _frame(100.0, 100.0, _R142_A6_W, _R142_A6_H, 20, 5.0, 25.0, 50.0)
+    _frame(400.0, 100.0, _R142_A4H_W, _R142_A4H_H, 20, 10.0, 50.0, 100.0)
+    return _doc
+
+
+def _build_r142_table_cell():
+    """明细表格子 105×84：框内有 3 条**贯穿**行线（报障图 -50180 那 4 个的形态，
+    表内是 4-Q235A / 10-Q235A 之类的材料明细行）。尺寸门槛降到 70 后它已满足
+    尺寸条件，必须仍由 has_internal_divider 挡住 —— 否则表格格子会成批变图框。"""
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    _x0, _y0, _x1, _y1 = 100.0, 100.0, 205.0, 184.0
+    _msp.add_line((_x0, _y0), (_x1, _y0))
+    _msp.add_line((_x0, _y1), (_x1, _y1))
+    _msp.add_line((_x0, _y0), (_x0, _y1))
+    _msp.add_line((_x1, _y0), (_x1, _y1))
+    for _yy in (121.0, 142.0, 163.0):
+        _msp.add_line((_x0, _yy), (_x1, _yy))
+    return _doc
+
+
+def _r142_p1_sizes(doc):
+    """直接取 P1 检出的矩形尺寸集合（宽, 高），不经过 is_frame_like。"""
+    _rects = detect_rectangles_from_lines(doc.modelspace())
+    return sorted({(round(r[2] - r[0], 2), round(r[3] - r[1], 2)) for r in _rects})
+
+
+def _r142_p1_sizes_env(doc, **switches):
+    _saved = {k: os.environ.get(k) for k in switches}
+    for _k, _v in switches.items():
+        os.environ[_k] = _v
+    try:
+        return _r142_p1_sizes(doc)
+    finally:
+        for _k, _v in _saved.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+
+
+# R142-① 小页框必须检出：竖边长度 74.25 / 148.5 都 < 180，靠长配通道配上对。
+check('R142-① 105×74.25 与 210×148.5 小页框必须被 P1 检出（竖边隔 20 个聚类）',
+      lambda: _r142_p1_sizes(_build_r142_small_frames()),
+      lambda got: got == [(_R142_A6_W, _R142_A6_H), (_R142_A4H_W, _R142_A4H_H)])
+
+# R142-② 因果钉死（短边门槛）：设回 100 → 105×74.25 整层被跳过，210×148.5 仍在。
+#   两者分处不同高度，正好把"高 < 门槛 → 整层 continue"这条钉死。
+check('R142-② 短边门槛设回 100 后 105×74.25 消失、210×148.5 仍在（钉死整层跳过）',
+      lambda: _r142_p1_sizes_env(_build_r142_small_frames(),
+                                 FRAME_PARSER_MIN_LINE_RECT_SIDE='100'),
+      lambda got: got == [(_R142_A4H_W, _R142_A4H_H)])
+
+# R142-③ 因果钉死（长配通道）：设回 180 → 两条竖边都进不了 long_idx，相邻配对
+#   又隔着 20 个聚类，竖对根本生成不出来 → 两个框都不成立。
+check('R142-③ 长配门槛设回 180 后两个小页框都不成立（钉死竖对永远配不上）',
+      lambda: _r142_p1_sizes_env(_build_r142_small_frames(),
+                                 FRAME_PARSER_LINE_PAIR_FULL_SPAN='180'),
+      lambda got: got == [])
+
+# R142-④ 守卫：内部有 3 条贯穿行线的 105×84 明细表格子，尺寸已过关（84 ≥ 70）
+#   但必须仍被 has_internal_divider 拒 —— 门槛降低不能把表格变图框。
+check('R142-④ 内部有贯穿行线的 105×84 明细表格子仍不得当图框',
+      lambda: _r142_p1_sizes(_build_r142_table_cell()),
+      lambda got: got == [])
+
+_R142_REAL = Path(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）/(20100214_1305)刮板输送机16.dwg')
+if _R142_REAL.exists():
+    def _r142_real_sizes():
+        # 注意：必须传真实文件名（.dwg）让格式判断走 DWG→DXF 转换路径；
+        #   parse() 里固定用 'test.dxf'，对 DWG 字节会报 ezdxf.recover 不存在。
+        _r = get_bounding_box_from_bytes(_R142_REAL.read_bytes(), _R142_REAL.name,
+                                         'polyline', 'mm', 'smart')
+        return (_r['frame_count'],
+                sorted((round(c['width']), round(c['height'])) for c in _r['candidates']))
+
+    # R142-⑤ 报障图端到端：63 → 70，且三种小尺寸都在候选里。
+    check('R142-⑤ 报障图端到端 fc=70，105×74 / 158×111 / 210×148 均在候选内',
+          _r142_real_sizes,
+          lambda got: got[0] == 70
+                      and (105, 74) in got[1] and (158, 111) in got[1]
+                      and (210, 148) in got[1])
+else:
+    print('SKIP  R142-⑤ 报障图端到端（未找到 (20100214_1305)刮板输送机16.dwg）')
+
+
+# R142：条件H 的「页面内容」判据（2.8米皮带线.DWG 基线 13，R142 降门槛后 14）——
+#   门槛降到 70 后，管子端面轮廓 113×80（ratio 1.4125 落在主导 √2 簇 ±0.5% 内、
+#   框内 31 个实体 ≥12）被条件H 救入。但它是纯几何：ARC 15 / CIRCLE 8 /
+#   LWPOLYLINE 2 / LINE 6，零文字零标注——零件截面不是出图页。
+#   判据：框内须含文字/标注/块参照之一（TEXT/MTEXT/DIMENSION/INSERT）。
+#   校验：春风公寓2 的 10 个 H 救援对象全部含 MTEXT(5~11)+DIMENSION(10~32)。
+_R142_28 = Path(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）/2.8米皮带线.DWG')
+if _R142_28.exists():
+    def _r142_28_fc(**switches):
+        import os as _os
+        _saved = {k: _os.environ.get(k) for k in switches}
+        for _k, _v in switches.items():
+            _os.environ[_k] = _v
+        try:
+            # 同 R142-⑤：必须传真实文件名让格式判断走 DWG→DXF 转换路径
+            _r = get_bounding_box_from_bytes(_R142_28.read_bytes(), _R142_28.name,
+                                             'polyline', 'mm', 'smart')
+            return _r['frame_count']
+        finally:
+            for _k, _v in _saved.items():
+                if _v is None:
+                    _os.environ.pop(_k, None)
+                else:
+                    _os.environ[_k] = _v
+
+    # R142-⑥ 回归钉死：基线 13，纯几何轮廓不得混入。
+    check('R142-⑥ 2.8米皮带线端到端 fc=13：纯几何轮廓 113×80 不被条件H救入',
+          _r142_28_fc, lambda fc: fc == 13)
+
+    # R142-⑦ 因果关系钉死：关掉页面内容校验 → 113×80 重新混入，fc 回到 14。
+    check('R142-⑦ 开关回退：COND_H_NO_TEXT_REQ=1 时 113×80 重新混入, fc=14',
+          lambda: _r142_28_fc(FRAME_PARSER_COND_H_NO_TEXT_REQ='1'),
+          lambda fc: fc == 14)
+else:
+    print('SKIP  R142-⑥⑦ 2.8米皮带线（未找到 2.8米皮带线.DWG）')
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
