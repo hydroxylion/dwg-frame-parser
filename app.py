@@ -2743,6 +2743,8 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     #        家具/符号类小块（短边通常 < 500mm）直接不入库，减少后续位置启发式数据量；
     #    (2) 位置启发：见下方"对齐排列剔除"，在预筛通过的候选上做。
     INSERT_MIN_SHORT_SIDE = 500  # mm：真建筑图框短边几乎都 ≥ 420mm（A2），家具/符号块通常 < 500
+    # R143：块定义级尺寸豁免开关（回退用）。置 1 → 实例尺寸仍按 INSERT_MIN_SHORT_SIDE 判。
+    _DEF_SIZED_INSERT_OFF = os.environ.get('FRAME_PARSER_NO_DEF_SIZED_INSERT') == '1'
     # 标准 A 系列短边集合：A0~A5 的短边。短边命中该集合（且长宽比合规）的 INSERT 视作
     # "A 系图框块"放行入库——小图幅用块画图框很常见（支座.dwg 的 TILED_BLOCK 210×297=A4
     # 竖版，短边 210<500 曾被误当家具块剔除 → 图框漏识别、全实体包围盒把外溢的"技术要求"
@@ -4028,8 +4030,28 @@ def collect_candidates_from_layout(layout, doc, layout_name):
             _is_a_series_short = any(abs(_w_short - _s) <= 1.0 for _s in _A_SERIES_SHORT_SIDES)
             _is_grid_rescued = _key in _rescued_keys
             _ratio_fail = not (FRAME_RATIO_MIN <= _w_ratio <= FRAME_RATIO_MAX)
+            # R143：块定义本身即「图框级」→ 实例不论缩放到多小都放行。
+            #   动机（爬坡线.dwg 识 13 实际 23）：全部 23 张页框都是同一个图框块
+            #   asdfeesadffdafds 的实例，块定义 7914×5481（短边 5481、ratio 1.4439，
+            #   完全合格），按 1.21 / 0.7056 / 0.5292 / … / 0.0319 逐级缩小放置。
+            #   而下方预筛拿**实例**尺寸比门槛：10 个小实例短边 497/493/362/355/
+            #   266/261/250/217/175 全部 < INSERT_MIN_SHORT_SIDE(500) 且不在 A 系
+            #   短边集合里 → 一律按「非图框级尺寸」剔除，23 张只剩 13 张。
+            #   语义纠偏：短边下限的本意是「别让家具/门窗/符号块污染候选库」，
+            #   那类块的**块定义**本身就小（几百 mm）；而这里块定义是 7.9m×5.5m 的
+            #   标准页框模板，实例小只是「套图里的缩略页」，与家具块完全不同源。
+            #   故判据改成：块定义尺寸够格 → 实例放行（后续 R26/R27 边框证据、
+            #   is_frame_like 特征、嵌套/IoU 去重照旧逐层把关，不是免检）。
+            #   开关 FRAME_PARSER_NO_DEF_SIZED_INSERT=1 回退旧口径。
+            _def_bw = abs(_bb_def[2] - _bb_def[0])
+            _def_bh = abs(_bb_def[3] - _bb_def[1])
+            _def_short = min(_def_bw, _def_bh)
+            _def_long = max(_def_bw, _def_bh)
+            _def_framelike = (_def_short >= INSERT_MIN_SHORT_SIDE
+                              and FRAME_RATIO_MIN <= (_def_long / _def_short) <= FRAME_RATIO_MAX
+                              and not _DEF_SIZED_INSERT_OFF)
             if ((_w_short < INSERT_MIN_SHORT_SIDE and not _is_a_series_short
-                    and not _is_grid_rescued) or _ratio_fail):
+                    and not _is_grid_rescued and not _def_framelike) or _ratio_fail):
                 # R58：巨型拼接底图块放行——bbox 被块内离散分布的子块几何撑大
                 #   （P_10#给排水平面图.dwg：10#商业－平面图-20130627-3_t3 世界
                 #   bbox 3767322×118204、ratio 31.9），预筛直接 continue 导致
@@ -6903,6 +6925,20 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                             _fb = _fc['bbox']
                             if (c['bbox'][0] >= _fb[0] - 1 and c['bbox'][1] >= _fb[1] - 1 and
                                     c['bbox'][2] <= _fb[2] + 1 and c['bbox'][3] <= _fb[3] + 1):
+                                _skip = True
+                                break
+                        # R143：c 反过来**包住**某个已入选图框 → c 是外围包裹/裁剪框，
+                        #   不是页。爬坡线.dwg：CON2 层一条孤例 4 点闭合线 7308×5049
+                        #   把 5584×3867 真页框四边各外扩 418~1306mm 罩住；其比例
+                        #   1.4475 恰落在主导 1.444 簇内、框内又有块参照（就是被罩的
+                        #   那张页）→ 骗过 R142 的页面内容校验被 H 救入，再靠去重
+                        #   「留大剔小」把真页框吞掉（fc 13，5584×3867 少 1）。
+                        #   H 是「补漏页」通道，救进来的必须是页；能整张装下另一张
+                        #   已确认页框的，只可能是包裹框。
+                        for _fc in _fl_by_lay.get(c['layout'], ()):
+                            _fb = _fc['bbox']
+                            if (_fb[0] >= c['bbox'][0] - 1 and _fb[1] >= c['bbox'][1] - 1 and
+                                    _fb[2] <= c['bbox'][2] + 1 and _fb[3] <= c['bbox'][3] + 1):
                                 _skip = True
                                 break
                         if _skip:

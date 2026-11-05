@@ -8779,4 +8779,155 @@ if _R142_28.exists():
           lambda fc: fc == 14)
 else:
     print('SKIP  R142-⑥⑦ 2.8米皮带线（未找到 2.8米皮带线.DWG）')
+# ---------------------------------------------------------------------------
+# R143：INSERT 预筛的短边下限改为「按块定义判」——块定义本身是图框级尺寸时，
+#   实例不论缩放到多小都放行。
+#
+# 报障（爬坡线.dwg 识 13 实际 23）：全部 23 张页框都是同一个图框块
+#   asdfeesadffdafds 的实例——块定义 7914×5481（短边 5481、ratio 1.4439，完全
+#   合格），按 1.21 / 0.7056 / 0.5292 / 0.4024 / 0.34642 / 0.28224 / 0.22582 /
+#   0.165 / 0.14794 / 0.14434 / 0.132 / 0.09075 / 0.09 / 0.066 / 0.0648 / 0.0486 /
+#   0.047652 / 0.045619 / 0.0396 / 0.031933 逐级缩小放置，最小 253×175。
+#   旧预筛拿**实例**尺寸比 INSERT_MIN_SHORT_SIDE(500)：后 10 个实例短边
+#   497/493/362/355/266/261/250/217/175 全部 < 500 且不在 A 系短边集合
+#   (841/594/420/297/210/148/105) 里 → 一律按"非图框级尺寸"剔除，23 张只剩 13 张。
+#
+# 语义纠偏：短边下限的本意是"别让家具/门窗/符号块污染候选库"，那类块的
+#   **块定义**本身就小（几百 mm）；而这里块定义是 7.9m×5.5m 的标准页框模板，
+#   实例小只是"套图里的缩略页"。故判据改成看块定义。
+#   豁免只打开预筛一道门，后续 R26/R27 边框证据、is_frame_like 特征、嵌套/IoU
+#   去重照旧逐层把关 —— 不是免检。
+#
+# 同一张图还暴露了第二个问题（本轮一并修）：CON2 层一条孤例 4 点闭合线
+#   7308×5049 把第一个 5584×3867 真页框四边各外扩 418~1306mm 罩住，比例 1.4475
+#   恰落在主导 1.444 簇内、框内又有块参照（就是被罩的那张页）→ 骗过 R142 的
+#   页面内容校验被条件H 救入，再靠去重"留大剔小"把真页框吞掉。故给条件H 补
+#   反向检查：候选**包住**某个已入选图框 → 它是外围包裹/裁剪框，不救援。
+# ---------------------------------------------------------------------------
+_R143_BASE_W, _R143_BASE_H = 7914.0, 5481.0   # 报障图块定义尺寸（ratio 1.4439）
+
+
+def _build_r143_scaled_template():
+    """一个 7914×5481 的图框块 + 3 个缩放实例（×1 / ×0.09075 / ×0.031933）。
+
+    块定义带闭合矩形边框（R26/R27 的边框证据），三个实例同块名——真实报障图
+    也是同块名，靠"族传播"把非种子实例一并放行。
+    期望：三个都能成为候选（718×497 与 253×175 的短边远小于 500）。
+    """
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    _blk = _doc.blocks.new('BIG_TEMPLATE')
+    add_closed_rect(_blk, 0, 0, _R143_BASE_W, _R143_BASE_H)
+    # 块内补一条标题栏条纹，让它更像真图框块（不影响判据，只增加真实性）
+    _blk.add_line((0.0, 500.0), (_R143_BASE_W, 500.0))
+    _msp.add_blockref('BIG_TEMPLATE', (0.0, 0.0),
+                      dxfattribs={'xscale': 1.0, 'yscale': 1.0})
+    _msp.add_blockref('BIG_TEMPLATE', (20000.0, 0.0),
+                      dxfattribs={'xscale': 0.09075, 'yscale': 0.09075})
+    _msp.add_blockref('BIG_TEMPLATE', (30000.0, 0.0),
+                      dxfattribs={'xscale': 0.031933, 'yscale': 0.031933})
+    return _doc
+
+
+def _r143_sizes(**switches):
+    """取块参照候选的尺寸集合（四舍五入到整数）。"""
+    _saved = {k: os.environ.get(k) for k in switches}
+    for _k, _v in switches.items():
+        os.environ[_k] = _v
+    try:
+        _r = parse(to_bytes(_build_r143_scaled_template()))
+        return _r['frame_count'], sorted(
+            (round(c['width']), round(c['height']))
+            for c in _r['candidates'] if c.get('type') == '块参照插入')
+    finally:
+        for _k, _v in _saved.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+
+
+# R143-① 块定义够格 → 三个缩放实例全部入库（含短边 497 / 175 两个远小于 500 的）
+check('R143-① 块定义 7914×5481 的图框块，缩放实例 718×497 / 253×175 也必须入库',
+      _r143_sizes,
+      lambda got: got[0] == 3
+                  and (7914, 5481) in got[1] and (718, 497) in got[1]
+                  and (253, 175) in got[1])
+
+# R143-② 因果钉死：关掉豁免 → 小实例按旧口径被预筛剔除，只剩块定义原尺寸那一个。
+check('R143-② 开关回退：NO_DEF_SIZED_INSERT=1 时小实例回归剔除，只剩 7914×5481',
+      lambda: _r143_sizes(FRAME_PARSER_NO_DEF_SIZED_INSERT='1'),
+      lambda got: got[0] == 1 and got[1] == [(7914, 5481)])
+
+
+def _build_r143_small_block():
+    """守卫：块定义本身就小的（450×318，短边 318 < 500 且不在 A 系）——
+    这是"家具/符号块"形态，实例不得因本条豁免入库。
+
+    远处另放一张 A0 页框（11890×8410，√2），让整图有真图框——否则 parse 在
+    "整图无图框"时直接抛错，断言就退化成"有没有抛异常"了。
+    """
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    _blk = _doc.blocks.new('SMALL_OBJ')
+    add_closed_rect(_blk, 0, 0, 450.0, 318.0)
+    _msp.add_blockref('SMALL_OBJ', (0.0, 0.0))
+    _msp.add_blockref('SMALL_OBJ', (2000.0, 0.0))
+    add_closed_rect(_msp, 50000, 0, 11890, 8410)     # 真页框（A0×10，add_closed_rect 后两参是宽高）
+    return _doc
+
+
+# R143-③ 守卫：块定义小 → 照旧剔除，豁免不能被"实例尺寸小"误触发。
+check('R143-③ 块定义 450×318（短边 318 < 500，非 A 系）的符号块仍被预筛剔除',
+      lambda: (lambda r: (r['frame_count'],
+                          [c for c in r['candidates'] if c.get('type') == '块参照插入']))(
+          parse(to_bytes(_build_r143_small_block()))),
+      lambda got: got[0] == 1 and got[1] == [])
+
+_R143_REAL = Path(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）/爬坡线.dwg')
+if _R143_REAL.exists():
+    def _r143_real(**switches):
+        import os as _os
+        _saved = {k: _os.environ.get(k) for k in switches}
+        for _k, _v in switches.items():
+            _os.environ[_k] = _v
+        try:
+            # 必须传真实文件名（.dwg）让格式判断走 DWG→DXF 转换路径
+            _r = get_bounding_box_from_bytes(_R143_REAL.read_bytes(), _R143_REAL.name,
+                                             'polyline', 'mm', 'smart')
+            return (_r['frame_count'],
+                    sorted((round(c['width']), round(c['height'])) for c in _r['candidates']))
+        finally:
+            for _k, _v in _saved.items():
+                if _v is None:
+                    _os.environ.pop(_k, None)
+                else:
+                    _os.environ[_k] = _v
+
+    def _r143_expect_sizes():
+        # 用户给出的 23 张页框（宽×高；±2 容差匹配）
+        return [(9576, 6632), (5584, 3867), (5584, 3867), (4188, 2900), (3185, 2205),
+                (2742, 1899), (2234, 1547), (1787, 1238), (1306, 904), (1306, 904),
+                (1171, 811), (1142, 791), (1045, 723), (718, 497), (718, 497),
+                (712, 493), (522, 362), (513, 355), (385, 266), (377, 261),
+                (361, 250), (313, 217), (253, 175)]
+
+    # R143-④ 报障图端到端：13 → 23，且 23 个尺寸逐项命中、无多余候选。
+    #   同时钉死条件H 反向检查：7308×5049 包裹框不得再出现（若它回来，会靠
+    #   去重吞掉一个 5584×3867 —— fc 仍是 23 但内容错，所以必须断尺寸）。
+    check('R143-④ 爬坡线端到端 fc=23：23 个尺寸全命中，包裹框 7308×5049 不得入选',
+          _r143_real,
+          lambda got: got[0] == 23
+                      and all(any(abs(w - ew) <= 2 and abs(h - eh) <= 2
+                                  for w, h in got[1]) for ew, eh in _r143_expect_sizes())
+                      and sum(1 for w, h in got[1] if abs(w - 5584) <= 2 and abs(h - 3867) <= 2) == 2
+                      and not any(abs(w - 7308) <= 3 and abs(h - 5049) <= 3 for w, h in got[1]))
+
+    # R143-⑤ 因果钉死：关掉块定义豁免 → 回到报障前的 13。
+    check('R143-⑤ 开关回退：NO_DEF_SIZED_INSERT=1 时爬坡线回到 13（复现报障）',
+          lambda: _r143_real(FRAME_PARSER_NO_DEF_SIZED_INSERT='1')[0],
+          lambda fc: fc == 13)
+else:
+    print('SKIP  R143-④⑤ 爬坡线端到端（未找到 爬坡线.dwg）')
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
