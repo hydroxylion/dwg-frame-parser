@@ -8388,4 +8388,120 @@ check('R138-③ 容差回退到 ±10% 后 R138-① 又变回 2 框（证明是�
       lambda got: got == (2, [(4000, 2655), (4000, 2655)]))
 
 
+# ==========================================================================
+# R140：P1「同坐标共线拆段」通道 —— 图框边被画断成多段时的识别
+# ==========================================================================
+# 报障：滚筒型固定式带式输送机的设计-总装配图.dwg 识 0 实际 1 个 136097×84100。
+#   图框四边都在，但上下边各被拆成 2~3 段 LINE（下边 87271.5 + 48825.2，
+#   上边 87271.5 + 31628.4 + 43014.9，断口首尾精确相接），左右两条竖线反而是
+#   单条完整 84100。P1 要求「每条边至少一条完整 LINE」→ 上下边无单线跨满
+#   136097 → 整个框被拒，下游条件C（rel 高达 98%）根本轮不到。
+#
+# 但只放开 P1 会立刻把 R139 刚修好的 一层.dwg 打回去（实测 0 框 → 2 框）：
+#  那两个 1530×2180 其实是「标注」层尺寸线围出的区域 —— 上边由 650 + 880 两段
+#  尺寸线拼成（尺寸线被数字打断，断口也是精确相接），四条边都够真；它们
+#  ratio 1.4248 距 √2 仅 0.75%（R138 收紧的 ±2% 挡不住）、同尺寸 ×2、框内
+#  实体够多 —— 靠条件D 整条通过。P1 原本是它们唯一的防线。
+#
+# 所以 R140 的判据是「拆段可以，但必须占满版面」：图框就是整张纸。报障图
+#  136097×84100 占版面 98%；一层.dwg 那两块只占 3.1%。
+
+def _build_r140_split_frame(px=136097.0, py=84100.0, seg2=118900.0):
+    """复现报障形态：一个边被拆段的大页框（占版面 100%）。
+
+    左/右两条竖线各是一条完整 LINE；下边拆 2 段、上边拆 3 段，断口处坐标
+    **精确相等**（不是"差不多"，这是 _merge_segments 的前提）。
+    版面由这批线自身撑起 → 矩形面积 / 版面 = 100%，远超 10% 门槛。
+    """
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    _msp.add_line((0, 0), (0, py))                 # 左边：单条完整
+    _msp.add_line((px, 0), (px, py))               # 右边：单条完整
+    _msp.add_line((0, 0), (87271.5, 0))            # 下边 第1段
+    _msp.add_line((87271.5, 0), (px, 0))           # 下边 第2段（断口精确相接）
+    _msp.add_line((0, py), (87271.5, py))          # 上边 第1段
+    _msp.add_line((87271.5, py), (seg2, py))       # 上边 第2段
+    _msp.add_line((seg2, py), (px, py))            # 上边 第3段
+    # 框内图纸内容：条件C 走 rel≥10%，不要求实体数，但真实页框不会空着
+    for _i in range(20):
+        _msp.add_circle((20000 + _i * 3000, 20000), 400)
+    _doc.layouts.new('布局1')
+    return to_bytes(_doc)
+
+
+def _build_r140_dim_frame(w=1530.0, h=2180.0, gap=4500.0, board=10000.0, inner=14):
+    """复现 一层.dwg：两个同尺寸「标注尺寸线围出来的框」，占版面只有百分之几。
+
+    版面靠"两条平行长横线 + 一条够不着它们的短竖线"撑到 board×board —— 三者
+    刻意两两配不出矩形（竖线只覆盖 y 中段，不接触到任何一条横线），所以版面
+    变大了而直线矩形候选数不增加。矩形面积/版面 = 3.3%，正是 R140 版面门槛
+    要挡的那类（报障图是 98%）。
+
+    版面取正方形（ratio 1.0）是必须的：程序另有一条「全实体包围盒」兜底候选
+    **不走 P1**，版面若是 10000×20000（ratio 2.0）它自己就会成一个合法图框，
+    把这条用例要测的东西整个盖掉。ratio 1.0 会被 FRAME_RATIO_MIN=1.05 拒。
+
+    每个框的上边由 650 + 880 两段拼成（尺寸线被数字打断的典型画法），
+    左/下/右三条边是单条完整线，所以 P1 的拆段通道是它们唯一能过 P1 的路。
+    框内 14 个圆：条件D 要求严格内部实体 ≥12。
+    """
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    # 撑版面用的三条线（两两配不出矩形：V 只覆盖 y 中段，够不到 H1/H2）
+    _msp.add_line((0, 0), (board, 0))                           # H1
+    _msp.add_line((0, board), (board, board))                   # H2
+    _msp.add_line((0, 3300), (0, 5400))                         # V（短，夹在两框之间）
+    for _k in (0, 1):
+        _y0 = 1000.0 + _k * gap
+        _x0 = 3000.0
+        _x1 = _x0 + w
+        _msp.add_line((_x0, _y0), (_x0, _y0 + h))                     # 左：完整
+        _msp.add_line((_x1, _y0), (_x1, _y0 + h))                     # 右：完整
+        _msp.add_line((_x0, _y0), (_x1, _y0))                         # 下：完整
+        _msp.add_line((_x0, _y0 + h), (_x0 + 650, _y0 + h))            # 上：第1段
+        _msp.add_line((_x0 + 650, _y0 + h), (_x1, _y0 + h))            # 上：第2段
+        for _i in range(inner):
+            _msp.add_circle((_x0 + 200 + _i * 70, _y0 + h * 0.5), 20)
+    _doc.layouts.new('布局1')
+    return to_bytes(_doc)
+
+
+def _r140_sizes(data):
+    _r = parse(data)
+    return (_r['frame_count'],
+            sorted((round(c['width']), round(c['height'])) for c in _r['candidates']))
+
+
+def _r140_run_with_ratio(ratio, data):
+    """以指定版面占比门槛跑一次（用后恢复），用于钉死因果。"""
+    import os as _os
+    _old = _os.environ.get('FRAME_PARSER_P1_MERGED_MIN_RATIO')
+    _os.environ['FRAME_PARSER_P1_MERGED_MIN_RATIO'] = str(ratio)
+    try:
+        return _r140_sizes(data)
+    finally:
+        if _old is None:
+            _os.environ.pop('FRAME_PARSER_P1_MERGED_MIN_RATIO', None)
+        else:
+            _os.environ['FRAME_PARSER_P1_MERGED_MIN_RATIO'] = _old
+
+
+# R140-① 报障形态：边被拆段的大页框必须识别出来，且尺寸正确。
+check('R140-① 上下边各被拆成 2~3 段的 136097×84100 页框必须识别为 1 框',
+      lambda: _r140_sizes(_build_r140_split_frame()),
+      lambda got: got == (1, [(136097, 84100)]))
+
+# R140-② 反向守卫：两个「标注尺寸线围出的框」占版面仅 3%，不得当图框。
+#   这条就是 一层.dwg 的复现 —— 没有版面门槛时它给出 2 框（见 R140-③）。
+check('R140-② 尺寸线围出的 1530×2180 ×2（占版面 3%、ratio 距 √2 仅 0.75%）不得当图框',
+      lambda: expect_error_no_frame(_build_r140_dim_frame()),
+      lambda got: got is True)
+
+# R140-③ 因果钉死：门槛设为 0（等于"只要拆段能拼上就算"）→ R140-② 又变回 2 框。
+#   证明 R140-② 的 0 框确实由「版面占比门槛」决定，不是被别的判据顺手挡掉的。
+check('R140-③ 门槛设为 0 后 R140-② 又变回 2 框（证明是版面门槛在起作用）',
+      lambda: _r140_run_with_ratio(0, _build_r140_dim_frame()),
+      lambda got: got == (2, [(1530, 2180), (1530, 2180)]))
+
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

@@ -717,6 +717,12 @@ LINE_PAIR_FULL_SPAN = 180         # 聚类合并跨度 ≥ 该值视为"图框�
                                   # 配对隔 98 个聚类永远够不到 → 真图框漏识别、8 个 2.5×4 微孔
                                   # 反成候选。180 覆盖 A4 竖边 210/A3 297 等常用下限（A5 148 仍
                                   # 不入，A5 LINE 图框极罕见）。防组合爆炸由预过滤+比例剪枝+预算兜底。
+# R140：P1「同坐标共线拆段」通道的版面占比门槛（见 _h_side_merged 注释）。
+#   矩形面积 / 本 layout 水平垂直线整体范围面积 ≥ 该值，才允许用"多段拼接"充当边。
+#   依据：图框就是整张纸 —— 报障图 136097×84100 占版面 98%；而 一层.dwg 被判成
+#   图框的两个 1530×2180（其实是标注层尺寸线围出的区域）只占 3.1%。多图框并排
+#   （2×2 各 25%、8 张并排各 12.5%）仍在门槛之上，不受影响。
+P1_MERGED_MIN_LAYOUT_RATIO = 0.10
 
 
 def _merge_segments(segs, eps=LINE_CLUSTER_EPS):
@@ -822,6 +828,14 @@ def detect_rectangles_from_lines(entity_list, rot=None):
     """
     h_lines = []
     v_lines = []
+    # R140：拆段通道的版面占比门槛，按调用读环境变量（与 COND_D_RATIO_TOL 同口径，
+    #   便于回归对照与单测钉死因果；detect 每 layout 只调一次，开销可忽略）
+    _min_merged_ratio = P1_MERGED_MIN_LAYOUT_RATIO
+    if os.environ.get('FRAME_PARSER_P1_MERGED_MIN_RATIO'):
+        try:
+            _min_merged_ratio = float(os.environ['FRAME_PARSER_P1_MERGED_MIN_RATIO'])
+        except ValueError:
+            pass
     for ent in entity_list:
         if ent.dxftype() != 'LINE':
             continue
@@ -852,6 +866,12 @@ def detect_rectangles_from_lines(entity_list, rot=None):
                             min(start.y, end.y), max(start.y, end.y)))
     if len(h_lines) < 2 or len(v_lines) < 2:
         return []
+
+    # R140：水平/垂直线的整体覆盖范围 —— 供 P1「同坐标共线拆段」通道做版面占比
+    #   门槛用（见 _h_side_merged 注释）。只统计水平/垂直 LINE（矩形边必然是这二
+    #   者），斜线不参与，避免注释引线把版面撑大。O(n) 一次，不影响主循环。
+    _lay_area = ((max(t[2] for t in h_lines) - min(t[1] for t in h_lines))
+                 * (max(t[2] for t in v_lines) - min(t[1] for t in v_lines)))
 
     h_clusters = _cluster_parallel_lines(h_lines)
     v_clusters = _cluster_parallel_lines(v_lines)
@@ -1010,6 +1030,46 @@ def detect_rectangles_from_lines(entity_list, rot=None):
             if (abs(_c - coord) <= LINE_CLUSTER_EPS
                     and _l <= lo + LINE_CLUSTER_EPS and _h >= hi - LINE_CLUSTER_EPS):
                 return True
+        return False
+
+    # ---------- R140：P1 补充通道「同坐标共线拆段」 ----------
+    # 场景（滚筒型固定式带式输送机的设计-总装配图.dwg 识 0 实际 1 个
+    #   136097×84100）：图框四条边都在，但上下边各被拆成 2~3 段 LINE ——
+    #   下边 y=286431.06 = 1338548.43→1425819.94（87271.5）+ 1425819.94→1474645.14
+    #   （48825.2），上边 y=370531.06 更碎（87271.5 + 31628.35 + 43014.9），
+    #   断点 1425819.94 / 1431630.25 是首尾**精确相接**的（CAXA 导出的图常见，
+    #   本图全在 CAXA0 层）。左右两条竖线反而是单条完整 84100。P1 要求
+    #   「每条边至少一条完整 LINE」，上下边没有一条单线跨满 136097 → 整个框被
+    #   拒，下游 is_frame_like / 条件C（rel 高达 98%）根本轮不到。
+    #
+    #   为什么补这条通道不算推翻 P1：P1 的立法本意写在 _has_full_side_line 里，
+    #   是防「边线残段 + 内部标注线拼凑出假矩形」——残段的特征是**有缝**、
+    #   或坐标不在同一条线上。这里判的是「同一坐标（|Δ|≤0.5mm）上的段，经
+    #   _merge_segments 合并后严格无缝隙地覆盖整条边」，与"一条被画断的线"
+    #   在几何上不可区分。真正的残段拼凑（段间有几十上百 mm 的缺口）过不了
+    #   _merge_segments 的 eps=0.5，仍在门外。
+    #
+    #   注意与上面「覆盖校验」那一步的分工：`_coverage_contains(h_common, xa, xb)`
+    #   查的是横线**对**（ya、yb 两条）的公共覆盖交集，只要 h_pairs 配对成立就已
+    #   隐含单条 cluster 的覆盖；本通道把「该边有覆盖」从"配对隐含"变成"逐边
+    #   显式"，仍逐个要求 4 条边在自己的坐标上覆盖满，不是废弃 P1。
+    #   实测影响面见提交信息（全量回归）。
+    def _h_side_merged(coord, lo, hi):
+        _i = _bisect.bisect_left(_h_cs_clusters, coord - LINE_CLUSTER_EPS - 1e-6)
+        _j = _bisect.bisect_right(_h_cs_clusters, coord + LINE_CLUSTER_EPS + 1e-6)
+        for _k in range(_i, _j):
+            if abs(_h_cs_clusters[_k] - coord) <= LINE_CLUSTER_EPS:
+                if _coverage_contains(h_clusters[_k][1], lo, hi):
+                    return True
+        return False
+
+    def _v_side_merged(coord, lo, hi):
+        _i = _bisect.bisect_left(_v_cs_clusters, coord - LINE_CLUSTER_EPS - 1e-6)
+        _j = _bisect.bisect_right(_v_cs_clusters, coord + LINE_CLUSTER_EPS + 1e-6)
+        for _k in range(_i, _j):
+            if abs(_v_cs_clusters[_k] - coord) <= LINE_CLUSTER_EPS:
+                if _coverage_contains(v_clusters[_k][1], lo, hi):
+                    return True
         return False
 
     # ---------- R108：轴网交叉格子剔除 ----------
@@ -1222,16 +1282,18 @@ def detect_rectangles_from_lines(entity_list, rot=None):
                 # 防止"边线残段+内部标注线拼凑出假矩形"
                 # （R38：_h_side_full/_v_side_full bisect 窗口版，等价替代
                 #   _has_full_side_line 全量线性扫描）
-                if not _h_side_full(ya, xa, xb):
-                    continue
-                if not _h_side_full(yb, xa, xb):
-                    continue
-                if not _v_side_full(xa, ya, yb):
-                    continue
-                if not _v_side_full(xb, ya, yb):
-                    continue
+                # R140：单条完整线不成立时，再试「同坐标共线拆段」通道，但要求
+                #   该矩形占版面 ≥ P1_MERGED_MIN_LAYOUT_RATIO（图框就是整张纸）。
+                #   先判 4 条单线（快路径），全过就不必碰合并判断。
                 w = xb - xa
                 h = yb - ya
+                if not (_h_side_full(ya, xa, xb) and _h_side_full(yb, xa, xb)
+                        and _v_side_full(xa, ya, yb) and _v_side_full(xb, ya, yb)):
+                    if _lay_area <= 0 or w * h < _lay_area * _min_merged_ratio:
+                        continue
+                    if not (_h_side_merged(ya, xa, xb) and _h_side_merged(yb, xa, xb)
+                            and _v_side_merged(xa, ya, yb) and _v_side_merged(xb, ya, yb)):
+                        continue
                 if min(w, h) < MIN_LINE_RECT_SIDE:
                     continue
                 if has_internal_divider(xa, ya, xb, yb):
