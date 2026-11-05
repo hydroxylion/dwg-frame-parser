@@ -5708,6 +5708,14 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         # 无 D 候选的图零开销。
         COND_D_MIN_ENTITIES = 12   # 框内实体数下限（电子称真页框 517/485 vs 坡道大样内容框 ≤1）
         COND_D_INNER_TOL = 1.0     # 严格内缩容差（mm）
+        # R138：条件D 的 √2 容差 —— 与条件F 同口径 ±2%（原为继承条件B 的 _near_sqrt2 ±10%）
+        #   理由见条件D 处的注释（DTⅡ型固定式带式输送机.dwg 识 2 实际 0）。
+        COND_D_RATIO_TOL = 0.02
+        if os.environ.get('FRAME_PARSER_COND_D_RATIO_TOL'):
+            try:
+                COND_D_RATIO_TOL = float(os.environ['FRAME_PARSER_COND_D_RATIO_TOL'])
+            except ValueError:
+                pass
         _cond_d_ent_bbs = {}
 
         # ---------- R132：修一个静默 NameError（跨作用域引用） ----------
@@ -6112,8 +6120,29 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #   近乎空白（实测 0/0/1 个）——框内**严格内部**（边界内缩 1mm，排除候选
             #   自身 4 条边线）完全包含实体 ≥ COND_D_MIN_ENTITIES 才判页框。
             #   阈值与条件 H 对齐；分离度极端（517 vs ≤1），12 留足余量。
+            #   R138：√2 容差从继承来的 ±10%（_near_sqrt2）收紧到 ±2%（同条件F）。
+            #     条件D 判的是「同一个页框模板重复排版」——重复出来的尺寸一模一样，
+            #     比例自然精确到纸幅级（84100/59400 = 1.4158，偏差 0.11%；
+            #     电子称 14894×10531 = 1.41427，偏差 0.01%）。±10% 是 _near_sqrt2
+            #     从条件B 继承下来的宽口径，从未为 D 单独论证过。
+            #     现场（DTⅡ型固定式带式输送机.dwg 识 2 实际 0）：
+            #       这张图的模型空间**根本没有图框**——纸面本该是 A0@1:100
+            #       118900×84100（左、上、下三条边都精确：左竖线 1338548.4、
+            #       上下横线 y=370531.1/286431.1 相隔 84100、横线止于 1457448.3
+            #       = 1338548.4+118900），**唯独右边那条竖线没画**：图里确实有一条
+            #       84100 长的竖线，但它在 x=1474645.1、比正确位置偏出 17197mm，
+            #       纵向还整体下移 197mm，框永远闭不上。
+            #       于是候选池里最大的闭合矩形只是零件轮廓。报出来的两个
+            #       4000×2655 是同一台中段皮带机两侧滚筒的对称半区：左右竖边是
+            #       `中心` 层的中心线、上下边是侧板轮廓（`粗 1` 层），四条边都延伸
+            #       到框外，框内 62 个实体、**零文字**。ratio 1.5066 与 √2 差 6.50%，
+            #       恰好只靠旧口径 ±10% 擦线通过；同尺寸×2 是"左右对称的两半"，
+            #       不是"重复排版的两页"。
+            #     反向验证：条件F 早就是 ±2%（84100/59400 偏差 0.11% vs 73600×57400
+            #       偏差 9.35%），同一个"纸幅"概念在两处口径不一致本身即是隐患。
             if (c['type'] == '直线矩形' and c['short_side'] >= 500
-                    and _near_sqrt2 and _rect_same_size >= 2
+                    and abs(c['ratio'] - _SQRT2) / _SQRT2 <= COND_D_RATIO_TOL
+                    and _rect_same_size >= 2
                     and c['rel_area_ratio'] >= 0.01
                     and _cond_d_entity_count(c) >= COND_D_MIN_ENTITIES):
                 c['_via'] = 'D'
