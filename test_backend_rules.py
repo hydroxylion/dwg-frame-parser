@@ -7959,17 +7959,45 @@ if os.path.exists(_R134_BIG0):
     with open(_R134_BIG0, 'rb') as _f:
         _r134_b0 = _f.read()
 
-    # 一层.dwg 是相反的样本：候选非空但都不过图框特征 → force_max 仍给尺寸 + 0 框。
-    # 这条边界必须保住：no_frame 只认"连候选都没有"，不能把"有候选但 0 框"也吞进去，
-    # 否则 一层.dwg 会从 7530×2730 变成 0×0，回归基线会整片漂。
-    check('R134-③ 有候选但 0 框（一层.dwg）不得判成无图框：force_max 仍返回 '
-          '7530×2730 且 no_frame 不为真',
-          lambda: (lambda _r: (_r['width'], _r['height'], _r['frame_count'],
-                               bool(_r.get('no_frame'))))(
-              _r134_run(_r134_b0, 'force_max', '一层.dwg')),
-          lambda got: got == (7530, 2730, 0, False))
+    # R139 把 R134-③ 的结论**翻转**了。R134 当年的理由是「no_frame 只认"连候选都没
+    #   有"，不能把"有候选但 0 框"也吞进去，否则 一层.dwg 会从 7530×2730 变成 0×0，
+    #   回归基线会整片漂」——**这个理由不成立**：回归基线只记录 smart 模式的结果（这
+    #   三张图在基线里都是 `error: 未检测到图框`），force_max 的返回根本不进基线，
+    #   改完 120 张依旧零 DIFF（已实测）。
+    #   而留着降级尺寸的实际后果是自相矛盾：图框数 0 却报出一个尺寸，而那个尺寸只是
+    #   当时最大的**构件轮廓**（一层 7530×2730 是家具/洁具小矩形、DTⅡ 4000×2655 是
+    #   皮带机滚筒的对称半区）——"0 个图框 + 一个尺寸"比留 "—" 更误导。
+    check('R139-① 有候选但全被图框特征拒掉（一层.dwg）→ force_max 如实报无图框 '
+          '(0×0, no_frame=True)，不拿最大候选顶替尺寸（R134-③ 结论翻转）',
+          lambda: _r134_sig(_r134_run(_r134_b0, 'force_max', '一层.dwg')),
+          lambda got: got == (0, 0, 0, True, 0))
 else:
-    print('SKIP  R134-③ 有候选但 0 框边界（未找到 一层.dwg）')
+    print('SKIP  R139-① 有候选但 0 框 → 无图框（未找到 一层.dwg）')
+
+
+# R139-② 报障图端到端：smart 抛「未检测到图框」（这条错误信息被前端用来触发
+#   force_max 重试，勿改）→ force_max 必须返回无图框载荷，前端 isNoFrameResult()
+#   命中后记为「无图框」、尺寸列留 "—"。
+_R139_DT = os.path.join(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）',
+                        'DTⅡ型固定式带式输送机.dwg')
+if os.path.exists(_R139_DT):
+    with open(_R139_DT, 'rb') as _f:
+        _r139_dt_bin = _f.read()
+
+    def _r139_dt_smart_raises():
+        try:
+            _r134_run(_r139_dt_bin, 'smart', 'DTⅡ.dwg')
+            return False
+        except Exception as _e:          # 外层包成 RuntimeError('解析失败: ...')
+            return '未检测到图框' in str(_e)
+
+    check('R139-② DTⅡ型固定式带式输送机.dwg 端到端：smart 抛「未检测到图框」→ '
+          'force_max 返回无图框载荷 (0×0, no_frame=True)',
+          lambda: (_r139_dt_smart_raises(),
+                   _r134_sig(_r134_run(_r139_dt_bin, 'force_max', 'DTⅡ.dwg'))),
+          lambda got: got == (True, (0, 0, 0, True, 0)))
+else:
+    print('SKIP  R139-② DTⅡ 端到端（未找到图纸）')
 
 
 def _r134_route_keys():

@@ -3100,7 +3100,8 @@ def collect_candidates_from_layout(layout, doc, layout_name):
     # 取 2.5e6 留两倍余量。超限的巨型底图/xref 外包络（S010 北区商业街底图
     # 6345273×1806446，块内含超长道路线使构件证据"合格"）不得计回——否则 rel
     # 分母被污染 1833 倍，真图框（105100×59400）rel 仅 0.054%，条件 C 永远
-    # 拒之门外 → fc=0 漏检（前端 force_max 降级显示"尺寸对但图框数 0"）。
+    # 拒之门外 → fc=0 漏检（前端 force_max 降级显示"尺寸对但图框数 0"；
+    # R139 后该降级路径已改为如实报「无图框」、尺寸留 "—"）。
     _R27_CREDIT_MAX_SIDE = 2_500_000
     # R60 多页拼版块拆分：块定义内 ≥2 个互不嵌套的图框级闭合矩形页框
     #   （美立方-说明.dwg：X-美立方说明模板 块内 2 张 84100×59400 页框上下
@@ -6236,7 +6237,8 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             #   块定义命中 A 系裸尺寸（594×420）→ 42000 ∉ A 系全灭；该图框又死于
             #   A/C（area_ratio 7.62%<15%、rel 7.62%<10%——分母被 R27 拒绝并计回的
             #   巨型内容块 223536×146407 撑大）→ fc=0，smart 抛"未检测到图框"触发
-            #   前端 force_max 重试 → 前端"尺寸对但图框数量 0"。
+            #   前端 force_max 重试 → 前端"尺寸对但图框数量 0"（R139 后这两个
+            #   降级展示已改为如实报「无图框」、尺寸留 "—"）。
             #   扩展：等效比例链「标准A系 → 块定义×实例倍率 = 实例尺寸」——实例短边
             #   命中某 A 系短边 × 白名单倍率（相对容差 1%，与 k 校验同口径）、实例
             #   长边 ≈ 短边×√2，且实例相对块定义等比（两方向比值一致 ≤0.5%，防非
@@ -9476,8 +9478,9 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         #   「无图框」与「解析失败」分成两个不同状态。
         # 不做兜底尺寸：这张图若拿 layout 总包围盒会得到 11963×11963，被前端幅面
         #   判定当成本图尺寸，等于用一个新的错误掩盖旧错误。
-        def _no_frame_payload():
-            safe_log("ℹ️ 无图框：本次没有任何可用候选矩形（如实记为 0 框，不属于解析失败）")
+        def _no_frame_payload(
+                _msg='ℹ️ 无图框：本次没有任何可用候选矩形（如实记为 0 框，不属于解析失败）'):
+            safe_log(_msg)
             return {
                 'width': 0,
                 'height': 0,
@@ -9493,6 +9496,26 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             if not all_candidates:
                 # 空候选时 force_max 无「最大」可取：这是 R134 修复的崩溃点
                 return _no_frame_payload()
+            # R139：有候选、但**全部被图框特征拒掉**（frame_like 为空）→ 与「一个候选
+            #   都没有」是同一件事：这张图没有图框。R134 当年特意把这条边界留成
+            #   「照样把最大候选当降级尺寸报出去」，理由是「否则 一层.dwg 会从
+            #   7530×2730 变成 0×0，回归基线会整片漂」——**这个理由不成立**：基线
+            #   只记录 smart 模式的结果（这几张在基线里都是 `error: 未检测到图框`），
+            #   force_max 的返回根本不进基线，改它 120 张依旧零 DIFF。
+            #   而留着降级尺寸的后果是自相矛盾：DTⅡ型固定式带式输送机.dwg 显示
+            #   「图框数 0 + 尺寸 4000×2655 + 非标准」，其中 4000×2655 是皮带机滚筒
+            #   的对称半区、根本不是纸。同形态共 3 张（X-11号平面 57400×24800 /
+            #   一层 7530×2730 / 本图 4000×2655），报出的那个尺寸只是当时最大的
+            #   构件轮廓——**"图框数 0 + 一个尺寸"本身就是矛盾**，比留 "—" 更误导。
+            #   判据就是 frame_count（= len(frame_like)，此刻已算好）：0 即"没有一张
+            #   候选能当图框"。此时如实报无图框载荷（width=height=0 + no_frame=True），
+            #   前端 isNoFrameResult() 命中 → 记为「无图框」、尺寸列留 "—"。
+            #   注意 frame_like 非空时一律照旧报最大候选：force_max 的降级价值
+            #   （"图框存在但判据没收"时仍给出尺寸）不受影响。
+            if frame_count == 0:
+                return _no_frame_payload(
+                    f'ℹ️ 无图框：{len(all_candidates)} 个候选矩形全部不符合图框特征，'
+                    '如实记为 0 框（不拿最大候选顶替尺寸）')
             best = max(all_candidates, key=lambda c: c['area'])
             safe_log(f"✅ [强制最大矩形] 选中: {best['type']} | 布局: {best['layout']} | 尺寸: {best['width']:.2f} x {best['height']:.2f}")
             x1, y1, x2, y2 = best['bbox']
