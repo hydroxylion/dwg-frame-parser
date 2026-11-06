@@ -7836,6 +7836,33 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                          + ', '.join(f"{c['width']:.0f}x{c['height']:.0f}"
                                      for c in _h3_added))
 
+        # ---------- R147：内框判定「两轴均须真内缩」 ----------
+        # 场景（JYD1-50132M.dwg 模型空间建筑轴网）：所有候选是轴网上相邻的房间格，
+        #   127.5x157.5 与 118x157.5 三边完全贴合、只有左边错开 9mm（墙厚），
+        #   bbox 互相「包含」+ 面积比 0.86 —— 恰好落进所有「内框」判据的容差，
+        #   于是被当成双线框画法的外框+内框：
+        #     · 孤证⑥ 给 127 满 1.0 分救它逃出孤证复核；
+        #     · R66 豁免③ 又把 127 从共边网格链里捞出来（它左邻 140x157 已共边）。
+        #   真图框的内外框是**四边平行内缩**画法（R45/R109/R113 的 94%×95% 型），
+        #   两轴比例必然都 <1；「某轴比例恰为 1.000」在几何上只能是贴边重复/错位，
+        #   不可能是内框。故凡「包含即内框」的判据统统补一道两轴内缩约束。
+        #   开关 FRAME_PARSER_NO_INNER_AXIS=1 回退到旧口径（只看包含）。
+        _R147_INNER_AXIS = os.environ.get('FRAME_PARSER_NO_INNER_AXIS') != '1'
+        _R147_INNER_RATIO_MAX = 0.995
+
+        def _is_inner_border_147(_outer_bbox, _inner_bbox):
+            """R147：inner 是否为 outer 的**内缩内框**（两轴都必须真内缩）。"""
+            if not _R147_INNER_AXIS:
+                return True
+            _ow = _outer_bbox[2] - _outer_bbox[0]
+            _oh = _outer_bbox[3] - _outer_bbox[1]
+            _iw = _inner_bbox[2] - _inner_bbox[0]
+            _ih = _inner_bbox[3] - _inner_bbox[1]
+            if _ow <= 0 or _oh <= 0:
+                return False
+            return (_iw <= _ow * _R147_INNER_RATIO_MAX
+                    and _ih <= _oh * _R147_INNER_RATIO_MAX)
+
         # ---------- R66：共边网格链剔除（房间/防火分区/设备分格阵列） ----------
         # 场景（地下室接地6.12 fc 16→2）：模型空间 20 个直线矩形（7197~8401 ×
         #   11300~17800）是配电房分格阵列——x 起点严格等距（266848→274648→…→
@@ -7915,7 +7942,8 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                                 continue
                             _ob = _o['bbox']
                             if (_ob[0] >= _ux1 - 1 and _ob[1] >= _uy1 - 1 and
-                                    _ob[2] <= _ux2 + 1 and _ob[3] <= _uy2 + 1):
+                                    _ob[2] <= _ux2 + 1 and _ob[3] <= _uy2 + 1 and
+                                    _is_inner_border_147(_u['bbox'], _ob)):
                                 _has_border = True
                                 break
                         if _has_border:
@@ -8186,6 +8214,12 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 if (_ob[0] >= _c['bbox'][0] - 1 and _ob[1] >= _c['bbox'][1] - 1 and
                         _ob[2] <= _c['bbox'][2] + 1 and _ob[3] <= _c['bbox'][3] + 1 and
                         _o['area'] < _c['area']):
+                    # R147：贴边重复框（某轴比例恰为 1）不算嵌套内外框
+                    if not _is_inner_border_147(_c['bbox'], _ob):
+                        log_debug(f"    [R147·贴边非内框] ⑥ 排除 "
+                                  f"{_o['width']:.0f}x{_o['height']:.0f}"
+                                  f"（{_o['type']}，仅单轴内缩）")
+                        continue
                     _score += _SOLO_WEIGHTS['nested_frame']
                     _hits.append(f"⑥内含 {_o['width']:.0f}x{_o['height']:.0f}"
                                  f"({_o['type']})")
@@ -8214,6 +8248,8 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 if not (_ob[0] >= _c['bbox'][0] - 1 and _ob[1] >= _c['bbox'][1] - 1 and
                         _ob[2] <= _c['bbox'][2] + 1 and _ob[3] <= _c['bbox'][3] + 1):
                     continue  # 须严格同心包含
+                if not _is_inner_border_147(_c['bbox'], _ob):
+                    continue  # R147：两轴都须真内缩（单轴贴合不是内框）
                 _score += _SOLO_WEIGHTS['double_line_inner']
                 _hits.append(f"⑧双线内框 {_o['width']:.0f}x{_o['height']:.0f}"
                              f"({_o.get('insert_layer')})")

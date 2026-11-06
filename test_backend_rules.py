@@ -9483,4 +9483,162 @@ if _R146_REAL.exists():
 else:
     print('SKIP  R146-⑨⑩ XGZ-08 端到端（未找到文件）')
 
+
+# ==================== R147：内框判据「两轴均须真内缩」 ====================
+# 报障（JYD1-50132M.dwg 模型空间建筑轴网，用户口径"实际无图框"）：127.5x157.5 与
+# 118x157.5 两个格子**三边贴合**、只有左边错开 9mm（墙厚）。两者 bbox 互相「包含」
+# + 面积比 0.93 恰好落进所有「内框」判据的容差 → 孤证⑥ 给满 1.0 分救它逃出复核，
+# R66 豁免③ 又把它从共边网格链里捞出来 → 轴网格子被当成出图页框。
+# 真图框的内外框是**四边平行内缩**画法（R45/R109/R113 的 94%x95% 型），两轴比例
+# 必然都 <1；「某轴比例恰为 1.000」在几何上只能是贴边重复/错位，不可能是内框。
+# 故 R147 把所有「包含即内框」的判据（孤证⑥⑧、R66 豁免③）统一补上两轴内缩约束。
+
+def _r147_run(data, **env):
+    import os as _os
+    _saved = {k: _os.environ.get(k) for k in env}
+    for k, v in env.items():
+        _os.environ[k] = v
+    try:
+        try:
+            r = parse(data)
+            return [(round(c['width'], 1), round(c['height'], 1))
+                    for c in (r.get('candidates') or [])]
+        except RuntimeError as e:
+            return [] if '未检测到图框' in str(e) else 'ERR:%s' % str(e)[:40]
+    finally:
+        for k, v in _saved.items():
+            if v is None:
+                _os.environ.pop(k, None)
+            else:
+                _os.environ[k] = v
+
+
+def _r147_dilute(layout):
+    """远处散件：把 layout 包围盒撑到 ~3.1m² → area_ratio 压低走 via=C
+    （via=A 的候选不进孤证复核，夹具必须绕开），同时避开 R79「内容总面积
+    4~100m²」的实物尺度详图空间带（否则 rel 分母被换成内容总面积）。"""
+    layout.add_line((1800, 1700), (1900, 1700))
+    layout.add_line((1800, 1800), (1800, 1700))
+
+
+def _build_r147_single_axis():
+    """单轴零内缩嵌套：外框直线矩形 100x157.5 + 内框闭合多段线 97x157.5
+    （x 轴左右各内缩 1.5，y 轴完全贴合）—— 报障图的同构最小复现。"""
+    doc = make_doc()
+    msp = doc.modelspace()
+    add_line_rect(msp, 0, 0, 100, 157.5)
+    add_closed_rect(msp, 1.5, 0, 97, 157.5)
+    add_page_text(msp, 5, 5, 90, 145)
+    _r147_dilute(msp)
+    return to_bytes(doc)
+
+
+def _build_r147_true_double():
+    """对照：真双线框（四边各内缩 4）→ 两轴都有内缩，必须照旧识别。"""
+    doc = make_doc()
+    msp = doc.modelspace()
+    add_line_rect(msp, 0, 0, 100, 157.5)
+    add_closed_rect(msp, 4, 4, 92, 149.5)
+    add_page_text(msp, 5, 5, 90, 145)
+    _r147_dilute(msp)
+    return to_bytes(doc)
+
+
+def _build_r147_chain_with_border():
+    """R66 豁免③ 守卫：3 个共边格子（尺寸各异以避开豁免①同尺寸≥3），
+    中间那个带真内框（四边各内缩 4）。"""
+    doc = make_doc()
+    msp = doc.modelspace()
+    add_line_rect(msp, 0, 0, 100, 157.5)        # A
+    add_line_rect(msp, 100, 0, 100, 157.5)      # B（带内框）
+    add_line_rect(msp, 200, 0, 100, 160)        # C
+    add_closed_rect(msp, 104, 4, 92, 149.5)     # B 的真内框
+    add_page_text(msp, 10, 10, 80, 140)
+    add_page_text(msp, 210, 10, 80, 140)
+    _r147_dilute(msp)
+    return to_bytes(doc)
+
+
+def _build_r147_mixed():
+    """混合：轴网单轴零内缩格子 + 一张真页框（420x297 带四边内缩 10 的内框）。"""
+    doc = make_doc()
+    msp = doc.modelspace()
+    add_line_rect(msp, 0, 0, 100, 157.5)
+    add_closed_rect(msp, 1.5, 0, 97, 157.5)
+    add_page_text(msp, 5, 5, 90, 145)
+    add_line_rect(msp, 400, 0, 420, 297)
+    add_closed_rect(msp, 410, 10, 400, 277)
+    add_page_text(msp, 420, 20, 380, 250)
+    _r147_dilute(msp)
+    return to_bytes(doc)
+
+
+# R147-① 单轴零内缩嵌套（贴边格子）不得当图框
+check('R147-① 单轴零内缩嵌套必须被剔（y 向比例恰为 1.000 = 贴边格子，不是内框）',
+      lambda: _r147_run(_build_r147_single_axis()),
+      lambda r: r == [])
+
+# R147-② 因果钉死：关掉两轴内缩约束 → 100x157.5 立刻回来
+check('R147-② 开关回退：NO_INNER_AXIS=1 时 100x157.5 回归（钉死因果）',
+      lambda: _r147_run(_build_r147_single_axis(), FRAME_PARSER_NO_INNER_AXIS='1'),
+      lambda r: r == [(100, 158)])
+
+# R147-③ 守卫：真双线框（四边内缩）必须照旧识别
+check('R147-③ 守卫：真双线框（四边各内缩 4）仍识别 100x157.5',
+      lambda: _r147_run(_build_r147_true_double()),
+      lambda r: r == [(100, 158)])
+
+# R147-④ 守卫：R66 豁免③ 对真内框仍生效（网格链里带内框的成员不被剔）
+check('R147-④ 守卫：共边网格链里带真内框的成员仍靠豁免③ 保留',
+      lambda: _r147_run(_build_r147_chain_with_border()),
+      lambda r: r == [(100, 158)])
+
+# R147-⑤ 混合场景：贴边格子剔掉、真页框留下
+check('R147-⑤ 混合：贴边格子在真页框旁边时仍被剔，只剩 420x297',
+      lambda: _r147_run(_build_r147_mixed()),
+      lambda r: r == [(420.0, 297.0)])
+
+# R147-⑥ 混合场景因果钉死：关掉约束 → 贴边格子复活成 2 框
+check('R147-⑥ 开关回退：NO_INNER_AXIS=1 时混合场景回到 2 框（复现误判）',
+      lambda: _r147_run(_build_r147_mixed(), FRAME_PARSER_NO_INNER_AXIS='1'),
+      lambda r: len(r) == 2 and (420.0, 297.0) in r)
+
+# R147-⑦ 报障图端到端（模型空间建筑轴网，实际无图框）
+_R147_REAL = r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）/JYD1-50132M.dwg'
+import os as _r147_os
+if _r147_os.path.exists(_R147_REAL):
+
+    def _r147_real_fc(**env):
+        import os as _os
+        _saved = {k: _os.environ.get(k) for k in env}
+        for k, v in env.items():
+            _os.environ[k] = v
+        try:
+            with open(_R147_REAL, 'rb') as _f:
+                _data = _f.read()
+            try:
+                r = get_bounding_box_from_bytes(_data, 'JYD1-50132M.dwg',
+                                                'polyline', 'mm', 'smart')
+                return r.get('frame_count')
+            except RuntimeError as _e:
+                return 0 if '未检测到图框' in str(_e) else 'ERR:%s' % str(_e)[:40]
+        finally:
+            for _k, _v in _saved.items():
+                if _v is None:
+                    _os.environ.pop(_k, None)
+                else:
+                    _os.environ[_k] = _v
+
+    # R147-⑦ 报障图端到端：用户口径"实际模型空间无图框"，必须 0 框。
+    check('R147-⑦ JYD1-50132M 端到端 0 框（建筑轴网格子不得算图框）',
+          _r147_real_fc,
+          lambda fc: fc == 0)
+
+    # R147-⑧ 因果钉死：关掉两轴内缩约束 → 回到报障时的 1 框。
+    check('R147-⑧ 开关回退：NO_INNER_AXIS=1 时 JYD1-50132M 回到 1 框（复现报障）',
+          lambda: _r147_real_fc(FRAME_PARSER_NO_INNER_AXIS='1'),
+          lambda fc: fc == 1)
+else:
+    print('SKIP  R147-⑦⑧ JYD1-50132M 端到端（未找到文件）')
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
