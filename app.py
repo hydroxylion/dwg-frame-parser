@@ -6583,8 +6583,167 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                             return True
             return False
 
+        # ---------- R146：块参照候选的「页面结构」指纹（出图页 vs 内容块） ----------
+        #   现场（XGZ-08铸石砌板散料刮板输送机.dwg 识 2 实际 0，用户口径「实际无图框」）：
+        #   模型空间压根没有图框——图框层 28 个实体全是 PC_MXB_BLOCK 明细行
+        #   3780×171（ratio 22，早被比例门槛剔掉）。真正被放行的是两个内容块：
+        #     ① A$C434A45B3「基本参数表」（块定义 1242×2440，实例 1368×2520）：
+        #        块内只有 33 条表格线（24 横 / 9 竖）+ 52 条文字，零曲线零标注零填充；
+        #        横线在 y=0,104,208,…,2289 上**等距满幅铺开 18 条**，把块高切成 23 行
+        #        —— 这是张表格，不是图纸页。
+        #     ② A$C2DE2129C 零件剖视图（1479×796）：93 个纯几何实体（LINE/CIRCLE/
+        #        ARC/HATCH + 4 个嵌套子块），**递归零文字**，块内最长横线只覆盖块宽
+        #        的 55% —— 块 bbox 是散落几何的外接矩形，压根没有页面边框。
+        #   两条判据各打掉一个，都只作用于「块参照插入」候选（直线矩形/闭合多段线由
+        #   P1 严格矩形与 R144 空框管，不在这里动手），各带一个回退开关：
+        #     A 匿名包装块（FRAME_PARSER_NO_BLOCK_ANON=1 回退）：
+        #        `A$Cxxxxxx` 前缀 + rel < 50% + 块内递归零文字 → 包装的是图形内容。
+        #        这就是 R131 的判据，但 R131 的正则只认 `*U/*D/*X` 星号前缀（
+        #        `^\*[A-Z]{1,3}\d+$`），而 **AutoCAD 复制/粘贴产生的匿名块名字是
+        #        `A$C` + 十六进制串**（本图两个误判块都是这个形态，`效果图.dwg` 的
+        #        真图框块 `A$C5242259E` 也是同名形态但**块内有图名图号文字**，
+        #        故 rel/文字两个附加条件一条不少地保留）。
+        #        为什么不用「贯穿边框跨度」判它：`报障图` 的 ② 号块最长竖线覆盖块高
+        #        92%、只有横线才 55%，与「块内两页真拼版」（R116-C 的 841×1188：
+        #        横线 100%、竖线 50%）、「块内含嵌套页框且内容外溢」（R86 的
+        #        PLAN_002：横 100%、竖 37%）、「LINE 边框块 98% 宽 63% 高」（R94
+        #        对照块）形态完全重合 —— 任何跨度阈值都会连真页一起误杀。
+        #     B 表格（FRAME_PARSER_NO_BLOCK_TABLE=1 回退）：
+        #        贯穿横线（单条长 ≥80% 块宽）的不同 y 数 ≥10 **且**贯穿竖线（长 ≥80%
+        #        块高）的不同 x 数 ≥3 → 页面被**网格**切成 ≥9 条行带，是表格而非图框。
+        #        实测基线 83 个块参照图框的贯穿横线最多 6 条（wetwetwt / A$C198905A2 /
+        #        支座 TILED BLOCK / 罗马都市 图框 都在 4~6，那是外框+内框+少量贯穿明细
+        #        线），本图候选①为 18 横 × 9 竖（双向全部贯穿）。**列线是必须的**：
+        #        首版只看横线，全量单测一次红 9 条 —— `R123-④` 的 PAGE 块内嵌 4 个镜像
+        #        TBL 子块（40 条 84100 长横线 = 满块宽，但竖线只有 4000 长 = 块高 6.7%）
+        #        与 `R126/R130` 的页内说明框（22000×55000 + 50 条横线，竖线只有左右
+        #        两条边框）都是**只有行线**的合法页/页内内容，被误当表格剔掉。
+        _R146_ANON = os.environ.get('FRAME_PARSER_NO_BLOCK_ANON') != '1'
+        _R146_TABLE = os.environ.get('FRAME_PARSER_NO_BLOCK_TABLE') != '1'
+        # AutoCAD「复制/粘贴」匿名块命名（A$C + 十六进制串）。与 R131 的 `*U` 家族
+        #   同为匿名块，只是前缀不同——R131 只在 `*` 家族上生效，这类一直漏在规则外。
+        _ANON_AC_RE = re.compile(r'^A\$C[0-9A-Za-z]+$')
+        R146_TABLE_ROWS = 10   # 贯穿横线数下限（表格行带：页面被横线切 ≥10 行）
+        R146_TABLE_COLS = 3    # 贯穿竖线数下限（表格的列线；只有横线的叫说明框/明细清单）
+        _r146_rows_cache = {}
+
+        def _block_grid_146(_bn146):
+            """块定义内的「贯穿格线」双向计数 → (不同 y 的行线数, 不同 x 的列线数)。
+
+            贯穿口径：水平线段长 ≥ 块宽 ×80%（行线）；垂直线段长 ≥ 块高 ×80%（列线）。
+            **必须双向都成立才算表格**：只有行线的是说明框/明细清单（页内合法内容），
+            只有列线的是分区线；表格是网格，两个方向都得贯穿。
+            线段来源：块内 LINE、LWPOLYLINE/POLYLINE 的**轴对齐**边、嵌套 INSERT（按 xscale/yscale
+            递归；旋转非 90° 倍数的子块跳过——轴向口径失效，宁可少算也不误判）。
+            块宽用 block_world_bbox（已按 R116 去离群散件），不用裸几何极值：
+            块里一个远处散件就能把分母撑爆，所有贯穿线全部失效、指纹归零。
+            取不到块/尺寸退化 → 返回 (0, 0)（**不否决**，保守）。
+            """
+            if _bn146 in _r146_rows_cache:
+                return _r146_rows_cache[_bn146]
+            _rows146 = _cols146 = 0
+            try:
+                _bb146 = block_world_bbox(doc, _bn146)
+                _w146 = abs(_bb146[2] - _bb146[0]) if _bb146 else 0.0
+                _h146 = abs(_bb146[3] - _bb146[1]) if _bb146 else 0.0
+                if _w146 > 0 and _h146 > 0:
+                    _hs146 = []
+                    _vs146 = []
+
+                    def _walk146(_nm146, _sx146=1.0, _sy146=1.0, _seen146=None, _d146=0):
+                        if _seen146 is None:
+                            _seen146 = set()
+                        if _d146 > 4 or _nm146 in _seen146 or _nm146 not in doc.blocks:
+                            return
+                        _seen146.add(_nm146)
+                        for _e146 in doc.blocks[_nm146]:
+                            try:
+                                _t146 = _e146.dxftype()
+                                # R112 同口径：不可见实体不参与结构度量
+                                if is_entity_invisible(_e146):
+                                    continue
+                                if _t146 == 'LINE':
+                                    _s146 = _e146.dxf.start
+                                    _q146 = _e146.dxf.end
+                                    _ay146 = _s146.y * _sy146
+                                    _by146 = _q146.y * _sy146
+                                    _ax146 = _s146.x * _sx146
+                                    _bx146 = _q146.x * _sx146
+                                    if abs(_ay146 - _by146) < 1e-6:
+                                        _hs146.append((min(_ax146, _bx146),
+                                                       max(_ax146, _bx146), _ay146))
+                                    elif abs(_ax146 - _bx146) < 1e-6:
+                                        _vs146.append((min(_ay146, _by146),
+                                                       max(_ay146, _by146), _ax146))
+                                elif _t146 in ('LWPOLYLINE', 'POLYLINE'):
+                                    if _t146 == 'LWPOLYLINE':
+                                        _ps146 = [(p[0] * _sx146, p[1] * _sy146)
+                                                  for p in _e146.get_points('xy')]
+                                        _cl146 = bool(_e146.closed)
+                                    else:
+                                        _ps146 = [(v.dxf.location.x * _sx146,
+                                                   v.dxf.location.y * _sy146)
+                                                  for v in _e146.vertices]
+                                        _cl146 = bool(is_polyline_closed(_e146))
+                                    _pr146 = list(zip(_ps146, _ps146[1:]))
+                                    if _cl146 and len(_ps146) >= 3:
+                                        _pr146.append((_ps146[-1], _ps146[0]))
+                                    for _pa146, _pb146 in _pr146:
+                                        if abs(_pa146[1] - _pb146[1]) < 1e-6:
+                                            _hs146.append((min(_pa146[0], _pb146[0]),
+                                                           max(_pa146[0], _pb146[0]),
+                                                           _pa146[1]))
+                                        elif abs(_pa146[0] - _pb146[0]) < 1e-6:
+                                            _vs146.append((min(_pa146[1], _pb146[1]),
+                                                           max(_pa146[1], _pb146[1]),
+                                                           _pa146[0]))
+                                elif _t146 == 'INSERT':
+                                    _rot146 = (getattr(_e146.dxf, 'rotation', 0) or 0) % 90.0
+                                    if min(abs(_rot146), abs(_rot146 - 90.0)) < 1e-6:
+                                        _walk146(_e146.dxf.name,
+                                                 _sx146 * abs(getattr(_e146.dxf, 'xscale', 1) or 1),
+                                                 _sy146 * abs(getattr(_e146.dxf, 'yscale', 1) or 1),
+                                                 _seen146, _d146 + 1)
+                            except Exception:
+                                continue
+
+                    _walk146(_bn146)
+                    _rows146 = len({round(_y146, 1) for lo, hi, _y146 in _hs146
+                                    if (hi - lo) >= _w146 * 0.8})
+                    _cols146 = len({round(_x146, 1) for lo, hi, _x146 in _vs146
+                                    if (hi - lo) >= _h146 * 0.8})
+            except Exception:
+                _rows146 = _cols146 = 0
+            _r146_rows_cache[_bn146] = (_rows146, _cols146)
+            return _rows146, _cols146
+
+        def _block_is_content_146(c):
+            """R146：块参照候选的「页面结构」否决（True = 判为内容块）。"""
+            _bn146 = c.get('block_name') or ''
+            if not _bn146:
+                return False
+            # A 匿名包装块（R131 口径 + A$C 命名族）
+            if (_R146_ANON and _ANON_AC_RE.match(_bn146)
+                    and c.get('rel_area_ratio', 0) < 0.5
+                    and not _block_has_text(_bn146)):
+                log_debug(f"  [R146·匿名包装块] 块 {_bn146}"
+                          f"（{c['width']:.0f}×{c['height']:.0f}，{c['layout']}，"
+                          f"rel {c.get('rel_area_ratio', 0):.2%}）块内递归零文字"
+                          f" → 包装的是图形内容，不是出图页")
+                return True
+            # B 表格块（贯穿横线 + 贯穿竖线 双向成立才是网格）
+            if _R146_TABLE:
+                _rows146, _cols146 = _block_grid_146(_bn146)
+                if _rows146 >= R146_TABLE_ROWS and _cols146 >= R146_TABLE_COLS:
+                    log_debug(f"  [R146·表格块] 块 {_bn146}"
+                              f"（{c['width']:.0f}×{c['height']:.0f}，{c['layout']}）"
+                              f"贯穿横线 {_rows146} 条 / 贯穿竖线 {_cols146} 条"
+                              f" → 是 {_rows146 - 1} 行表格，不是出图页")
+                    return True
+            return False
+
         def is_frame_like(c):
-            """特征判定（_frame_like_pass）+ R144 空框否决。
+            """特征判定（_frame_like_pass）+ R146 块结构否决 + R144 空框否决。
 
             空框否决放在**这里**而不是原函数内部，是为了把 O(N) 的 layout 实体
             统计只跑到"即将放行"的候选上——被其它判据拒掉的候选根本不用算。
@@ -6592,6 +6751,10 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             """
             if not _frame_like_pass(c):
                 return False
+            # R146：块参照候选的页面结构指纹（表格 / 无边框空壳 → 内容块）
+            if c['type'] == '块参照插入' and (_R146_ANON or _R146_TABLE):
+                if _block_is_content_146(c):
+                    return False
             if _R144_EMPTY_BOX and c['type'] == '直线矩形':
                 _n145 = _inner_ent_count_144(c)
                 log_debug(f"  [R144·框内内容] {c['width']:.0f}×{c['height']:.0f}"

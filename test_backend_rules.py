@@ -6952,6 +6952,12 @@ if _R125_TARGET:
 
     _r125_full = _r125_tgt_run()
     _r125_off = _r125_tgt_run(_R125_OFF)
+    # R146 判据 A（A$C 匿名包装块）与本图 4 个集水坑符号块 `A$C26192383`
+    #   完全重合 —— 回退要复现的是 ROOM_SCALE_ANY 那条开关的语义，故把 R146
+    #   两条判据一并关掉（详见紧随其后的分层断言）。
+    _r125_off_all = _r125_tgt_run({'FRAME_PARSER_NO_ROOM_SCALE_ANY': '1',
+                                  'FRAME_PARSER_NO_BLOCK_ANON': '1',
+                                  'FRAME_PARSER_NO_BLOCK_TABLE': '1'})
 
     check('R125真实图: 负二层动力干线 → 2 框（1189×841 ×2，全在布局）',
           lambda: _r122_census(_r125_full),
@@ -6961,9 +6967,15 @@ if _R125_TARGET:
           lambda: _r125_full.get('frame_counts_by_layout'),
           lambda got: got == {'布局 "布局"': 2})
 
-    check('R125真实图回退: 关 ROOM_SCALE_ANY → 复现原 bug 6 框（模型空间 4 个 867×1267）',
-          lambda: _r122_census(_r125_off),
+    check('R125真实图回退: 关 ROOM_SCALE_ANY + R146 两判据 → 复现原 bug 6 框（模型空间 4 个 867×1267）',
+          lambda: _r122_census(_r125_off_all),
           lambda got: got == {(1189, 841): 2, (867, 1267): 4})
+
+    # R146 起 `A$C26192383` 这 4 个集水坑符号块被「匿名包装块」判据独立挡住：
+    #   只关 ROOM_SCALE_ANY 时它们不会回来 → 同一处误检有两道独立防线。
+    check('R125×R146 分层: 只关 ROOM_SCALE_ANY 时匿名块判据独立兜住 → 仍 2 框',
+          lambda: _r122_census(_r125_off),
+          lambda got: got == {(1189, 841): 2})
 else:
     print('SKIP  R125 真实图用例（未找到 负二层动力干线.dwg）')
 
@@ -9214,5 +9226,261 @@ if _R145_REAL.exists():
           lambda fc: fc == 2)
 else:
     print('SKIP  R145-⑤⑥ B82-2332.2-09 端到端（未找到文件）')
+
+# ---------- R146：块参照候选的「页面结构」指纹 ----------
+#   报障（XGZ-08铸石砌板散料刮板输送机.dwg 识 2 实际 0，用户口径"实际无图框"）：
+#   图框层 28 个实体全是 PC_MXB_BLOCK 明细行（3780×171、ratio 22，早被比例门槛
+#   剔掉），模型空间压根没有图框。两个内容块却靠条件C 混进来：
+#     ① A$C434A45B3「基本参数表」：块内 24 横 + 9 竖表格线 + 52 条文字，横线在
+#        y=0,104,208,…,2289 上等距满幅铺开 18 条 —— 表格，不是图纸页。
+#     ② A$C2DE2129C 零件剖视图：93 个纯几何实体、递归零文字、rel 34% ——
+#        「AutoCAD 复制/粘贴匿名块包装了一段图形」，正是 R131 的判据；但 R131 的
+#        正则只认 *U/*D/*X 星号前缀（`^\*[A-Z]{1,3}\d+$`），A$C 命名族一直漏在
+#        规则外（本图两个误判块都是这个形态）。
+#   判据 A/B 互补（只作用于块参照插入，各有回退开关）；下列用例逐一钉死。
+#   为什么 ② 不用「贯穿边框跨度」判：报障图 ② 号块最长竖线覆盖块高 92%、只有横线
+#   55%，与「块内两页真拼版」（R116-C 的 841×1188：横 100%/竖 50%）、「块内含嵌套
+#   页框且内容外溢」（R86 的 PLAN_002：横 100%/竖 37%）、「LINE 边框块 98% 宽
+#   63% 高」（R94 对照块）三种真页形态完全重合 —— 任何跨度阈值都会连真页一起
+#   误杀（首版正是这么写的，全量单测一次红 4 条）。
+
+
+def _r146_table_block(doc, name='R146_TBL', w=1242.0, h=2440.0, rows=12):
+    """复现「基本参数表」：外框 + rows-1 条贯穿横线 + 3 条贯穿竖线 + 逐行文字。"""
+    _blk = doc.blocks.new(name)
+    add_closed_rect(_blk, 0.0, 0.0, w, h)          # 闭合矩形边框（过 R58 证据）
+    _step = h / rows
+    for _i in range(1, rows):
+        _blk.add_line((0.0, _i * _step), (w, _i * _step))
+    for _fx in (0.12, 0.26, 0.55):
+        _blk.add_line((w * _fx, 0.0), (w * _fx, h))
+    for _i in range(rows):
+        _blk.add_text('参数%d' % _i, height=h * 0.02).set_placement(
+            (w * 0.05, (_i + 0.3) * _step))
+    return _blk
+
+
+def _r146_anon_block(doc, name='A$C2DE2129C'):
+    """复现「零件剖视图」：AutoCAD 复制/粘贴匿名块（A$C 前缀）+ 递归零文字。"""
+    _blk = doc.blocks.new(name)
+    _blk.add_line((-665.0, 240.0), (150.0, 240.0))     # 743 / 1478 = 50% 块宽
+    _blk.add_line((-610.0, 91.0), (-610.0, 826.0))     # 735 / 735 = 100% 块高
+    _blk.add_line((-557.0, 165.0), (0.0, 165.0))
+    _blk.add_line((-550.0, 240.0), (-550.0, 635.0))
+    _blk.add_line((500.0, 100.0), (813.0, 400.0))      # 斜线
+    _blk.add_circle((300.0, 300.0), 120.0)
+    # 块内一处闭合矩形（R58 那关的"矩形边框证据"，760 ≥ 块长边 1478×50%）+
+    # 735 长竖边（R26 构件证据 ≥ 块长边 30%）—— 复刻报障图里由嵌套子块凑出的
+    # 边框证据，让回退用例真能走到 R146 之外的其他通道。
+    add_closed_rect(_blk, -100.0, 100.0, 760.0, 300.0)
+    return _blk
+
+
+def _build_r146_tables():
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    _r146_table_block(_doc)
+    _msp.add_blockref('R146_TBL', (0.0, 0.0))
+    _msp.add_blockref('R146_TBL', (3000.0, 0.0))
+    return _doc
+
+
+def _build_r146_anon():
+    """报障图的最小复刻：一个大表格块（当 rel 分母）+ 两个 A$C 匿名块。
+
+    **必须带上那个更大的表格块**：判据 A 与 R131 同口径，含「rel < 50%」这条——
+    若图里只有两个同尺寸 A$C 块，它们各自 rel = 100%，判据 A 不成立、也本不该
+    成立（报障图里 A$C2DE2129C 的 rel 是 34%，正因同图还有 1368×2520 的参数表）。
+    表格块本身由判据 B 独立剔掉，不影响 A 的隔离性。
+    """
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    _r146_table_block(_doc, name='R146_BIGTBL')
+    _msp.add_blockref('R146_BIGTBL', (0.0, 0.0))
+    _r146_anon_block(_doc)
+    _msp.add_blockref('A$C2DE2129C', (3000.0, 0.0))
+    _msp.add_blockref('A$C2DE2129C', (6000.0, 0.0))
+    return _doc
+
+
+def _build_r146_anon_two_scale(scale=0.6):
+    """判据 A 的最小隔离夹具：同一个 A$C 块名，一个大实例 + 一个小实例。
+
+    小实例 887×441 的 rel = 0.6² = 36% < 50%，且块内递归零文字 → 判据 A 命中；
+    大实例 rel = 100% 不满足 rel 门槛，留作未受影响的对照。两个实例尺寸不同，
+    也不会触发「同尺寸 ≥2 互证」那条通道 —— 关掉开关后小实例必须原样回来，
+    因果就只落在判据 A 上，不掺表格判据 B。
+    """
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    _r146_anon_block(_doc)
+    _msp.add_blockref('A$C2DE2129C', (0.0, 0.0))
+    _msp.add_blockref('A$C2DE2129C', (4000.0, 0.0),
+                      dxfattribs={'xscale': scale, 'yscale': scale})
+    return _doc
+
+
+def _build_r146_anon_with_text():
+    """守卫：A$C 匿名块**块内带图名图号**（真图框形态）→ 不得误伤。
+
+    小框 rel = 1008000/4080000 = 24.7% < 50%，正好落在判据 A 的 rel 门槛内，
+    唯一把它留在规则外的是「块内有文字」这一条。
+    """
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    _big = _doc.blocks.new('A$C0000001')
+    add_line_rect(_big, 0.0, 0.0, 2400.0, 1700.0)
+    add_line_rect(_big, 40.0, 30.0, 2320.0, 1620.0)
+    _big.add_text('PLAN', height=60).set_placement((200.0, 200.0))
+    _small = _doc.blocks.new('A$C0000002')
+    add_line_rect(_small, 0.0, 0.0, 1200.0, 840.0)
+    add_line_rect(_small, 25.0, 20.0, 1150.0, 790.0)
+    _small.add_text('DETAIL', height=30).set_placement((100.0, 100.0))
+    _msp.add_blockref('A$C0000001', (0.0, 0.0))
+    _msp.add_blockref('A$C0000002', (4000.0, 0.0))
+    return _doc
+
+
+def _build_r146_shell():
+    """守卫：零文字「纯边框壳」图框块（非圆减速器装配 *Paper_Space0 形态）。"""
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    _blk = _doc.blocks.new('R146_SHELL_A0')
+    add_line_rect(_blk, 0.0, 0.0, 1189.0, 841.0)        # 外框
+    add_line_rect(_blk, 25.0, 10.0, 1154.0, 821.0)      # 内框（按比例内缩）
+    # 右下角图签框：只在角落分格，一条都不贯穿全幅
+    _blk.add_line((889.0, 10.0), (889.0, 191.0))
+    _blk.add_line((889.0, 191.0), (1179.0, 191.0))
+    _blk.add_line((1000.0, 10.0), (1000.0, 191.0))
+    _blk.add_line((889.0, 60.0), (1179.0, 60.0))
+    _blk.add_line((889.0, 120.0), (1179.0, 120.0))
+    _msp.add_blockref('R146_SHELL_A0', (0.0, 0.0))
+    return _doc
+
+
+def _build_r146_frame_rows():
+    """守卫：带文字 + 5 条贯穿明细线的真图框块（贯穿横线 6 < 阈值 10）。"""
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    _blk = _doc.blocks.new('R146_FRAME_ROWS')
+    add_line_rect(_blk, 0.0, 0.0, 841.0, 594.0)
+    add_line_rect(_blk, 25.0, 10.0, 791.0, 574.0)
+    for _y in (150.0, 210.0, 270.0, 330.0, 390.0):
+        _blk.add_line((25.0, _y), (816.0, _y))
+    _blk.add_text('名称', height=12).set_placement((40.0, 40.0))
+    _blk.add_text('图号', height=12).set_placement((40.0, 100.0))
+    _msp.add_blockref('R146_FRAME_ROWS', (0.0, 0.0))
+    return _doc
+
+
+def _build_r146_table_plus_frame():
+    """整合：表格块 ×2 与真页框同图 → 表格被剔，页框留下。"""
+    _doc = _build_r146_tables()
+    _msp = _doc.modelspace()
+    add_line_rect(_msp, 0.0, 4000.0, 841.0, 594.0)
+    add_line_rect(_msp, 20.0, 4020.0, 801.0, 554.0)
+    add_page_text(_msp, 0.0, 4000.0, 841.0, 594.0, 'PLAN')
+    return _doc
+
+
+def _r146_frames(builder, **switches):
+    import os as _os
+    _saved = {k: _os.environ.get(k) for k in switches}
+    for _k, _v in switches.items():
+        _os.environ[_k] = _v
+    try:
+        try:
+            _r = parse(to_bytes(builder()))
+            return sorted((round(c['width']), round(c['height']))
+                          for c in _r['candidates'])
+        except RuntimeError as _e:
+            return 'NOFRAME' if '未检测到图框' in str(_e) else 'ERR:%s' % str(_e)[:40]
+    finally:
+        for _k, _v in _saved.items():
+            if _v is None:
+                _os.environ.pop(_k, None)
+            else:
+                _os.environ[_k] = _v
+
+
+# R146-① 表格块不得当图框（贯穿横线 13 条 → 页面被切成十几条行带）
+check('R146-① 基本参数表块 ×2 必须被剔（贯穿横线 13 条 → 表格不是出图页）',
+      lambda: _r146_frames(_build_r146_tables),
+      lambda got: got == 'NOFRAME')
+
+# R146-② 因果钉死：关掉表格判据 → 两个 1242×2440 立刻回来（复现报障形态）
+check('R146-② 开关回退：NO_BLOCK_TABLE=1 时 1242×2440 ×2 回归（钉死因果）',
+      lambda: _r146_frames(_build_r146_tables, FRAME_PARSER_NO_BLOCK_TABLE='1'),
+      lambda got: got == [(1242, 2440), (1242, 2440)])
+
+# R146-③ A$C 匿名包装块（零文字）不得当图框
+check('R146-③ A$C 匿名包装块 ×2 必须被剔（零文字 + rel<50% → 包的是图形内容）',
+      lambda: _r146_frames(_build_r146_anon),
+      lambda got: got == 'NOFRAME')
+
+# R146-④ 判据 A 的最小隔离：同块名一大一小，小实例 rel 36% 被剔、大实例留作对照
+check('R146-④ 同块两尺寸：小实例 887×441（rel 36%）被剔，大实例 1478×735 留下',
+      lambda: _r146_frames(_build_r146_anon_two_scale),
+      lambda got: got == [(1478, 735)])
+
+# R146-④b 因果钉死：关掉匿名块判据 → 小实例原样回来（判据 A 是唯一拦截者）
+check('R146-④b 开关回退：NO_BLOCK_ANON=1 时 887×441 回归（钉死因果）',
+      lambda: _r146_frames(_build_r146_anon_two_scale,
+                           FRAME_PARSER_NO_BLOCK_ANON='1'),
+      lambda got: got == [(887, 441), (1478, 735)])
+
+# R146-⑤ 守卫：A$C 匿名块但块内有图名图号（真图框）→ rel 24.7% 也照旧入选
+check('R146-⑤ 守卫：A$C 匿名块带图名图号时照旧入选（rel 24.7% 不得误伤）',
+      lambda: _r146_frames(_build_r146_anon_with_text),
+      lambda got: got == [(1200, 840), (2400, 1700)])
+
+# R146-⑥ 守卫：零文字「纯边框壳」A0 图框块（非 A$C 命名）—— 不得误伤
+check('R146-⑥ 守卫：零文字纯边框壳 A0（1189×841）照旧入选（匿名判据只管 A$C 族）',
+      lambda: _r146_frames(_build_r146_shell),
+      lambda got: got == [(1189, 841)])
+
+# R146-⑦ 守卫：带文字 + 5 条贯穿明细线的真图框块 —— 贯穿横线 6 < 阈值 10
+check('R146-⑦ 守卫：带文字+5 条贯穿明细线的图框块照旧入选（表格判据不得误伤）',
+      lambda: _r146_frames(_build_r146_frame_rows),
+      lambda got: got == [(841, 594)])
+
+# R146-⑧ 整合：表格与真页框同图 → 只留页框
+check('R146-⑧ 整合：表格块 ×2 + 真页框同图 → 只留 841×594 页框',
+      lambda: _r146_frames(_build_r146_table_plus_frame),
+      lambda got: got == [(841, 594)])
+
+_R146_REAL = Path(r'E:/皮带输送机/XGZ-08铸石砌板散料刮板输送机/XGZ-08铸石砌板散料刮板输送机.dwg')
+if _R146_REAL.exists():
+    def _r146_real_fc(**switches):
+        import os as _os
+        _saved = {k: _os.environ.get(k) for k in switches}
+        for _k, _v in switches.items():
+            _os.environ[_k] = _v
+        try:
+            # 必须传真实文件名（.dwg）走 DWG→DXF 转换路径
+            _r = get_bounding_box_from_bytes(_R146_REAL.read_bytes(), _R146_REAL.name,
+                                             'polyline', 'mm', 'smart')
+            return _r['frame_count']
+        except RuntimeError as _e:
+            return 0 if '未检测到图框' in str(_e) else 'ERR:%s' % str(_e)[:40]
+        finally:
+            for _k, _v in _saved.items():
+                if _v is None:
+                    _os.environ.pop(_k, None)
+                else:
+                    _os.environ[_k] = _v
+
+    # R146-⑨ 报障图端到端：用户口径"实际无图框"，必须 0 框。
+    check('R146-⑨ XGZ-08铸石砌板散料刮板输送机 端到端 0 框（参数表/剖视块不得算图框）',
+          _r146_real_fc,
+          lambda fc: fc == 0)
+
+    # R146-⑩ 因果钉死：两条判据全部回退 → 回到报障时的 2 框。
+    check('R146-⑩ 开关回退：两条判据全关时 XGZ-08 回到 2 框（复现报障）',
+          lambda: _r146_real_fc(FRAME_PARSER_NO_BLOCK_ANON='1',
+                                FRAME_PARSER_NO_BLOCK_TABLE='1'),
+          lambda fc: fc == 2)
+else:
+    print('SKIP  R146-⑨⑩ XGZ-08 端到端（未找到文件）')
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
