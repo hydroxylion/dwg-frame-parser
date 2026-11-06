@@ -8930,4 +8930,122 @@ if _R143_REAL.exists():
 else:
     print('SKIP  R143-④⑤ 爬坡线端到端（未找到 爬坡线.dwg）')
 
+# ---------- R144：框内零实体 = 空框，不是出图页 ----------
+#   报障（B82-2332.2-03.dwg 识 2 实际 0，用户口径"都是零碎的机械图"）：模型空间
+#   有 2 个 572×425 直线矩形上下紧贴、共享一条边，四边框线全是机械视图的框架线
+#   （上下边各长 1061 = 框宽 572 的 1.85 倍，竖线贯穿上下两个视图区），框内
+#   **一个实体都没有** —— 只是几条线偶然围出的空隙。它们靠条件C 混进候选
+#   （rel 21.8% ≥ 10%、ratio 1.3459 ≥ 直线矩形下限 1.10），又因同尺寸 ×2
+#   互相作证躲过了孤证复核（同图的 978×507 / 440×395 是孤证，已被剔）。
+#   判据：框内「完全内含」（±1 容差）实体数为 0 → 不是出图页。真图框最空的
+#   模板也带内框双线（内框四边完全内含 → ≥4）；基线代表图实测最小值为
+#   2 / 5 / 11 / 84 / 316（2.8米皮带线 / 美立方 / 爬坡线 / 春风公寓2 /
+#   刮板输送机16），本图 0，边界余量充足。
+
+
+def _build_r144_empty_box(inner_frame=False):
+    """复现报障图的「空框」形态：572×425 ×2 上下紧贴，四边全是跨越框外的借用线。
+
+    横线 y=0/425/850 各长 1060（框宽 572 的 1.85 倍），竖线 x=0/572 贯穿上下
+    两个视图区（长 1338）——四条边都不是为这个框画的，框内零实体。
+    inner_frame=True 时给每个框补一个按比例内缩的内框（图框的双线画法，
+    单边内缩 22 = 4.0%×高 / 5.2%×宽，落在条件J 的 1%~20% 口径内）。
+    """
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    # 三条横向"借用"长线：每条长 1060（框宽 572 的 1.85 倍），左右各伸出 244
+    for _yy in (0.0, 425.0, 850.0):
+        _msp.add_line((-244.0, _yy), (816.0, _yy))
+    # 竖线每段长 428 ≈ 框高、只向下超出 3 —— 与报障图实测（428/493）同形。
+    #   刻意不贯穿：竖线若也贯穿，四边全贯穿会触发 is_grid_cell（交叉格子），
+    #   在 P1 层就被剔掉，用例就测不到空框判据了。
+    for _xx in (0.0, 572.0):
+        _msp.add_line((_xx, -3.0), (_xx, 425.0))
+        _msp.add_line((_xx, 422.0), (_xx, 850.0))
+    if inner_frame:
+        add_line_rect(_msp, 22.0, 22.0, 528.0, 381.0)
+        add_line_rect(_msp, 22.0, 447.0, 528.0, 381.0)
+    # 参照真页框（A1 841×594 + 内框 + 图名）：保证整图有图框，parse 不抛错，
+    #   同时给同尺寸计数/主导比例提供真实基准
+    add_line_rect(_msp, 3000.0, 0.0, 841.0, 594.0)
+    add_line_rect(_msp, 3020.0, 20.0, 801.0, 554.0)
+    _msp.add_text('PLAN', height=15).set_placement((3100.0, 300.0))
+    return _doc
+
+
+def _r144_frames(inner_frame=False, **switches):
+    import os as _os
+    _saved = {k: _os.environ.get(k) for k in switches}
+    for _k, _v in switches.items():
+        _os.environ[_k] = _v
+    try:
+        _r = parse(to_bytes(_build_r144_empty_box(inner_frame)))
+        return sorted((round(c['width']), round(c['height'])) for c in _r['candidates'])
+    finally:
+        for _k, _v in _saved.items():
+            if _v is None:
+                _os.environ.pop(_k, None)
+            else:
+                _os.environ[_k] = _v
+
+
+# R144-① 空框必须被剔：两个 572×425 同尺寸互证也救不了。
+check('R144-① 空框 572×425 ×2（同尺寸互证）必须被剔，只剩参照页框 841×594',
+      lambda: _r144_frames(),
+      lambda got: got == [(841, 594)])
+
+# R144-② 因果钉死：关掉空框否决 → 572×425 ×2 立刻回来。
+check('R144-② 开关回退：NO_EMPTY_BOX=1 时 572×425 ×2 回归（钉死因果）',
+      lambda: _r144_frames(FRAME_PARSER_NO_EMPTY_BOX='1'),
+      lambda got: got.count((572, 425)) == 2 and (841, 594) in got)
+
+# R144-③ 守卫：同尺寸 572×425 但带内框双线（真图框画法）→ 不得误伤。
+check('R144-③ 守卫：572×425 带内框双线时照旧入选（空框判据不得误伤页框）',
+      lambda: _r144_frames(inner_frame=True),
+      lambda got: got.count((572, 425)) == 2 and (841, 594) in got)
+
+_R144_REAL = Path(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）/B82-2332.2-03.dwg')
+if _R144_REAL.exists():
+    def _r144_real(**switches):
+        import os as _os
+        _saved = {k: _os.environ.get(k) for k in switches}
+        for _k, _v in switches.items():
+            _os.environ[_k] = _v
+        try:
+            # 必须传真实文件名（.dwg）走 DWG→DXF 转换路径
+            _r = get_bounding_box_from_bytes(_R144_REAL.read_bytes(), _R144_REAL.name,
+                                             'polyline', 'mm', 'smart')
+            return _r['frame_count']
+        finally:
+            for _k, _v in _saved.items():
+                if _v is None:
+                    _os.environ.pop(_k, None)
+                else:
+                    _os.environ[_k] = _v
+
+    # R144-④ 报障图端到端：用户口径"实际应无图框"，必须 0 框。
+    #   注意报障图除了 2 个 572×425，还有 2 个 425×167 也是空框，一并被剔。
+    def _r144_real_fc():
+        try:
+            return _r144_real()
+        except RuntimeError as _e:
+            return 0 if '未检测到图框' in str(_e) else 'ERR:%s' % str(_e)[:40]
+
+    check('R144-④ B82-2332.2-03 端到端 0 框（2 个空框机械图不得算图框）',
+          _r144_real_fc,
+          lambda fc: fc == 0)
+
+    # R144-⑤ 因果钉死：关掉空框否决 → 回到报障时的 2 框。
+    def _r144_real_off():
+        try:
+            return _r144_real(FRAME_PARSER_NO_EMPTY_BOX='1')
+        except RuntimeError as _e:
+            return 0 if '未检测到图框' in str(_e) else 'ERR:%s' % str(_e)[:40]
+
+    check('R144-⑤ 开关回退：NO_EMPTY_BOX=1 时 B82-2332.2-03 回到 2（复现报障）',
+          _r144_real_off,
+          lambda fc: fc == 2)
+else:
+    print('SKIP  R144-④⑤ B82-2332.2-03 端到端（未找到文件）')
+
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')

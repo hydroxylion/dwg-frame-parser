@@ -6089,7 +6089,98 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 _anon_text_cache[_bn] = _scan_block_text_len(_bn, 0, {_bn})
             return _anon_text_cache[_bn]
 
-        def is_frame_like(c):
+        # ---------- R144：框内零实体 = 空框，不是出图页 ----------
+        #   现场（B82-2332.2-03.dwg 识 2 实际 0，用户口径"都是零碎的机械图"）：
+        #   模型空间 2 个 572×425 直线矩形上下紧贴、共享一条边（y=3967 是
+        #   `3中心线层` 上长 1132 的中心线），四边框线全是机械视图的框架线
+        #   （上下边 y=4392 / 3542 各长 1061，比框宽 572 长出 85%，是跨越框外
+        #   的整段轮廓线被"借用"当边）→ 框内**一个实体都没有**，只是几条线
+        #   偶然围出的空隙。它们靠条件C 混进来（rel 21.8% ≥ 10%、ratio 1.3459
+        #   ≥ 直线矩形下限 1.10），又因**同尺寸 ×2 互相作证**躲过孤证复核
+        #   （同图的 978×507 / 440×395 是孤证，已被剔）——「同尺寸互证」这条
+        #   在真套图里成立（同模板多页），但机械图的对称分区也会同尺寸。
+        #   判据：候选框内「完全内含」（±1 容差）的实体数为 0 → 不是页面。
+        #   为什么不会误伤：真图框是"出图页"，页内必有东西——最空的模板也带
+        #   内框（双线画法，内框四边完全内含 → ≥4）。实测基线代表图入选图框的
+        #   最小内含实体数为 2 / 5 / 11 / 84 / 316（2.8米皮带线 / 美立方 /
+        #   爬坡线 / 春风公寓2 / 刮板输送机16），本图为 0，边界余量充足。
+        #   开关：FRAME_PARSER_NO_EMPTY_BOX=1 回退。
+        _R144_EMPTY_BOX = os.environ.get('FRAME_PARSER_NO_EMPTY_BOX') != '1'
+        _r144_bbs_cache = {}
+
+        def _inner_ent_count_144(c):
+            """候选框内「完全内含」的实体数（按 layout 缓存实体 bbox，O(N) 一次）。"""
+            _ln14 = c['layout']
+            if _ln14 in _r144_bbs_cache:
+                _bbs14 = _r144_bbs_cache[_ln14]
+                if _bbs14 is None:
+                    return -1        # 取不到 layout → 不判（保守放行）
+            else:
+                if _ln14 == '模型空间':
+                    _lay14 = doc.modelspace()
+                else:
+                    # layout 名格式是 `布局 "M03"`（见 _lay_name 构造处）：中文"布局"
+                    #   占 2 字符 + 空格 + 前引号 = 前 4 位，切 `[4:-1]` 得 `M03`。
+                    #   （切错成 `[3:-1]` 得到 `"M03`，get 失败 → 该 layout 全部候选
+                    #   被当成"框内零实体"一票否决 —— R144 首版踩过。）
+                    try:
+                        _nm14 = _ln14
+                        if _nm14.startswith('布局 "'):
+                            _nm14 = _nm14[4:-1]
+                        _lay14 = doc.layouts.get(_nm14)
+                    except Exception:
+                        _lay14 = None
+                if _lay14 is None:
+                    _r144_bbs_cache[_ln14] = None
+                    return -1        # 不判，避免把整个 layout 误判成空框
+                _bbs14 = []
+                try:
+                    for _e14 in _lay14:
+                        _t14 = _e14.dxftype()
+                        if _t14 == 'VIEWPORT':
+                            continue
+                        # 快速路径：LINE 占机械/建筑图实体的 90%+（刮板输送机16 全图
+                        #   66044 条 LINE），直接取端点比走 bbox.extents 快一个量级。
+                        if _t14 == 'LINE':
+                            try:
+                                _s14 = _e14.dxf.start
+                                _d14 = _e14.dxf.end
+                                _bbs14.append((min(_s14.x, _d14.x), min(_s14.y, _d14.y),
+                                               max(_s14.x, _d14.x), max(_s14.y, _d14.y)))
+                            except Exception:
+                                pass
+                            continue
+                        try:
+                            _bb14 = ezdxf_bbox.extents([_e14], fast=True)
+                        except Exception:
+                            continue
+                        if _bb14.has_data:
+                            _bbs14.append((_bb14.extmin.x, _bb14.extmin.y,
+                                           _bb14.extmax.x, _bb14.extmax.y))
+                except Exception:
+                    _r144_bbs_cache[_ln14] = None
+                    return -1
+                _r144_bbs_cache[_ln14] = _bbs14
+            _x114, _y114, _x214, _y214 = c['bbox']
+            _n14 = 0
+            for _bx114, _by114, _bx214, _by214 in _bbs14:
+                # 证据①：实体完全内含于框（外框线若比框长/斜放，包围盒会溢出，靠②兜）
+                if (_bx114 >= _x114 - 1 and _by114 >= _y114 - 1 and
+                        _bx214 <= _x214 + 1 and _by214 <= _y214 + 1):
+                    _n14 += 1
+                    continue
+                # 证据②：实体 bbox 中心点严格落在框内（离边 >1）。斜放图框经旋转
+                #   矫正后候选 bbox 已转正、而实体仍是斜的，包围盒必然溢出框外 ——
+                #   只有中心点还能证明"框里有东西"（用例55 UCS 斜图框就靠这条不被
+                #   误判成空框）。报障图的借用线中心恰落在框边（共享边/边界线），
+                #   离边 ≤1 不计。
+                _cx14 = (_bx114 + _bx214) * 0.5
+                _cy14 = (_by114 + _by214) * 0.5
+                if (_x114 + 1 < _cx14 < _x214 - 1 and _y114 + 1 < _cy14 < _y214 - 1):
+                    _n14 += 1
+            return _n14
+
+        def _frame_like_pass(c):
             if not (FRAME_RATIO_MIN <= c['ratio'] <= FRAME_RATIO_MAX):
                 return False
             # 同 layout 同尺寸「直线矩形」出现次数预统计（条件D 用）：
@@ -6453,6 +6544,24 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                             c['_via'] = 'E'
                             return True
             return False
+
+        def is_frame_like(c):
+            """特征判定（_frame_like_pass）+ R144 空框否决。
+
+            空框否决放在**这里**而不是原函数内部，是为了把 O(N) 的 layout 实体
+            统计只跑到"即将放行"的候选上——被其它判据拒掉的候选根本不用算。
+            语义等价：空框候选原本也会在放行前被否决。
+            """
+            if not _frame_like_pass(c):
+                return False
+            if (_R144_EMPTY_BOX and c['type'] == '直线矩形'
+                    and _inner_ent_count_144(c) == 0):
+                log_debug(f"  [R144·空框] {c['width']:.0f}×{c['height']:.0f}"
+                          f"（{c['layout']}，{c['type']}）框内无任何实体"
+                          f" → 不是出图页")
+                return False
+            return True
+
 
         # R119：不打印图层(plot=0)上的直接几何候选 —— 统一剔除点。
         #   位置很讲究，必须在**下面三件事都算完之后**、又在 frame_like 构造与
