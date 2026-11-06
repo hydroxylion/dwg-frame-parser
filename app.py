@@ -6105,7 +6105,17 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
         #   最小内含实体数为 2 / 5 / 11 / 84 / 316（2.8米皮带线 / 美立方 /
         #   爬坡线 / 春风公寓2 / 刮板输送机16），本图为 0，边界余量充足。
         #   开关：FRAME_PARSER_NO_EMPTY_BOX=1 回退。
+        #   R145 收紧（B82-2332.2-09 识 2 实际 0，同系列零件图）：
+        #     ①「完全内含」的 ±1 **外扩**容差把候选自身的边框线算成内容 → 改内缩；
+        #     ②「中心点在框内」放过了擦边穿过的标注线 → 追加「大半在框内」。
+        #     两条都只在"什么才算框内内容"上收紧，不改 n==0 这个否决条件。
         _R144_EMPTY_BOX = os.environ.get('FRAME_PARSER_NO_EMPTY_BOX') != '1'
+        # R145：判据收紧（① 内含判定内缩、② 要求大半在框内）。
+        #   FRAME_PARSER_EMPTY_BOX_LEGACY=1 → 回退到 R144 口径（A/B 反证用）。
+        _R145_STRICT = os.environ.get('FRAME_PARSER_EMPTY_BOX_LEGACY') != '1'
+        #   再拆一个细粒度开关，让用例能分别钉死两条修法各自的战果：
+        #   FRAME_PARSER_EMPTY_BOX_NO_OVERLAP=1 只关掉证据②的「大半在框内」。
+        _R145_OVERLAP = os.environ.get('FRAME_PARSER_EMPTY_BOX_NO_OVERLAP') != '1'
         _r144_bbs_cache = {}
 
         def _inner_ent_count_144(c):
@@ -6162,11 +6172,24 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                     return -1
                 _r144_bbs_cache[_ln14] = _bbs14
             _x114, _y114, _x214, _y214 = c['bbox']
+            # R145：内含判定的内缩间隙。R144 用 ±1 **外扩**容差，候选自身的边框
+            #   线（恰好等于框宽/框高、贴在框边上）因此被算成"框内内容"——
+            #   等于把框自己当成页面内容。B82-2332.2-09 的两个 492×284 空腔
+            #   各靠自己的 492 长上边线混过 R144（框内其实空无一物）。
+            #   内缩量取短边 0.5%（下限 1.0）：远小于任何真实内框的内缩（图框
+            #   双线 10~25mm），又足以把重合的边框线挡在门外。
+            _m145 = max(1.0, min(_x214 - _x114, _y214 - _y114) * 0.005)
+            _ix145, _iy145 = _x114 + _m145, _y114 + _m145
+            _jx145, _jy145 = _x214 - _m145, _y214 - _m145
             _n14 = 0
             for _bx114, _by114, _bx214, _by214 in _bbs14:
                 # 证据①：实体完全内含于框（外框线若比框长/斜放，包围盒会溢出，靠②兜）
-                if (_bx114 >= _x114 - 1 and _by114 >= _y114 - 1 and
-                        _bx214 <= _x214 + 1 and _by214 <= _y214 + 1):
+                _in145 = ((_bx114 >= _x114 - 1 and _by114 >= _y114 - 1 and
+                           _bx214 <= _x214 + 1 and _by214 <= _y214 + 1)
+                          if not _R145_STRICT else
+                          (_bx114 >= _ix145 and _by114 >= _iy145 and
+                           _bx214 <= _jx145 and _by214 <= _jy145))
+                if _in145:
                     _n14 += 1
                     continue
                 # 证据②：实体 bbox 中心点严格落在框内（离边 >1）。斜放图框经旋转
@@ -6176,8 +6199,23 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
                 #   离边 ≤1 不计。
                 _cx14 = (_bx114 + _bx214) * 0.5
                 _cy14 = (_by114 + _by214) * 0.5
-                if (_x114 + 1 < _cx14 < _x214 - 1 and _y114 + 1 < _cy14 < _y214 - 1):
-                    _n14 += 1
+                if not (_x114 + 1 < _cx14 < _x214 - 1 and _y114 + 1 < _cy14 < _y214 - 1):
+                    continue
+                # R145 证据②追加「大半在框内」：只是**擦边穿过**的线，中心偶然落在
+                #   框内也不代表框里有内容。B82-2332.2-09 框#2 的唯一"内容"是一条
+                #   自左端引出、只 53% 面积伸进框内的标注线（中心离左边框仅 4.3，
+                #   而框高 284）。这是左侧端面视图的标注，不是这个空腔的内容。
+                #   60% 的取值：擦边标注实测 52.8%，斜放页框的内框实测 ≥95%。
+                if _R145_STRICT and _R145_OVERLAP:
+                    _ea145 = ((_bx214 - _bx114) * (_by214 - _by114))
+                    if _ea145 > 0:
+                        _ox145 = min(_bx214, _x214) - max(_bx114, _x114)
+                        _oy145 = min(_by214, _y214) - max(_by114, _y114)
+                        if _ox145 <= 0 or _oy145 <= 0:
+                            continue
+                        if (_ox145 * _oy145) < _ea145 * 0.60:
+                            continue
+                _n14 += 1
             return _n14
 
         def _frame_like_pass(c):
@@ -6554,12 +6592,17 @@ def get_bounding_box_from_bytes(file_bytes, filename, priority='polyline', unit=
             """
             if not _frame_like_pass(c):
                 return False
-            if (_R144_EMPTY_BOX and c['type'] == '直线矩形'
-                    and _inner_ent_count_144(c) == 0):
-                log_debug(f"  [R144·空框] {c['width']:.0f}×{c['height']:.0f}"
-                          f"（{c['layout']}，{c['type']}）框内无任何实体"
-                          f" → 不是出图页")
-                return False
+            if _R144_EMPTY_BOX and c['type'] == '直线矩形':
+                _n145 = _inner_ent_count_144(c)
+                log_debug(f"  [R144·框内内容] {c['width']:.0f}×{c['height']:.0f}"
+                          f"（{c['layout']}）n={_n145}"
+                          f" bbox=({c['bbox'][0]:.1f},{c['bbox'][1]:.1f},"
+                          f"{c['bbox'][2]:.1f},{c['bbox'][3]:.1f})")
+                if _n145 == 0:
+                    log_debug(f"  [R144·空框] {c['width']:.0f}×{c['height']:.0f}"
+                              f"（{c['layout']}，{c['type']}）框内无任何实体"
+                              f" → 不是出图页")
+                    return False
             return True
 
 

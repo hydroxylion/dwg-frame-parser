@@ -41,6 +41,18 @@ def add_line_rect(layout, x, y, w, h):
     layout.add_line((x, y + h), (x, y))
 
 
+def add_page_text(layout, x, y, w, h, s='A'):
+    """给合成图框补一处最小页面内容（一个居中文字）。
+
+    R145 起「空框否决」不再把候选自己的边框线算作框内内容（框不是页），
+    因此纯结构类用例里那种光画四条线、框内空无一物的 fixture 会被判空框。
+    真实页框页内必有图名/图号/标注 —— 补一个 TEXT 即恢复真实性，且 TEXT
+    不会成为图框候选、不改变任何几何结构判定，对被测逻辑零侵扰。
+    """
+    layout.add_text(s, height=max(1.0, min(w, h) * 0.03)).set_placement(
+        (x + w * 0.5, y + h * 0.5))
+
+
 def to_bytes(doc):
     buf = io.StringIO()
     doc.write(buf)
@@ -165,7 +177,9 @@ print(('PASS' if ok else 'FAIL') + '  正方形垃圾边界 (smart)  ->  未检�
 doc = make_doc()
 msp = doc.modelspace()
 add_line_rect(msp, 0, 0, 420, 297)
+add_page_text(msp, 0, 0, 420, 297)
 add_line_rect(msp, 420, 0, 420, 297)
+add_page_text(msp, 420, 0, 420, 297)
 data = to_bytes(doc)
 check('LINE 并排双图框 (smart)', lambda: parse(data),
       lambda r: r['frame_count'] == 2
@@ -176,7 +190,9 @@ check('LINE 并排双图框 (smart)', lambda: parse(data),
 doc = make_doc()
 msp = doc.modelspace()
 add_line_rect(msp, 0, 0, 420, 297)
+add_page_text(msp, 0, 0, 420, 297)
 add_line_rect(msp, 500, 0, 420, 297)
+add_page_text(msp, 500, 0, 420, 297)
 data = to_bytes(doc)
 check('LINE 带缝隙双图框 (smart)', lambda: parse(data),
       lambda r: r['frame_count'] == 2
@@ -206,8 +222,10 @@ check('LINE 图框 + 标题栏干扰 (smart)', lambda: parse(data),
 # ---- 用例 9：模型空间 LINE 图框 + 布局空间 LINE 图框（跨空间计数）----
 doc = make_doc()
 add_line_rect(doc.modelspace(), 0, 0, 841, 594)
+add_page_text(doc.modelspace(), 0, 0, 841, 594)
 layout = doc.layouts.new('线框布局')
 add_line_rect(layout, 0, 0, 594, 420)
+add_page_text(layout, 0, 0, 594, 420)
 data = to_bytes(doc)
 check('LINE 跨空间双图框 (smart)', lambda: parse(data),
       lambda r: r['frame_count'] == 2
@@ -340,6 +358,7 @@ check('P1 残段拼凑假矩形被过滤 (smart)', lambda: parse(data),
 doc = make_doc()
 msp = doc.modelspace()
 add_line_rect(msp, 0, 0, 841, 594)
+add_page_text(msp, 0, 0, 841, 594)
 data = to_bytes(doc)
 check('P1 完整 LINE 四边通过 (smart)', lambda: parse(data),
       lambda r: r['frame_count'] == 1
@@ -389,6 +408,7 @@ doc = make_doc()
 msp = doc.modelspace()
 add_line_rect(msp, 0, 0, 841, 594)
 add_line_rect(msp, 0, 0, 841, 594)
+add_page_text(msp, 0, 0, 841, 594)
 data = to_bytes(doc)
 check('相同 LINE 矩形画2遍 (smart)', lambda: parse(data),
       lambda r: r['frame_count'] == 1
@@ -541,7 +561,9 @@ def build_scaled_sheets_doc(with_stripe):
     doc = make_doc()
     msp = doc.modelspace()
     add_line_rect(msp, 0, 0, 26305, 18450)
+    add_page_text(msp, 0, 0, 26305, 18450)
     add_line_rect(msp, 30000, 0, 26305, 18450)
+    add_page_text(msp, 30000, 0, 26305, 18450)
     sx, sy, sw, sh = 60000, 0, 6576, 4613
     add_line_rect(msp, sx, sy, sw, sh)
     if with_stripe:
@@ -678,6 +700,7 @@ _bw, _bh = 40000, 28000
 for _i in range(2):
     for _j in range(2):
         add_line_rect(msp, _i * _bw, _j * _bh, _bw, _bh)
+        add_page_text(msp, _i * _bw, _j * _bh, _bw, _bh)
 # 目录框（外框闭合多段线 + 内部表格线）
 _cx, _cy = 90000, -30000
 add_closed_rect(msp, _cx, _cy, 19945, 15703)
@@ -874,11 +897,13 @@ doc = make_doc()
 msp = doc.modelspace()
 # 行1 主框A (-100000,0) 84100x59400（4条LINE）
 add_line_rect(msp, -100000, 0, 84100, 59400)
+add_page_text(msp, -100000, 0, 84100, 59400)
 # A 右内侧图签条（J-图框层 LWPOLYLINE 7000x18200）
 msp.add_lwpolyline([(-21600, 300), (-14600, 300), (-14600, 18500), (-21600, 18500)],
                    close=True, dxfattribs={'layer': 'J-图框'})
 # 行2 主框B 错排 (-2070,-2679) 84100x59400（B 左边距 A 图签条中心 16030）
 add_line_rect(msp, -2070, -2679, 84100, 59400)
+add_page_text(msp, -2070, -2679, 84100, 59400)
 data = to_bytes(doc)
 check('附栏外扩: 端到端错排双框 → 105100 + 84100 (smart)',
       lambda: parse(data),
@@ -2361,6 +2386,7 @@ doc = make_doc()
 msp = doc.modelspace()
 for _i in range(3):                                   # 主导尺寸组（确立主导比例）
     add_line_rect(msp, _i * 45000, 0, 40000, 28284)
+    add_page_text(msp, _i * 45000, 0, 40000, 28284)
 for _i, _ox in enumerate((120000, 145000)):           # 条件I 表格页 ×2（互证锚）
     add_closed_rect(msp, _ox, 0, 16820, 29720)
     for _k in range(32):
@@ -2371,6 +2397,7 @@ for _i, _ox in enumerate((120000, 145000)):           # 条件I 表格页 ×2（
         msp.add_line((_xx, 150), (_xx, 29720 - 150))
 add_closed_rect(msp, 400000, 0, 90000, 40000)         # 底图包络（ratio 2.25）
 add_line_rect(msp, 410000, 5000, 40000, 28284)        # 包络内的主导尺寸真框
+add_page_text(msp, 410000, 5000, 40000, 28284)
 add_closed_rect(msp, 410000, 35000, 16820, 29720)     # 孤儿 1（无表格线）
 add_closed_rect(msp, 460000, 35000, 16820, 29720)     # 孤儿 2（无表格线）
 data = to_bytes(doc)
@@ -2494,9 +2521,11 @@ _xs = [266848, 274648, 281845, 289647, 297445, 305248, 313045]
 for _i, _x in enumerate(_xs):                         # 下行 7 个共边分格
     _w = (7803, 7197, 7802, 7798, 7803, 7797, 7803)[_i]
     add_line_rect(msp, _x, 39308, _w, 12992)
+    add_page_text(msp, _x, 39308, _w, 12992)
 for _i, _x in enumerate(_xs[:5]):                     # 上行 5 个共边分格
     _w = (7550, 7197, 7802, 7798, 7803)[_i]
     add_line_rect(msp, _x, 175950, _w, 16000)
+    add_page_text(msp, _x, 175950, _w, 16000)
 add_line_rect(msp, 259295, 79977, 15353, 8490)        # 散块（互证靠下行分格）
 add_line_rect(msp, 259295, 88467, 15353, 7483)
 _pl = msp.add_lwpolyline(                             # TTLB 真图框（豁免守护）
@@ -2516,9 +2545,11 @@ msp2 = doc2.modelspace()
 for _i, _x in enumerate(_xs):
     _w = (7803, 7197, 7802, 7798, 7803, 7797, 7803)[_i]
     add_line_rect(msp2, _x, 39308, _w, 12992)
+    add_page_text(msp2, _x, 39308, _w, 12992)
 for _i, _x in enumerate(_xs[:5]):
     _w = (7550, 7197, 7802, 7798, 7803)[_i]
     add_line_rect(msp2, _x, 175950, _w, 16000)
+    add_page_text(msp2, _x, 175950, _w, 16000)
 data2 = to_bytes(doc2)
 ok = expect_error_no_frame(data2)
 results.append(ok)
@@ -3365,9 +3396,11 @@ def _build_r90(model_kind):
         for _cy in range(2):
             for _cx in range(2):
                 add_line_rect(msp, _cx * 10100, _cy * 7600, 8100, 5600)
+                add_page_text(msp, _cx * 10100, _cy * 7600, 8100, 5600)
     else:
         # 真实图框量级（短边 42050 ≥ 10000）：应按 √2 豁免保住
         add_line_rect(msp, 0, 0, 59400, 42050)
+        add_page_text(msp, 0, 0, 59400, 42050)
     return to_bytes(d)
 
 
@@ -8548,6 +8581,7 @@ def _build_r141_gap_frame(w=1782.0, h=1260.0, gap=2.0, layer=None):
     _msp.add_line((_x0, _y1), (_x1, _y1), dxfattribs=_attr)          # 上边：完整
     _msp.add_line((_x0, _y0 + gap), (_x0, _y1), dxfattribs=_attr)    # 左边：下端短 gap
     _msp.add_line((_x1, _y0), (_x1, _y1), dxfattribs=_attr)          # 右边：完整
+    add_page_text(_msp, _x0, _y0, w, h)     # R145：页内必须有东西
     _r141_board(_msp)
     _doc.layouts.new('布局1')
     return to_bytes(_doc)
@@ -8567,6 +8601,7 @@ def _build_r141_noplot_doc():
     for _seg in (((_x0, _y0), (_x1, _y0)), ((_x0, _y1), (_x1, _y1)),
                  ((_x0, _y0), (_x0, _y1)), ((_x1, _y0), (_x1, _y1))):
         _msp.add_line(_seg[0], _seg[1], dxfattribs={'layer': 'Defpoints'})
+    add_page_text(_msp, _x0, _y0, 1782.0, 1260.0)   # R145：页内必须有东西
     _doc.layouts.new('布局1')
     return to_bytes(_doc)
 
@@ -9047,5 +9082,137 @@ if _R144_REAL.exists():
           lambda fc: fc == 2)
 else:
     print('SKIP  R144-④⑤ B82-2332.2-03 端到端（未找到文件）')
+
+# ---------- R145：候选自身的边框线不是「页面内容」 ----------
+#   报障（B82-2332.2-09.dwg 识 2 实际 0，用户口径"也都是零件图"，与 -03 同系列）：
+#   一张长条零件图，轮廓内部的空腔被分隔成两个左右相邻的 492×284 直线矩形。
+#   两个框**四边都是机械轮廓线**（底边各长 590 比框宽多 98、两侧竖边 352 比框高
+#   多 68、中间共享边是 `3中心线层` 长 472 的中心线），框内**空无一物**。
+#   它们靠条件C 进来（rel 100% —— 它俩就是全图最大候选；ratio 1.7324 ≥ 1.10）。
+#
+#   R144 的空框判据为什么没拦住？两个漏洞：
+#     ① 「完全内含」用了 ±1 **外扩**容差 → 候选自己的上边线正好等于框宽 492，
+#        贴在框边上被算成"框内内容"（n=1）。等于把框自己当成页面内容。
+#     ② 「中心点在框内」太宽 → 框#2 唯一的"内容"是一条自左侧端面视图引出的
+#        标注线，只有 52.8% 的面积伸进框内（中心离左边框仅 4.3，而框高 284），
+#        中心偶然落在框内就算数（n=2）。
+#
+#   R145 改法（都只收紧"什么才算框内内容"，不动 n==0 这个否决条件）：
+#     ① 内含判定改用**内缩**间隙（短边 0.5%，下限 1.0）—— 贴在框边上的自身边框线
+#        不再计数。真实内框双线内缩 10~25mm，远大于该间隙，不受影响。
+#     ② 中心点在框内之外，再要求实体 bbox「大半在框内」（重叠 ≥ 自身面积 60%）——
+#        只是擦边穿过的线不算内容。
+#   新口径下基线代表图的框内内容数最小值：3 / 6 / 12 / 84 / 13 / 90 / 348 / 6532
+#   （2.8米皮带线 / 美立方 / 爬坡线 / 春风公寓2 / 02食堂 / A20125340S-1 /
+#   刮板输送机16 / 滚筒型总装配图），本图 0，分离充分。
+
+
+def _build_r145_hollow_part(inner_frame=False, clip_dim=True):
+    """复现 B82-2332.2-09 的「长条零件空腔」形态。
+
+    两个 492×284 框左右相邻、共享中间的中心线；四条边全部来自跨越框外的机械
+    轮廓线：底边各长 590（多 98）、顶边正好等于框宽 492（R144 被误计的元凶）、
+    两侧竖边长 352（比框高多 68）。框内除自身边框外空无一物。
+    clip_dim=True 时给框#2 补一条「自框外伸进来的标注线」：长 162，只有 89
+    （54.9%）落在框内 —— 复现 R144 证据② 的漏口。
+    inner_frame=True 时给每个框补按比例内缩的内框（图框双线画法，守卫用例）。
+    """
+    _doc = make_doc()
+    _msp = _doc.modelspace()
+    # 底边：两条 590 长线，左右各伸出 98
+    _msp.add_line((-590.0, 0.0), (0.0, 0.0))
+    _msp.add_line((0.0, 0.0), (590.0, 0.0))
+    # 顶边：两条正好等于框宽 492 的分段线
+    _msp.add_line((-492.0, 284.0), (0.0, 284.0))
+    _msp.add_line((0.0, 284.0), (492.0, 284.0))
+    # 竖边：两侧各 352 长（比框高多 68），中间是更长的中心线
+    _msp.add_line((-492.0, 0.0), (-492.0, 352.0))
+    _msp.add_line((492.0, 0.0), (492.0, 352.0))
+    _msp.add_line((0.0, -103.0), (0.0, 370.0))
+    if clip_dim:
+        _msp.add_line((-565.0, 157.0), (-403.0, 157.0))
+    if inner_frame:
+        add_line_rect(_msp, -492.0 + 22.0, 22.0, 448.0, 240.0)
+        add_line_rect(_msp, 22.0, 22.0, 448.0, 240.0)
+    # 参照真页框（A1 841×594 + 内框 + 图名）：保证整图有图框，parse 不抛错
+    add_line_rect(_msp, 3000.0, 0.0, 841.0, 594.0)
+    add_line_rect(_msp, 3020.0, 20.0, 801.0, 554.0)
+    _msp.add_text('PLAN', height=15).set_placement((3100.0, 300.0))
+    return _doc
+
+
+def _r145_frames(inner_frame=False, **switches):
+    import os as _os
+    _saved = {k: _os.environ.get(k) for k in switches}
+    for _k, _v in switches.items():
+        _os.environ[_k] = _v
+    try:
+        _r = parse(to_bytes(_build_r145_hollow_part(inner_frame)))
+        return sorted((round(c['width']), round(c['height'])) for c in _r['candidates'])
+    finally:
+        for _k, _v in _saved.items():
+            if _v is None:
+                _os.environ.pop(_k, None)
+            else:
+                _os.environ[_k] = _v
+
+
+# R145-① 空腔不得成框：自身的 492 长顶边 + 擦边标注线都救不了它。
+check('R145-① 零件空腔 492×284 ×2（自身边框线+擦边标注）必须被剔，只剩参照页框',
+      lambda: _r145_frames(),
+      lambda got: got == [(841, 594)])
+
+# R145-② 因果钉死：回到 R144 口径 → 两个 492×284 立刻回来（复现报障）。
+check('R145-② 开关回退：EMPTY_BOX_LEGACY=1 时 492×284 ×2 回归（钉死因果）',
+      lambda: _r145_frames(FRAME_PARSER_EMPTY_BOX_LEGACY='1'),
+      lambda got: got.count((492, 284)) == 2 and (841, 594) in got)
+
+# R145-③ 守卫：同尺寸但带内框双线（真图框画法）→ 不得误伤。
+check('R145-③ 守卫：492×284 带内框双线时照旧入选（空框判据不得误伤页框）',
+      lambda: _r145_frames(inner_frame=True),
+      lambda got: got.count((492, 284)) == 2 and (841, 594) in got)
+
+# R145-④ 纵深防御：只关掉证据②的「大半在框内」→ 框#1 仍被① 拦（自身顶边不再计数），
+#   框#2 退回孤证复核被拦（框#1 死后它成了 492×284 的孤证）。两道防线任一都够用。
+check('R145-④ 纵深防御：只关 ②（NO_OVERLAP=1）仍 0 框，① + 孤证复核各挡一道',
+      lambda: _r145_frames(FRAME_PARSER_EMPTY_BOX_NO_OVERLAP='1'),
+      lambda got: got == [(841, 594)])
+
+_R145_REAL = Path(r'C:/Users/hui_ou/Desktop/建筑图纸（必须校验）/B82-2332.2-09.dwg')
+if _R145_REAL.exists():
+    def _r145_real(**switches):
+        import os as _os
+        _saved = {k: _os.environ.get(k) for k in switches}
+        for _k, _v in switches.items():
+            _os.environ[_k] = _v
+        try:
+            # 必须传真实文件名（.dwg）走 DWG→DXF 转换路径
+            _r = get_bounding_box_from_bytes(_R145_REAL.read_bytes(), _R145_REAL.name,
+                                             'polyline', 'mm', 'smart')
+            return _r['frame_count']
+        finally:
+            for _k, _v in _saved.items():
+                if _v is None:
+                    _os.environ.pop(_k, None)
+                else:
+                    _os.environ[_k] = _v
+
+    def _r145_real_fc(**switches):
+        try:
+            return _r145_real(**switches)
+        except RuntimeError as _e:
+            return 0 if '未检测到图框' in str(_e) else 'ERR:%s' % str(_e)[:40]
+
+    # R145-⑤ 报障图端到端：用户口径"实际无图框"，必须 0 框。
+    check('R145-⑤ B82-2332.2-09 端到端 0 框（零件空腔不得算图框）',
+          _r145_real_fc,
+          lambda fc: fc == 0)
+
+    # R145-⑥ 因果钉死：全回退 R144 口径 → 回到报障时的 2 框。
+    check('R145-⑥ 开关回退：EMPTY_BOX_LEGACY=1 时 B82-2332.2-09 回到 2（复现报障）',
+          lambda: _r145_real_fc(FRAME_PARSER_EMPTY_BOX_LEGACY='1'),
+          lambda fc: fc == 2)
+else:
+    print('SKIP  R145-⑤⑥ B82-2332.2-09 端到端（未找到文件）')
 
 print(f'\n结果: {sum(results)} 通过, {len(results) - sum(results)} 失败')
